@@ -1,0 +1,174 @@
+PS P:\Python\Bewaesserung\app> gci -Recurse -File -Depth 3 | sort FullName
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\__pycache__
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:32            906 main.cpython-314.pyc
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\api
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:01              0 __init__.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\api\__pycache__
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:12            141 __init__.cpython-314.pyc
+------        14.02.2026     00:12           3549 errors.cpython-314.pyc
+------        14.02.2026     00:12          12834 routes_control.cpython-314.pyc
+------        14.02.2026     00:12           1450 routes_health.cpython-314.pyc
+------        14.02.2026     00:32           1104 routes_history.cpython-314.pyc
+------        14.02.2026     00:12           5733 routes_queue.cpython-314.pyc
+------        14.02.2026     00:12           7535 routes_schedule.cpython-314.pyc
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\api
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        13.02.2026     23:58           1881 errors.py
+------        14.02.2026     00:09           9736 routes_control.py
+------        13.02.2026     23:59            755 routes_health.py
+------        14.02.2026     00:30            645 routes_history.py
+------        13.02.2026     23:59           3143 routes_queue.py
+------        14.02.2026     00:00           4445 routes_schedule.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        11.02.2026     22:59          34454 app.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\core
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:01              0 __init__.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\core\__pycache__
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:12            142 __init__.cpython-314.pyc
+------        14.02.2026     00:12           1172 config.cpython-314.pyc
+------        14.02.2026     00:12           4055 lifecycle.cpython-314.pyc
+------        14.02.2026     00:12           2373 logging.cpython-314.pyc
+------        14.02.2026     00:12           3940 state.cpython-314.pyc
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\core
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        13.02.2026     23:53            653 config.py
+------        13.02.2026     23:57           2409 lifecycle.py
+------        13.02.2026     23:54           1265 logging.py
+------        13.02.2026     23:53           2223 state.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\data
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:33           3304 history.json
+------        14.02.2026     00:22            108 queue.json
+------        14.02.2026     00:14           1992 schedules.json
+------        14.02.2026     00:32            323 settings.json
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\logs
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:34        6920518 irrigation.jsonl
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:32           1203 main.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\models
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:01              0 __init__.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\models\__pycache__
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:12            144 __init__.cpython-314.pyc
+------        14.02.2026     00:12           2693 requests.cpython-314.pyc
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\models
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        13.02.2026     23:54            815 requests.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        13.02.2026     17:37           1526 requirements.txt
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\services
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:01              0 __init__.py
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\services\__pycache__
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        14.02.2026     00:12            146 __init__.cpython-314.pyc
+------        14.02.2026     00:12          10156 engine.cpython-314.pyc
+------        14.02.2026     00:12          17483 persistence.cpython-314.pyc
+------        14.02.2026     00:12           6129 scheduler.cpython-314.pyc
+------        14.02.2026     00:12           5173 timer.cpython-314.pyc
+
+
+    Verzeichnis: P:\Python\Bewaesserung\app\services
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+------        13.02.2026     23:55           6530 engine.py
+------        13.02.2026     23:57          10018 persistence.py
+------        13.02.2026     23:56           5279 scheduler.py
+------        13.02.2026     23:56           4241 timer.py

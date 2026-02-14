@@ -1,0 +1,77 @@
+import threading
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+from core.state import state, state_lock, shutdown_event, threads
+from core.logging import log_event, logger
+from core.config import DEFAULT_PARALLEL_ENABLED, MAX_CONCURRENT_VALVES
+
+from services.persistence import (
+    load_settings_from_disk, load_schedules_from_disk, load_queue_from_disk, load_history_from_disk,
+    save_schedules_to_disk, save_queue_to_disk, save_history_to_disk,
+)
+from services.timer import timer_loop
+from services.scheduler import scheduler_loop
+from services.persistence import persistence_loop
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP
+    with state_lock:
+        state.queue = state.queue or []
+        state.schedules = state.schedules or []
+        state.run_history = state.run_history or []
+        state.active_runs = state.active_runs or {}
+
+        state.parallel_enabled = DEFAULT_PARALLEL_ENABLED
+        state.max_concurrent_valves = MAX_CONCURRENT_VALVES
+
+        state.running_zone = None
+        state.end_time = 0.0
+        state.paused = False
+        state.remaining_s = 0
+
+    load_settings_from_disk()
+    load_schedules_from_disk()
+    load_queue_from_disk()
+    load_history_from_disk()
+
+    shutdown_event.clear()
+    threads.clear()
+
+    for fn, name in [(timer_loop, "timer_loop"), (scheduler_loop, "scheduler_loop"), (persistence_loop, "persistence_loop")]:
+        th = threading.Thread(target=fn, daemon=True, name=name)
+        th.start()
+        threads.append(th)
+
+    log_event("service_start", source="system", version="v1", persistence=True)
+
+    yield
+
+    # SHUTDOWN
+    shutdown_event.set()
+
+    try:
+        with state_lock:
+            do_sched = bool(state.schedules_dirty)
+            do_queue = bool(state.queue_dirty)
+            do_hist = bool(state.history_dirty)
+
+        if do_sched:
+            save_schedules_to_disk()
+        if do_queue:
+            save_queue_to_disk()
+        if do_hist:
+            save_history_to_disk()
+
+    except Exception:
+        logger.exception("shutdown flush failed")
+        log_event("shutdown_flush_error", level="error", source="system")
+
+    for th in threads:
+        try:
+            th.join(timeout=2.0)
+        except Exception:
+            pass
+
+    log_event("service_stop", source="system")
