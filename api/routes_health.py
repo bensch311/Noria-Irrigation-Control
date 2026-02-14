@@ -11,6 +11,9 @@ def health():
     with state_lock:
         running = sorted(list((state.active_runs or {}).keys()))
         qlen = len(state.queue or [])
+        from services.valve_driver import get_valve_driver
+        driver_name = get_valve_driver().name
+
         return {
             "ok": True,
             "service": "irrigation",
@@ -20,4 +23,5 @@ def health():
             "queue_length": qlen,
             "parallel_enabled": bool(getattr(state, "parallel_enabled", False)),
             "max_concurrent_valves": int(getattr(state, "max_concurrent_valves", 1)),
+            "valve_driver": driver_name,
         }

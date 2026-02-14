@@ -134,6 +134,10 @@ def start_queue_item(item: QueueItem):
     )
 
 def engine_status_payload_locked() -> dict:
+    # lazy import: verhindert unnötige Import-Ketten beim Modul-Import
+    from services.valve_driver import get_valve_driver
+    driver_name = get_valve_driver().name
+
     q = state.queue or []
     schedules_count = len(state.schedules or [])
     automation_enabled = getattr(state, "automation_enabled", True)
@@ -152,6 +156,8 @@ def engine_status_payload_locked() -> dict:
             "max_concurrent_valves": state.max_concurrent_valves,
             "running_zones": sorted(list((state.active_runs or {}).keys())),
             "active_runs": _active_runs_snapshot_locked(),
+            "valve_driver": driver_name,
+
         }
 
     if state.paused:
@@ -175,6 +181,8 @@ def engine_status_payload_locked() -> dict:
         "max_concurrent_valves": state.max_concurrent_valves,
         "running_zones": sorted(list((state.active_runs or {}).keys())),
         "active_runs": _active_runs_snapshot_locked(),
+        "valve_driver": driver_name,
+
     }
 
 # Exports (für andere services/api)
