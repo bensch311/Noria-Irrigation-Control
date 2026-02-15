@@ -100,6 +100,34 @@ def _start_valve_locked(zone: int, duration_s: int, time_unit: str, source: str)
             raise HTTPException(status_code=409, detail=f"Max. parallele Ventile erreicht ({state.max_concurrent_valves}).")
         raise HTTPException(status_code=409, detail=f"Es läuft bereits Ventil {state.running_zone}!")
 
+    # --- Hardware open MUST succeed before we consider the run active ---
+    from services.valve_driver import get_valve_driver, ValveDriverError  # local import to avoid cycles
+    driver = get_valve_driver()
+    try:
+        driver.open(zone)
+    except ValveDriverError as e:
+        log_event(
+            "valve_hw_error",
+            level="error",
+            source=source,
+            action="open",
+            zone=zone,
+            driver=getattr(driver, "name", "unknown"),
+            error=str(e),
+        )
+        raise HTTPException(status_code=503, detail=f"Hardware Fehler beim Öffnen von Ventil {zone}: {e}")
+    except Exception as e:
+        log_event(
+            "valve_hw_error",
+            level="error",
+            source=source,
+            action="open",
+            zone=zone,
+            driver=getattr(driver, "name", "unknown"),
+            error=repr(e),
+        )
+        raise HTTPException(status_code=503, detail=f"Unerwarteter Hardware Fehler beim Öffnen von Ventil {zone}")
+
     now_m = time.monotonic()
     state.active_runs[zone] = ActiveRun(
         zone=zone,

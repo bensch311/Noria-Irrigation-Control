@@ -69,6 +69,30 @@ def pause_current():
         if state.paused:
             raise HTTPException(status_code=409, detail="Ventile sind bereits pausiert.")
 
+        from services.valve_driver import get_valve_driver, ValveDriverError
+        driver = get_valve_driver()
+
+        failed = []
+        for z in sorted(list(state.active_runs.keys())):
+            try:
+                driver.close(z)
+            except Exception as e:
+                failed.append({"zone": z, "error": str(e)})
+
+        if failed:
+            log_event(
+                "valve_hw_error",
+                level="error",
+                source="manual",
+                action="close",
+                zone="multiple",
+                driver=getattr(driver, "name", "unknown"),
+                reason="pause",
+                failed=failed,
+            )
+            raise HTTPException(status_code=503, detail={"message": "Hardware Fehler beim Pausieren", "failed": failed})
+
+
         state.paused = True
         state.queue_state_before_valve_pause = state.queue_state
 
@@ -105,6 +129,34 @@ def resume_current():
 
         if not state.paused:
             raise HTTPException(status_code=409, detail="Ventile sind nicht pausiert.")
+
+        from services.valve_driver import get_valve_driver, ValveDriverError
+        driver = get_valve_driver()
+
+        failed = []
+        # Öffne alle Zonen, die wirklich weiterlaufen sollen
+        for z, ar in state.active_runs.items():
+            if (ar.remaining_s or 0) <= 0:
+                continue
+            try:
+                driver.open(z)
+            except Exception as e:
+                failed.append({"zone": int(z), "error": str(e)})
+
+        if failed:
+            log_event(
+                "valve_hw_error",
+                level="error",
+                source="manual",
+                action="open",
+                zone="multiple",
+                driver=getattr(driver, "name", "unknown"),
+                reason="resume",
+                failed=failed,
+            )
+            # State bleibt pausiert (wir gehen NICHT weiter)
+            raise HTTPException(status_code=503, detail={"message": "Hardware Fehler beim Fortsetzen", "failed": failed})
+
 
         now_m = time.monotonic()
 
@@ -152,14 +204,30 @@ def stop():
             _sync_legacy_single_fields_locked()
             return {"ok": True, "stopped_zone": z}
 
+        from services.valve_driver import get_valve_driver
+        driver = get_valve_driver()
+
         now_m = time.monotonic()
         zones = sorted(list(state.active_runs.keys()))
+        stopped = []
+        failed = []
+
+        # Stop should unpause so the system can recover/retry if needed
+        state.paused = False
 
         for zone in zones:
             ar = state.active_runs.get(zone)
             if not ar:
                 continue
 
+            # 1) Hardware close
+            try:
+                driver.close(zone)
+            except Exception as e:
+                failed.append({"zone": zone, "error": str(e)})
+                continue
+
+            # 2) Only if close succeeded -> compute duration & history & remove run
             paused_total = ar.paused_total_s
             if ar.paused_at:
                 paused_total += (now_m - ar.paused_at)
@@ -174,7 +242,32 @@ def stop():
                 time_unit=ar.time_unit,
             )
 
-        state.active_runs.clear()
+            del state.active_runs[zone]
+            stopped.append(zone)
+
+        # Reset pause bookkeeping regardless
+        state.remaining_s = 0
+        state.queue_state_before_valve_pause = "bereit"
+
+        _sync_legacy_single_fields_locked()
+
+        if failed:
+            log_event(
+                "valve_hw_error",
+                level="error",
+                source="manual",
+                action="close",
+                zone="multiple",
+                driver=getattr(driver, "name", "unknown"),
+                reason="manual_stop",
+                failed=failed,
+                stopped=stopped,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"message": "Nicht alle Ventile konnten gestoppt werden", "stopped": stopped, "failed": failed},
+            )
+
         state.paused = False
         state.remaining_s = 0
         state.queue_state_before_valve_pause = "bereit"
@@ -192,7 +285,7 @@ def stop():
         automation_enabled=state.automation_enabled,
     )
 
-    return {"ok": True, "stopped_zones": zones}
+    return {"ok": True, "stopped_zones": stopped}
 
 
 # ---------------------------

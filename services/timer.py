@@ -1,5 +1,5 @@
 import time
-
+from services.valve_driver import get_valve_driver, ValveDriverError
 from core.state import state, state_lock
 from core.logging import log_event, logger
 from services.engine import (
@@ -68,6 +68,39 @@ def timer_loop():
                     ar = state.active_runs.get(zone)
                     if not ar:
                         continue
+
+                    # --- Hardware close: if it fails, keep the run active and retry soon ---
+                    driver = get_valve_driver()
+                    try:
+                        driver.close(zone)
+                    except ValveDriverError as e:
+                        log_event(
+                            "valve_hw_error",
+                            level="error",
+                            source="system",
+                            action="close",
+                            zone=zone,
+                            driver=getattr(driver, "name", "unknown"),
+                            reason="duration_elapsed",
+                            error=str(e),
+                        )
+                        # Retry close shortly; do NOT remove from active_runs
+                        ar.end_time = now_m + 1.0
+                        continue
+                    except Exception as e:
+                        log_event(
+                            "valve_hw_error",
+                            level="error",
+                            source="system",
+                            action="close",
+                            zone=zone,
+                            driver=getattr(driver, "name", "unknown"),
+                            reason="duration_elapsed",
+                            error=repr(e),
+                        )
+                        ar.end_time = now_m + 1.0
+                        continue
+
 
                     if zone == state.running_zone:
                         actual_s = _calc_actual_run_s_primary(now_m)
