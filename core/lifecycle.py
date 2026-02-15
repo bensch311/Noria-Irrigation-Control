@@ -36,6 +36,38 @@ async def lifespan(app: FastAPI):
     load_queue_from_disk()
     load_history_from_disk()
 
+    # FAIL-SAFE: after a crash/power loss, valves might be physically open.
+    # Always try to close everything on startup (best effort).
+    try:
+        from services.valve_driver import get_valve_driver
+        driver = get_valve_driver()
+        driver.close_all()
+        log_event("failsafe_close_all_startup", source="system", driver=getattr(driver, "name", "unknown"))
+    except Exception as e:
+        logger.exception("failsafe close_all on startup failed")
+        log_event(
+            "failsafe_close_all_startup_failed",
+            level="error",
+            source="system",
+            error=repr(e),
+        )
+
+    # Reset runtime-only state (safety-first). Persisted queue/schedules/history remain.
+    with state_lock:
+        state.active_runs = {}
+        state.running_zone = None
+        state.end_time = 0.0
+        state.paused = False
+        state.remaining_s = 0
+        state.started_at = 0.0
+        state.started_source = "manual"
+        state.started_planned_s = 0
+        state.paused_at = 0.0
+        state.paused_total_s = 0.0
+        state.queue_state = "bereit"
+        state.queue_state_before_valve_pause = "bereit"
+        state.parallel_drain_logged = False
+
     shutdown_event.clear()
     threads.clear()
 
@@ -50,6 +82,21 @@ async def lifespan(app: FastAPI):
 
     # SHUTDOWN
     shutdown_event.set()
+
+    # Best-effort: try to close everything on shutdown as well.
+    try:
+        from services.valve_driver import get_valve_driver
+        driver = get_valve_driver()
+        driver.close_all()
+        log_event("failsafe_close_all_shutdown", source="system", driver=getattr(driver, "name", "unknown"))
+    except Exception as e:
+        logger.exception("failsafe close_all on shutdown failed")
+        log_event(
+            "failsafe_close_all_shutdown_failed",
+            level="error",
+            source="system",
+            error=repr(e),
+        )
 
     try:
         with state_lock:
