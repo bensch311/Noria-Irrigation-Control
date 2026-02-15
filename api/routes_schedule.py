@@ -2,7 +2,6 @@ import uuid
 from fastapi import APIRouter, HTTPException
 
 from core.state import state, state_lock, ScheduleRule
-from core.config import MAX_VALVES
 from core.logging import log_event
 from models.requests import ScheduleAddRequest
 
@@ -33,8 +32,10 @@ def get_schedules():
 
 @router.post("/schedule/add")
 def add_schedule(req: ScheduleAddRequest):
-    if req.zone != 0 and (req.zone < 1 or req.zone > MAX_VALVES):
-        raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{MAX_VALVES} sein.")
+    with state_lock:
+        max_v = int(getattr(state, "max_valves", 1))
+    if req.zone != 0 and (req.zone < 1 or req.zone > max_v):
+        raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{max_v} sein.")
 
     for wd in req.weekdays:
         if wd < 0 or wd > 6:

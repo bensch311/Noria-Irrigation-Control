@@ -29,6 +29,9 @@ def _default_settings_payload() -> dict:
             "MAX_HISTORY_ITEMS": int(MAX_HISTORY_ITEMS),
             "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
             "DEFAULT_PARALLEL_ENABLED": bool(DEFAULT_PARALLEL_ENABLED),
+            "IRRIGATION_VALVE_DRIVER": "sim",
+            "IRRIGATION_RELAY_ACTIVE_LOW": True,
+            "IRRIGATION_GPIO_PINS": {},  # z.B. {"1":17,"2":27,...} (BCM)
         },
         "runtime": {
             "parallel_enabled": bool(DEFAULT_PARALLEL_ENABLED),
@@ -59,6 +62,28 @@ def _validate_settings_payload(payload: dict | None) -> dict:
 
     default_parallel = bool(cfg.get("DEFAULT_PARALLEL_ENABLED", base["config"]["DEFAULT_PARALLEL_ENABLED"]))
 
+    # Driver settings (config)
+    drv = (cfg.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim")
+    drv = str(drv).strip().lower()
+    if drv not in ("sim", "rpi"):
+        drv = "sim"
+
+    active_low = cfg.get("IRRIGATION_RELAY_ACTIVE_LOW", True)
+    active_low = bool(active_low)
+
+    pins_raw = cfg.get("IRRIGATION_GPIO_PINS", {})
+    pins_norm: dict[str, int] = {}
+    if isinstance(pins_raw, dict):
+        for k, v in pins_raw.items():
+            try:
+                z = int(k)
+                p = int(v)
+                if z >= 1:
+                    pins_norm[str(z)] = p
+            except Exception:
+                continue
+
+
     parallel_enabled = bool(rt.get("parallel_enabled", default_parallel))
     max_concurrent = _int(rt.get("max_concurrent_valves", max_conc_default), max_conc_default)
     max_concurrent = max(1, min(max_valves, max_concurrent))
@@ -72,6 +97,9 @@ def _validate_settings_payload(payload: dict | None) -> dict:
             "MAX_HISTORY_ITEMS": max_hist,
             "MAX_CONCURRENT_VALVES": max_conc_default,
             "DEFAULT_PARALLEL_ENABLED": default_parallel,
+            "IRRIGATION_VALVE_DRIVER": drv,
+            "IRRIGATION_RELAY_ACTIVE_LOW": active_low,
+            "IRRIGATION_GPIO_PINS": pins_norm,
         },
         "runtime": {
             "parallel_enabled": parallel_enabled,
@@ -104,7 +132,31 @@ def load_settings_from_disk():
     with state_lock:
         state.parallel_enabled = bool(payload["runtime"]["parallel_enabled"])
         state.max_concurrent_valves = int(payload["runtime"]["max_concurrent_valves"])
+        # config-driven runtime parameters
+        state.max_valves = int(payload["config"]["MAX_VALVES"])
+
+        state.valve_driver_mode = str(payload["config"].get("IRRIGATION_VALVE_DRIVER", "sim")).strip().lower()
+        state.relay_active_low = bool(payload["config"].get("IRRIGATION_RELAY_ACTIVE_LOW", True))
+
+        pins = payload["config"].get("IRRIGATION_GPIO_PINS", {})
+        # normalized as dict[str,int] in validator; keep as dict[int,int] in state
+        pins_by_zone = {}
+        if isinstance(pins, dict):
+            for k, v in pins.items():
+                try:
+                    pins_by_zone[int(k)] = int(v)
+                except Exception:
+                    continue
+        state.gpio_pins_by_zone = pins_by_zone
+        
         _sync_legacy_single_fields_locked()
+    
+    try:
+        from services.valve_driver import reset_valve_driver
+        reset_valve_driver()
+    except Exception:
+        pass
+    
 
 def _serialize_schedule(rule: ScheduleRule) -> dict:
     return {

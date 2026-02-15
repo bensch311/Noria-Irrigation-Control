@@ -31,6 +31,11 @@ def status():
 # ---------------------------
 @router.post("/start")
 def start(req: StartRequest):
+    with state_lock:
+        max_v = int(getattr(state, "max_valves", 1))
+    if req.zone < 1 or req.zone > max_v:
+        raise HTTPException(status_code=400, detail=f"zone muss 1..{max_v} sein.")
+
     if req.duration <= 0:
         raise HTTPException(status_code=400, detail="Die Laufzeit muss > 0 sein!")
     if req.duration > MAX_RUNTIME_S:

@@ -7,9 +7,10 @@ from core.logging import log_event
 from services.engine import _can_start_new_valve_locked, start_queue_item
 
 def _jobs_for_schedule_rule(rule: ScheduleRule) -> list[QueueItem]:
+    max_v = int(getattr(state, "max_valves", MAX_VALVES))
     if rule.zone == 0:
         return [QueueItem(zone=z, duration=rule.duration_s, time_unit=rule.time_unit, source="schedule")
-                for z in range(1, MAX_VALVES + 1)]
+                for z in range(1, max_v + 1)]
     return [QueueItem(zone=rule.zone, duration=rule.duration_s, time_unit=rule.time_unit, source="schedule")]
 
 def scheduler_loop():

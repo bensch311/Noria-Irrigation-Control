@@ -25,6 +25,9 @@ async def lifespan(app: FastAPI):
 
         state.parallel_enabled = DEFAULT_PARALLEL_ENABLED
         state.max_concurrent_valves = MAX_CONCURRENT_VALVES
+        
+        from core.config import MAX_VALVES
+        state.max_valves = int(MAX_VALVES)
 
         state.running_zone = None
         state.end_time = 0.0
