@@ -182,19 +182,26 @@ def get_valve_driver() -> BaseValveDriver:
             return _driver
 
         if mode == "rpi":
-            # pins must exist
             if not pins:
                 raise ValveDriverError("IRRIGATION_GPIO_PINS ist leer/fehlt in settings.json")
 
-            # normalize keys/values to int
             pins_by_zone: Dict[int, int] = {}
             for k, v in pins.items():
-                try:
-                    z = int(k)
-                    p = int(v)
-                    pins_by_zone[z] = p
-                except Exception:
-                    continue
+                z = int(k)
+                p = int(v)
+                pins_by_zone[z] = p
+
+            # NEW: require full coverage 1..max_valves if present in state
+            try:
+                from core.state import state, state_lock
+                with state_lock:
+                    max_valves = int(getattr(state, "max_valves", 1))
+            except Exception:
+                max_valves = 1
+
+            missing = [z for z in range(1, max_valves + 1) if z not in pins_by_zone]
+            if missing:
+                raise ValveDriverError(f"GPIO Pins fehlen für Zonen: {missing}")
 
             _driver = RpiGpioValveDriver(pins_by_zone=pins_by_zone, active_low=active_low)
             log_event("valve_driver_init", source="driver", driver=_driver.name, mode=mode, env_override=bool(env_mode))
