@@ -83,6 +83,30 @@ def _validate_settings_payload(payload: dict | None) -> dict:
             except Exception:
                 continue
 
+    # --- GPIO pin coverage validation ---
+    max_valves = int(cfg.get("MAX_VALVES", 1))
+
+    if drv == "rpi":
+        required_zones = set(range(1, max_valves + 1))
+        defined_zones = set(int(k) for k in pins_norm.keys())
+
+        missing = sorted(list(required_zones - defined_zones))
+
+        if missing:
+            # Sicherheits-Strategie:
+            # 1) Fallback auf sim
+            # 2) Pins leeren (damit kein inkonsistenter Zustand entsteht)
+            drv = "sim"
+            pins_norm = {}
+
+            log_event(
+                "settings_gpio_coverage_invalid",
+                level="error",
+                source="system",
+                missing_zones=missing,
+                max_valves=max_valves,
+                message="IRRIGATION_GPIO_PINS deckt nicht alle Zonen ab; fallback auf sim.",
+            )
 
     parallel_enabled = bool(rt.get("parallel_enabled", default_parallel))
     max_concurrent = _int(rt.get("max_concurrent_valves", max_conc_default), max_conc_default)
