@@ -9,6 +9,10 @@ from core.config import DEFAULT_PARALLEL_ENABLED, MAX_CONCURRENT_VALVES
 from services.persistence import (
     load_settings_from_disk, load_schedules_from_disk, load_queue_from_disk, load_history_from_disk,
     save_schedules_to_disk, save_queue_to_disk, save_history_to_disk,
+    load_device_config_from_disk,
+    load_user_settings_from_disk,
+    load_runtime_state_from_disk,
+    save_runtime_state_to_disk,
 )
 from services.timer import timer_loop
 from services.scheduler import scheduler_loop
@@ -34,7 +38,9 @@ async def lifespan(app: FastAPI):
         state.paused = False
         state.remaining_s = 0
 
-    load_settings_from_disk()
+    load_device_config_from_disk()   # Admin hardware config (read-only)
+    load_user_settings_from_disk()   # user editable settings
+    load_runtime_state_from_disk()   # persisted runtime toggles
     load_schedules_from_disk()
     load_queue_from_disk()
     load_history_from_disk()

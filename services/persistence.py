@@ -1,10 +1,10 @@
 import os
 import json
 from datetime import datetime
-
 from core.state import state, state_lock, QueueItem, ScheduleRule, HistoryItem
 from core.config import (
-    DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE, SETTINGS_FILE,
+    DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE,
+    DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED
 )
 from core.logging import log_event, logger
@@ -16,8 +16,18 @@ def _atomic_write_json(path: str, data: dict):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
-        os.fsync(f.fileno())
+        os.fsync(f.fileno())    
     os.replace(tmp_path, path)
+
+
+def _backup_corrupt_file(path: str):
+    try:
+        ts = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+        os.replace(path, f"{path}.corrupt-{ts}")
+    except Exception:
+        # best effort
+        pass
+
 
 def _default_settings_payload() -> dict:
     return {
@@ -38,6 +48,43 @@ def _default_settings_payload() -> dict:
             "max_concurrent_valves": int(MAX_CONCURRENT_VALVES),
         },
     }
+
+
+def _default_device_config_payload() -> dict:
+    return {
+        "version": 1,
+        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "device": {
+            "MAX_VALVES": int(MAX_VALVES),
+            "IRRIGATION_VALVE_DRIVER": "sim",          # sim | rpi
+            "IRRIGATION_RELAY_ACTIVE_LOW": True,
+            "IRRIGATION_GPIO_PINS": {},                # {"1":17,...} BCM
+        },
+        "hard_limits": {
+            "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
+            "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
+        },
+    }
+
+def _default_user_settings_payload() -> dict:
+    return {
+        "version": 1,
+        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "user": {
+            "MAX_HISTORY_ITEMS": int(MAX_HISTORY_ITEMS),
+        },
+    }
+
+def _default_runtime_state_payload() -> dict:
+    return {
+        "version": 1,
+        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "runtime": {
+            "parallel_enabled": bool(DEFAULT_PARALLEL_ENABLED),
+            "max_concurrent_valves": int(MAX_CONCURRENT_VALVES),
+        },
+    }
+
 
 def _validate_settings_payload(payload: dict | None) -> dict:
     base = _default_settings_payload()
@@ -200,7 +247,169 @@ def load_settings_from_disk():
         reset_valve_driver()
     except Exception:
         pass
-    
+
+
+def load_device_config_from_disk():
+    payload = None
+    if os.path.exists(DEVICE_CONFIG_FILE):
+        try:
+            with open(DEVICE_CONFIG_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            logger.exception("load_device_config_from_disk failed")
+            log_event("device_config_corrupt", level="error", source="system")
+            _backup_corrupt_file(DEVICE_CONFIG_FILE)
+            payload = None
+
+    if not isinstance(payload, dict):
+        payload = _default_device_config_payload()
+        # Template erzeugen, aber nicht “übergriffig” sein – nur wenn Datei fehlt/korrupt war
+        try:
+            _atomic_write_json(DEVICE_CONFIG_FILE, payload)
+            log_event("device_config_created_template", level="warning", source="system")
+        except Exception:
+            logger.exception("device_config template write failed")
+
+    dev = payload.get("device") if isinstance(payload.get("device"), dict) else {}
+    hl = payload.get("hard_limits") if isinstance(payload.get("hard_limits"), dict) else {}
+
+    # normalize
+    def _int(x, default):
+        try: return int(x)
+        except Exception: return default
+
+    max_valves = max(1, _int(dev.get("MAX_VALVES", MAX_VALVES), MAX_VALVES))
+
+    drv = str(dev.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim").strip().lower()
+    if drv not in ("sim", "rpi"):
+        drv = "sim"
+
+    active_low = bool(dev.get("IRRIGATION_RELAY_ACTIVE_LOW", True))
+
+    pins_raw = dev.get("IRRIGATION_GPIO_PINS", {})
+    pins_norm: dict[int, int] = {}
+    if isinstance(pins_raw, dict):
+        for k, v in pins_raw.items():
+            try:
+                z = int(k); p = int(v)
+                if z >= 1:
+                    pins_norm[z] = p
+            except Exception:
+                continue
+
+    # hard limits normalize
+    hard_max_runtime_s = max(1, _int(hl.get("MAX_RUNTIME_S", MAX_RUNTIME_S), MAX_RUNTIME_S))
+    hard_max_conc = max(1, _int(hl.get("MAX_CONCURRENT_VALVES", MAX_CONCURRENT_VALVES), MAX_CONCURRENT_VALVES))
+    hard_max_conc = min(hard_max_conc, max_valves)
+
+    with state_lock:
+        state.max_valves = max_valves
+        state.valve_driver_mode = drv
+        state.relay_active_low = active_low
+        state.gpio_pins_by_zone = pins_norm
+
+        state.hard_max_runtime_s = hard_max_runtime_s
+        state.hard_max_concurrent_valves = hard_max_conc
+
+    # driver may depend on these
+    try:
+        from services.valve_driver import reset_valve_driver
+        reset_valve_driver()
+    except Exception:
+        pass
+
+
+def load_user_settings_from_disk():
+    payload = None
+    if os.path.exists(USER_SETTINGS_FILE):
+        try:
+            with open(USER_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            logger.exception("load_user_settings_from_disk failed")
+            log_event("user_settings_corrupt", level="error", source="system")
+            _backup_corrupt_file(USER_SETTINGS_FILE)
+            payload = None
+
+    if not isinstance(payload, dict):
+        payload = _default_user_settings_payload()
+        try:
+            _atomic_write_json(USER_SETTINGS_FILE, payload)
+            log_event("user_settings_created", level="warning", source="system")
+        except Exception:
+            logger.exception("user_settings write failed")
+
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    try:
+        max_hist = int(user.get("MAX_HISTORY_ITEMS", MAX_HISTORY_ITEMS))
+    except Exception:
+        max_hist = MAX_HISTORY_ITEMS
+    max_hist = max(1, max_hist)
+
+    with state_lock:
+        state.max_history_items = max_hist
+
+
+def save_user_settings_to_disk():
+    with state_lock:
+        max_hist = int(getattr(state, "max_history_items", MAX_HISTORY_ITEMS))
+
+    payload = _default_user_settings_payload()
+    payload["user"]["MAX_HISTORY_ITEMS"] = max_hist
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    _atomic_write_json(USER_SETTINGS_FILE, payload)
+
+
+def load_runtime_state_from_disk():
+    payload = None
+    if os.path.exists(RUNTIME_STATE_FILE):
+        try:
+            with open(RUNTIME_STATE_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            logger.exception("load_runtime_state_from_disk failed")
+            log_event("runtime_state_corrupt", level="error", source="system")
+            _backup_corrupt_file(RUNTIME_STATE_FILE)
+            payload = None
+
+    if not isinstance(payload, dict):
+        payload = _default_runtime_state_payload()
+        try:
+            _atomic_write_json(RUNTIME_STATE_FILE, payload)
+            log_event("runtime_state_created", level="warning", source="system")
+        except Exception:
+            logger.exception("runtime_state write failed")
+
+    rt = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+    parallel_enabled = bool(rt.get("parallel_enabled", DEFAULT_PARALLEL_ENABLED))
+
+    try:
+        max_conc = int(rt.get("max_concurrent_valves", MAX_CONCURRENT_VALVES))
+    except Exception:
+        max_conc = MAX_CONCURRENT_VALVES
+
+    with state_lock:
+        # clamp to current max_valves + hard limit (if present)
+        max_valves = int(getattr(state, "max_valves", MAX_VALVES))
+        hard_max = int(getattr(state, "hard_max_concurrent_valves", MAX_CONCURRENT_VALVES))
+        max_conc = max(1, min(max_valves, min(hard_max, max_conc)))
+
+        state.parallel_enabled = parallel_enabled
+        state.max_concurrent_valves = max_conc
+
+
+def save_runtime_state_to_disk():
+    with state_lock:
+        parallel_enabled = bool(getattr(state, "parallel_enabled", DEFAULT_PARALLEL_ENABLED))
+        max_conc = int(getattr(state, "max_concurrent_valves", MAX_CONCURRENT_VALVES))
+
+    payload = _default_runtime_state_payload()
+    payload["runtime"]["parallel_enabled"] = parallel_enabled
+    payload["runtime"]["max_concurrent_valves"] = max_conc
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    _atomic_write_json(RUNTIME_STATE_FILE, payload)
+
+
 
 def _serialize_schedule(rule: ScheduleRule) -> dict:
     return {

@@ -84,6 +84,19 @@ class RunState:
     max_concurrent_valves: int = MAX_CONCURRENT_VALVES
     parallel_drain_logged: bool = False
 
+    # device/admin config (loaded from device_config.json)
+    max_valves: int = 6
+    valve_driver_mode: str = "sim"
+    relay_active_low: bool = True
+    gpio_pins_by_zone: Dict[int, int] | None = None
+
+    # user settings (user_settings.json)
+    max_history_items: int = 20
+
+    # hard limits (device_config.json)
+    hard_max_runtime_s: int = 60 * 60
+    hard_max_concurrent_valves: int = 2
+    
     active_runs: Dict[int, ActiveRun] | None = None
     run_history: List[HistoryItem] | None = None
 

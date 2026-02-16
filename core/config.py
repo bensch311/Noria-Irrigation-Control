@@ -19,3 +19,10 @@ SCHEDULES_FILE = os.path.join(DATA_DIR, "schedules.json")
 QUEUE_FILE = os.path.join(DATA_DIR, "queue.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+
+DEVICE_CONFIG_FILE = os.path.join(DATA_DIR, "device_config.json")
+USER_SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
+RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
+
+# Optional: Legacy (wenn du settings.json noch existieren lässt)
+LEGACY_SETTINGS_FILE = SETTINGS_FILE
