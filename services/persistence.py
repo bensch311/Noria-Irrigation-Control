@@ -29,27 +29,6 @@ def _backup_corrupt_file(path: str):
         pass
 
 
-def _default_settings_payload() -> dict:
-    return {
-        "version": 1,
-        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
-        "config": {
-            "MAX_VALVES": int(MAX_VALVES),
-            "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
-            "MAX_HISTORY_ITEMS": int(MAX_HISTORY_ITEMS),
-            "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
-            "DEFAULT_PARALLEL_ENABLED": bool(DEFAULT_PARALLEL_ENABLED),
-            "IRRIGATION_VALVE_DRIVER": "sim",
-            "IRRIGATION_RELAY_ACTIVE_LOW": True,
-            "IRRIGATION_GPIO_PINS": {},  # z.B. {"1":17,"2":27,...} (BCM)
-        },
-        "runtime": {
-            "parallel_enabled": bool(DEFAULT_PARALLEL_ENABLED),
-            "max_concurrent_valves": int(MAX_CONCURRENT_VALVES),
-        },
-    }
-
-
 def _default_device_config_payload() -> dict:
     return {
         "version": 1,
@@ -84,169 +63,6 @@ def _default_runtime_state_payload() -> dict:
             "max_concurrent_valves": int(MAX_CONCURRENT_VALVES),
         },
     }
-
-
-def _validate_settings_payload(payload: dict | None) -> dict:
-    base = _default_settings_payload()
-    if not isinstance(payload, dict):
-        return base
-
-    cfg = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    rt = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
-
-    def _int(x, default):
-        try:
-            return int(x)
-        except Exception:
-            return default
-
-    max_valves = max(1, _int(cfg.get("MAX_VALVES", base["config"]["MAX_VALVES"]), base["config"]["MAX_VALVES"]))
-    max_runtime_s = max(1, _int(cfg.get("MAX_RUNTIME_S", base["config"]["MAX_RUNTIME_S"]), base["config"]["MAX_RUNTIME_S"]))
-    max_hist = max(1, _int(cfg.get("MAX_HISTORY_ITEMS", base["config"]["MAX_HISTORY_ITEMS"]), base["config"]["MAX_HISTORY_ITEMS"]))
-
-    max_conc_default = _int(cfg.get("MAX_CONCURRENT_VALVES", base["config"]["MAX_CONCURRENT_VALVES"]), base["config"]["MAX_CONCURRENT_VALVES"])
-    max_conc_default = max(1, min(max_valves, max_conc_default))
-
-    default_parallel = bool(cfg.get("DEFAULT_PARALLEL_ENABLED", base["config"]["DEFAULT_PARALLEL_ENABLED"]))
-
-    # Driver settings (config)
-    drv = (cfg.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim")
-    drv = str(drv).strip().lower()
-    if drv not in ("sim", "rpi"):
-        drv = "sim"
-
-    active_low = cfg.get("IRRIGATION_RELAY_ACTIVE_LOW", True)
-    active_low = bool(active_low)
-
-    pins_raw = cfg.get("IRRIGATION_GPIO_PINS", {})
-    pins_norm: dict[str, int] = {}
-    if isinstance(pins_raw, dict):
-        for k, v in pins_raw.items():
-            try:
-                z = int(k)
-                p = int(v)
-                if z >= 1:
-                    pins_norm[str(z)] = p
-            except Exception:
-                continue
-
-    # --- GPIO pin coverage validation ---
-    max_valves = int(cfg.get("MAX_VALVES", 1))
-
-    if drv == "rpi":
-        required_zones = set(range(1, max_valves + 1))
-        defined_zones = set(int(k) for k in pins_norm.keys())
-
-        missing = sorted(list(required_zones - defined_zones))
-
-        if missing:
-            log_event(
-                "settings_gpio_coverage_invalid",
-                level="error",
-                source="system",
-                missing_zones=missing,
-                max_valves=max_valves,
-                message="IRRIGATION_GPIO_PINS deckt nicht alle Zonen ab (für rpi).",
-            )
-
-
-    parallel_enabled = bool(rt.get("parallel_enabled", default_parallel))
-    max_concurrent = _int(rt.get("max_concurrent_valves", max_conc_default), max_conc_default)
-    max_concurrent = max(1, min(max_valves, max_concurrent))
-
-    return {
-        "version": 1,
-        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
-        "config": {
-            "MAX_VALVES": max_valves,
-            "MAX_RUNTIME_S": max_runtime_s,
-            "MAX_HISTORY_ITEMS": max_hist,
-            "MAX_CONCURRENT_VALVES": max_conc_default,
-            "DEFAULT_PARALLEL_ENABLED": default_parallel,
-            "IRRIGATION_VALVE_DRIVER": drv,
-            "IRRIGATION_RELAY_ACTIVE_LOW": active_low,
-            "IRRIGATION_GPIO_PINS": pins_norm,
-        },
-        "runtime": {
-            "parallel_enabled": parallel_enabled,
-            "max_concurrent_valves": max_concurrent,
-        },
-    }
-
-def save_settings_to_disk():
-    """
-    Persistiert NUR runtime-Settings (parallel_enabled, max_concurrent_valves),
-    ohne config (z.B. GPIO Pins) zu überschreiben.
-
-    Best practice: existing settings.json laden -> runtime überschreiben -> validieren -> schreiben.
-    """
-    with state_lock:
-        runtime_parallel = bool(getattr(state, "parallel_enabled", DEFAULT_PARALLEL_ENABLED))
-        runtime_max_conc = int(getattr(state, "max_concurrent_valves", MAX_CONCURRENT_VALVES))
-
-    existing = None
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            logger.exception("save_settings_to_disk: failed to read existing settings.json")
-            existing = None
-
-    # existing (oder default) normalisieren
-    payload = _validate_settings_payload(existing)
-
-    # runtime überschreiben
-    payload["runtime"]["parallel_enabled"] = runtime_parallel
-    payload["runtime"]["max_concurrent_valves"] = runtime_max_conc
-    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
-
-    # final normalisieren (clamping etc.)
-    payload = _validate_settings_payload(payload)
-
-    _atomic_write_json(SETTINGS_FILE, payload)
-
-def load_settings_from_disk():
-    payload = None
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception:
-            logger.exception("load_settings_from_disk failed")
-            payload = None
-
-    payload = _validate_settings_payload(payload)
-
-    from services.engine import _sync_legacy_single_fields_locked
-
-    with state_lock:
-        state.parallel_enabled = bool(payload["runtime"]["parallel_enabled"])
-        state.max_concurrent_valves = int(payload["runtime"]["max_concurrent_valves"])
-        # config-driven runtime parameters
-        state.max_valves = int(payload["config"]["MAX_VALVES"])
-
-        state.valve_driver_mode = str(payload["config"].get("IRRIGATION_VALVE_DRIVER", "sim")).strip().lower()
-        state.relay_active_low = bool(payload["config"].get("IRRIGATION_RELAY_ACTIVE_LOW", True))
-
-        pins = payload["config"].get("IRRIGATION_GPIO_PINS", {})
-        # normalized as dict[str,int] in validator; keep as dict[int,int] in state
-        pins_by_zone = {}
-        if isinstance(pins, dict):
-            for k, v in pins.items():
-                try:
-                    pins_by_zone[int(k)] = int(v)
-                except Exception:
-                    continue
-        state.gpio_pins_by_zone = pins_by_zone
-        
-        _sync_legacy_single_fields_locked()
-    
-    try:
-        from services.valve_driver import reset_valve_driver
-        reset_valve_driver()
-    except Exception:
-        pass
 
 
 def load_device_config_from_disk():
@@ -550,7 +366,9 @@ def load_history_from_disk():
     hist = [_deserialize_history_item(d) for d in items]
 
     with state_lock:
-        state.run_history = hist[:MAX_HISTORY_ITEMS]
+        limit = int(getattr(state, "max_history_items", MAX_HISTORY_ITEMS))
+        limit = max(1, limit)
+        state.run_history = hist[:limit]
         state.history_dirty = False
 
 def persistence_loop():

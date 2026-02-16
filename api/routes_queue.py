@@ -27,8 +27,12 @@ def queue_add(req: QueueAddRequest):
 
     if req.duration <= 0:
         raise HTTPException(status_code=400, detail="Die Laufzeit muss > 0 sein!")
-    if req.duration > MAX_RUNTIME_S:
-        raise HTTPException(status_code=400, detail=f"Die Maximale Laufzeit ist {MAX_RUNTIME_S // 60} Minuten!")
+    
+    with state_lock:
+        max_runtime_s = int(getattr(state, "hard_max_runtime_s", MAX_RUNTIME_S))
+    if req.duration > max_runtime_s:
+        raise HTTPException(status_code=400, detail=f"Die Maximale Laufzeit ist {max_runtime_s // 60} Minuten!")
+
 
     with state_lock:
         if state.queue_state == "fertig":

@@ -7,7 +7,7 @@ from core.logging import log_event, logger
 from core.config import DEFAULT_PARALLEL_ENABLED, MAX_CONCURRENT_VALVES
 
 from services.persistence import (
-    load_settings_from_disk, load_schedules_from_disk, load_queue_from_disk, load_history_from_disk,
+    load_schedules_from_disk, load_queue_from_disk, load_history_from_disk,
     save_schedules_to_disk, save_queue_to_disk, save_history_to_disk,
     load_device_config_from_disk,
     load_user_settings_from_disk,

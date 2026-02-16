@@ -68,8 +68,11 @@ def _history_add_locked(zone: int, duration_s: int, source: str, time_unit: str)
         time_unit=time_unit or "Sekunden",
     )
     state.run_history.insert(0, item)
-    if len(state.run_history) > MAX_HISTORY_ITEMS:
-        state.run_history = state.run_history[:MAX_HISTORY_ITEMS]
+    limit = int(getattr(state, "max_history_items", MAX_HISTORY_ITEMS))
+    limit = max(1, limit)
+    if len(state.run_history) > limit:
+        state.run_history = state.run_history[:limit]
+
     state.history_dirty = True
 
 def _calc_actual_run_s_primary(now_m: float) -> int:

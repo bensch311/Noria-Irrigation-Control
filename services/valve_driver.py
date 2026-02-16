@@ -13,9 +13,6 @@ class ValveDriverError(RuntimeError):
 class BaseValveDriver:
     """
     Hardware-Abstraktion für Ventile.
-
-    WICHTIG: In diesem Patch wird der Driver noch NICHT von der Engine genutzt.
-    Das kommt im nächsten Patch, damit wir sauber in kleinen Schritten bleiben.
     """
 
     name: str = "base"
@@ -136,7 +133,7 @@ def set_valve_driver(driver: BaseValveDriver) -> None:
 def _read_driver_settings_from_state() -> dict[str, Any]:
     """
     Liest Driver-Settings aus state, falls vorhanden.
-    Wird von persistence.load_settings_from_disk gesetzt.
+    Wird von load_device_config_from_disk() gesetzt.
     """
     try:
         from core.state import state, state_lock

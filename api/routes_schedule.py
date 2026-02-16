@@ -33,6 +33,7 @@ def get_schedules():
 @router.post("/schedule/add")
 def add_schedule(req: ScheduleAddRequest):
     with state_lock:
+        max_runtime_s = int(getattr(state, "hard_max_runtime_s", 3600))
         max_v = int(getattr(state, "max_valves", 1))
     if req.zone != 0 and (req.zone < 1 or req.zone > max_v):
         raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{max_v} sein.")
@@ -50,6 +51,10 @@ def add_schedule(req: ScheduleAddRequest):
         hhi, mmi = int(hh), int(mm)
         if hhi < 0 or hhi > 23 or mmi < 0 or mmi > 59:
             raise HTTPException(status_code=400, detail="start_times muss gültige Uhrzeiten enthalten.")
+        
+    if req.duration_s > max_runtime_s:
+        raise HTTPException(status_code=400, detail=f"duration_s darf max. {max_runtime_s} Sekunden sein.")
+
 
     once_pending = None
     if not req.repeat:
