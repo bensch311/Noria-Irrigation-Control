@@ -4,7 +4,7 @@ from typing import Dict
 from fastapi import HTTPException
 
 from core.state import state, state_lock, ActiveRun, QueueItem, HistoryItem
-from core.config import MAX_VALVES, MAX_HISTORY_ITEMS
+from core.config import MAX_HISTORY_ITEMS
 from core.logging import log_event
 from core.config import TZ
 from datetime import datetime
