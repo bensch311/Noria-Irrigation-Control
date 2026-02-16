@@ -127,11 +127,36 @@ def _validate_settings_payload(payload: dict | None) -> dict:
     }
 
 def save_settings_to_disk():
+    """
+    Persistiert NUR runtime-Settings (parallel_enabled, max_concurrent_valves),
+    ohne config (z.B. GPIO Pins) zu überschreiben.
+
+    Best practice: existing settings.json laden -> runtime überschreiben -> validieren -> schreiben.
+    """
     with state_lock:
-        payload = _default_settings_payload()
-        payload["runtime"]["parallel_enabled"] = bool(getattr(state, "parallel_enabled", DEFAULT_PARALLEL_ENABLED))
-        payload["runtime"]["max_concurrent_valves"] = int(getattr(state, "max_concurrent_valves", MAX_CONCURRENT_VALVES))
-        payload = _validate_settings_payload(payload)
+        runtime_parallel = bool(getattr(state, "parallel_enabled", DEFAULT_PARALLEL_ENABLED))
+        runtime_max_conc = int(getattr(state, "max_concurrent_valves", MAX_CONCURRENT_VALVES))
+
+    existing = None
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            logger.exception("save_settings_to_disk: failed to read existing settings.json")
+            existing = None
+
+    # existing (oder default) normalisieren
+    payload = _validate_settings_payload(existing)
+
+    # runtime überschreiben
+    payload["runtime"]["parallel_enabled"] = runtime_parallel
+    payload["runtime"]["max_concurrent_valves"] = runtime_max_conc
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+
+    # final normalisieren (clamping etc.)
+    payload = _validate_settings_payload(payload)
+
     _atomic_write_json(SETTINGS_FILE, payload)
 
 def load_settings_from_disk():
