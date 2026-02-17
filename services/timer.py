@@ -1,6 +1,9 @@
 import time
+from datetime import datetime
+from core.config import TZ
 from services.valve_driver import get_valve_driver, ValveDriverError
 from core.state import state, state_lock
+from core.config import HW_CLOSE_MAX_RETRIES, HW_RETRY_BACKOFF_BASE_S, HW_RETRY_BACKOFF_MAX_S
 from core.logging import log_event, logger
 from services.engine import (
     _sync_legacy_single_fields_locked,
@@ -9,6 +12,15 @@ from services.engine import (
     _history_add_locked,
     _calc_actual_run_s_primary,
 )
+
+def _hw_backoff_s(failures: int) -> float:
+    # 1,2,4,8,... capped
+    try:
+        f = max(0, int(failures))
+    except Exception:
+        f = 0
+    return min(HW_RETRY_BACKOFF_MAX_S, HW_RETRY_BACKOFF_BASE_S * (2 ** f))
+
 
 def timer_loop():
     from core.state import shutdown_event
@@ -74,6 +86,10 @@ def timer_loop():
                     try:
                         driver.close(zone)
                     except ValveDriverError as e:
+                        # Track failures per zone and apply exponential backoff.
+                        ar.hw_close_failures = int(getattr(ar, "hw_close_failures", 0)) + 1
+                        ar.hw_last_error = str(e)
+
                         log_event(
                             "valve_hw_error",
                             level="error",
@@ -83,10 +99,46 @@ def timer_loop():
                             driver=getattr(driver, "name", "unknown"),
                             reason="duration_elapsed",
                             error=str(e),
+                            failures=ar.hw_close_failures,
                         )
-                        # Retry close shortly; do NOT remove from active_runs
-                        ar.end_time = now_m + 1.0
+
+                        if ar.hw_close_failures >= int(HW_CLOSE_MAX_RETRIES):
+                            # Latch a hardware fault to prevent any further starts.
+                            fault_ts = datetime.now(TZ).isoformat(timespec="seconds")
+                            state.hw_faulted = True
+                            state.hw_fault_reason = "close_failed_max_retries"
+                            state.hw_fault_zone = zone
+                            state.hw_fault_since = fault_ts
+
+                            log_event(
+                                "hw_fault_latched",
+                                level="critical",
+                                source="system",
+                                reason=state.hw_fault_reason,
+                                zone=zone,
+                                failures=ar.hw_close_failures,
+                                error=str(e),
+                            )
+
+                            # Best-effort emergency shutdown (may fail too).
+                            if not bool(getattr(state, "hw_fault_close_all_attempted", False)):
+                                state.hw_fault_close_all_attempted = True
+                                try:
+                                    driver.close_all()
+                                    log_event("hw_fault_emergency_close_all_ok", level="critical", source="system")
+                                except Exception as ee:
+                                    log_event(
+                                        "hw_fault_emergency_close_all_failed",
+                                        level="critical",
+                                        source="system",
+                                        error=str(ee),
+                                    )
+
+                        backoff = _hw_backoff_s(ar.hw_close_failures - 1)
+                        ar.hw_next_retry_at = now_m + backoff
+                        ar.end_time = ar.hw_next_retry_at
                         continue
+
                     except Exception as e:
                         log_event(
                             "valve_hw_error",
