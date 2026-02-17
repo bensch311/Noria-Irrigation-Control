@@ -2,9 +2,9 @@
 # ToDos:
 # - Persistenz der Zeitpläne (Datei/DB) -> erledigt
 # - Persistenz der Queue (Datei/DB) -> erledigt
-# - GPIO Ansteuerung (Raspberry Pi)
-# - Nach Stromausfall: alle Ventile stoppen, Zeitplan nachholen?
-# - GPIO-Simulation für Tests auf Nicht-Raspberry Pi Systemen
+# - GPIO Ansteuerung (Raspberry Pi) -> erledigt
+# - Nach Stromausfall: alle Ventile stoppen, Zeitplan nachholen? -> erledigt (alle Ventile stoppen, Zeitplan wird nicht nachgeholt)
+# - GPIO-Simulation für Tests auf Nicht-Raspberry Pi Systemen -> erledigt
 # - GPIO-Errors behandeln (z.B. kein Zugriff auf /sys/class/...)
 # - GPIO-Error-Logging
 # - API Authentifizierung (Basic Auth / Token)?

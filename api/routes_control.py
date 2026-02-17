@@ -33,6 +33,9 @@ def status():
 def start(req: StartRequest):
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
+        if bool(getattr(state, "hw_faulted", False)):
+            raise HTTPException(status_code=423, detail="Hardware-Fault aktiv. Bitte prüfen und /fault/clear ausführen.")
+
     if req.zone < 1 or req.zone > max_v:
         raise HTTPException(status_code=400, detail=f"zone muss 1..{max_v} sein.")
 
@@ -132,6 +135,9 @@ def pause_current():
 @router.post("/resume")
 def resume_current():
     with state_lock:
+        if bool(getattr(state, "hw_faulted", False)):
+            raise HTTPException(status_code=423, detail="Hardware-Fault aktiv. Resume gesperrt. Bitte prüfen und /fault/clear ausführen.")
+
         if not state.active_runs:
             raise HTTPException(status_code=409, detail="Kein Ventil ist aktiv/pausiert.")
 
@@ -197,6 +203,30 @@ def resume_current():
 
 
 # ---------------------------
+# POST /fault/clear -> Quittiert Hardware-Fault (Operator-Ack)
+# ---------------------------
+@router.post("/fault/clear")
+def clear_fault():
+    with state_lock:
+        if not bool(getattr(state, "hw_faulted", False)):
+            return {"ok": True, "cleared": False, "reason": "no_fault"}
+
+        # Optional: only allow clearing if nothing is running (safer)
+        if state.active_runs:
+            raise HTTPException(status_code=409, detail="Fault kann nur quittiert werden, wenn keine Ventile laufen.")
+
+        state.hw_faulted = False
+        state.hw_fault_reason = ""
+        state.hw_fault_zone = None
+        state.hw_fault_since = ""
+        state.hw_fault_close_all_attempted = False
+
+        log_event("hw_fault_cleared", level="warning", source="manual")
+
+    return {"ok": True, "cleared": True}
+
+
+# ---------------------------
 # POST /stop -> Stoppt sofort alle Ventile
 # ---------------------------
 @router.post("/stop")
@@ -207,7 +237,11 @@ def stop():
 
     with state_lock:
         if not state.active_runs:
+            # Invariant: active_runs is the source of truth. If legacy fields are set here,
+            # it's a bug / leftover state; report it but do not try to "stop hardware" blindly.
             z = state.running_zone
+            if z is not None:
+                log_event("legacy_state_inconsistent", level="error", source="system", running_zone=z)
             state.running_zone = None
             _sync_legacy_single_fields_locked()
             return {"ok": True, "stopped_zone": z}
