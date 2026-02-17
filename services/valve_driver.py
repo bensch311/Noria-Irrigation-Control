@@ -10,6 +10,34 @@ class ValveDriverError(RuntimeError):
     pass
 
 
+def validate_gpio_pins(pins_by_zone: Dict[int, int]) -> Dict[str, Any]:
+    """Validate BCM pins for RPi driver.
+
+    Returns a dict with keys:
+      - ok: bool
+      - invalid_pins: list[{zone,pin,reason}]
+      - duplicate_pins: list[{pin,zones}]
+    """
+    invalid = []
+    by_pin: Dict[int, list[int]] = {}
+    for z, p in (pins_by_zone or {}).items():
+        try:
+            zone = int(z)
+            pin = int(p)
+        except Exception:
+            invalid.append({"zone": z, "pin": p, "reason": "not_int"})
+            continue
+
+        # BCM GPIO pins usable in practice are typically 2..27 (0/1 are ID / reserved on many boards)
+        if pin < 2 or pin > 27:
+            invalid.append({"zone": zone, "pin": pin, "reason": "out_of_range_2_27"})
+        by_pin.setdefault(pin, []).append(zone)
+
+    dup = [{"pin": pin, "zones": sorted(zs)} for pin, zs in by_pin.items() if len(zs) > 1]
+    ok = (len(invalid) == 0) and (len(dup) == 0)
+    return {"ok": ok, "invalid_pins": invalid, "duplicate_pins": dup}
+
+
 class BaseValveDriver:
     """
     Hardware-Abstraktion für Ventile.
@@ -187,6 +215,10 @@ def get_valve_driver() -> BaseValveDriver:
                 z = int(k)
                 p = int(v)
                 pins_by_zone[z] = p
+
+            vres = validate_gpio_pins(pins_by_zone)
+            if not vres.get("ok"):
+                raise ValveDriverError(f"Ungültige GPIO Pin-Konfiguration: {vres}")
 
             # NEW: require full coverage 1..max_valves if present in state
             try:
