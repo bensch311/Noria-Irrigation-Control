@@ -8,7 +8,7 @@ router = APIRouter()
 
 @router.get("/health")
 def health():
-    from services.valve_driver import get_valve_driver
+    from services.valve_driver import get_valve_driver, validate_gpio_pins
 
     with state_lock:
         running = sorted(list((state.active_runs or {}).keys()))
@@ -29,9 +29,11 @@ def health():
     required_zones = list(range(1, max_valves + 1))
     missing_zones = [z for z in required_zones if z not in set(configured_zones)]
 
+    gpio_validation = validate_gpio_pins(pins_by_zone) if mode == "rpi" else {"ok": True, "invalid_pins": [], "duplicate_pins": []}
     gpio_config_valid = True
     if mode == "rpi":
-        gpio_config_valid = (len(missing_zones) == 0)
+        gpio_config_valid = (len(missing_zones) == 0) and bool(gpio_validation.get("ok"))
+
 
     return {
         "ok": True,
@@ -50,6 +52,8 @@ def health():
             "configured_zones": configured_zones,
             "missing_zones": missing_zones,
             "gpio_config_valid": gpio_config_valid,
+            "invalid_pins": gpio_validation.get("invalid_pins", []),
+            "duplicate_pins": gpio_validation.get("duplicate_pins", []),
         },
     }
 
