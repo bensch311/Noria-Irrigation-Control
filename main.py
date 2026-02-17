@@ -9,6 +9,7 @@
 # - GPIO-Error-Logging
 # - API Authentifizierung (Basic Auth / Token)?
 # - Historie -> erledigt
+# - Software / Hardware Watchdog (Raspberry PI)
 # - Refactoring
 # ---------------------------
 

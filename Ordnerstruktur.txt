@@ -3,6 +3,7 @@ P:.
 │   main.py
 │   requirements.txt
 │   Ordnerstruktur.txt
+│   pytest.ini
 │
 ├───logs
 │       irrigation.jsonl
@@ -56,20 +57,24 @@ P:.
 │           valve_driver.cpython-314.pyc
 │           engine.cpython-314.pyc
 │
-└───api
-    │   errors.py
-    │   routes_health.py
-    │   routes_queue.py
-    │   routes_schedule.py
-    │   routes_control.py
-    │   __init__.py
-    │   routes_history.py
-    │
-    └───__pycache__
-            __init__.cpython-314.pyc
-            errors.cpython-314.pyc
-            routes_history.cpython-314.pyc
-            routes_health.cpython-314.pyc
-            routes_queue.cpython-314.pyc
-            routes_schedule.cpython-314.pyc
-            routes_control.cpython-314.pyc
+├───api
+│   │   errors.py
+│   │   routes_health.py
+│   │   routes_queue.py
+│   │   routes_schedule.py
+│   │   routes_control.py
+│   │   __init__.py
+│   │   routes_history.py
+│   │
+│   └───__pycache__
+│           __init__.cpython-314.pyc
+│           errors.cpython-314.pyc
+│           routes_history.cpython-314.pyc
+│           routes_health.cpython-314.pyc
+│           routes_queue.cpython-314.pyc
+│           routes_schedule.cpython-314.pyc
+│           routes_control.cpython-314.pyc
+│
+└───tests
+        test_gpio_validation.py
+        test_hw_fault_blocks_start.py
