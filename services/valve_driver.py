@@ -151,7 +151,7 @@ def get_valve_driver() -> BaseValveDriver:
     """
     Reihenfolge (Best Practice):
       1) ENV override (wenn gesetzt)
-      2) settings.json (state.*), wenn gesetzt
+      2) device_config.json/state
       3) fallback = sim
     """
     global _driver
