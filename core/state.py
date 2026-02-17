@@ -22,6 +22,10 @@ class ActiveRun:
     paused_at: float = 0.0
     paused_total_s: float = 0.0
     remaining_s: int = 0
+    hw_close_failures: int = 0
+    hw_next_retry_at: float = 0.0
+    hw_last_error: str = ""
+
 
 @dataclass
 class QueueItem:
@@ -71,6 +75,13 @@ class RunState:
     schedules_dirty: bool = False
     queue_dirty: bool = False
     history_dirty: bool = False
+
+        # hardware fault latch (prevents starting new valves until cleared)
+    hw_faulted: bool = False
+    hw_fault_reason: str = ""
+    hw_fault_zone: Optional[int] = None
+    hw_fault_since: str = ""
+    hw_fault_close_all_attempted: bool = False
 
     # legacy runtime accounting (primary)
     started_at: float = 0.0
