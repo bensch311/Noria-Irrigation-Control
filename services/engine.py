@@ -32,6 +32,9 @@ def _sync_legacy_single_fields_locked():
     state.started_planned_s = ar.started_planned_s
 
 def _can_start_new_valve_locked() -> bool:
+    # If hardware is faulted, block any new starts (manual/queue/schedule)
+    if getattr(state, "hw_faulted", False):
+        return False
     if not state.parallel_enabled:
         return len(state.active_runs or {}) == 0
     return len(state.active_runs or {}) < max(1, int(state.max_concurrent_valves))
@@ -188,7 +191,10 @@ def engine_status_payload_locked() -> dict:
             "running_zones": sorted(list((state.active_runs or {}).keys())),
             "active_runs": _active_runs_snapshot_locked(),
             "valve_driver": driver_name,
-
+            "hw_faulted": bool(getattr(state, "hw_faulted", False)),
+            "hw_fault_reason": getattr(state, "hw_fault_reason", ""),
+            "hw_fault_zone": getattr(state, "hw_fault_zone", None),
+            "hw_fault_since": getattr(state, "hw_fault_since", ""),
         }
 
     if state.paused:
@@ -213,7 +219,10 @@ def engine_status_payload_locked() -> dict:
         "running_zones": sorted(list((state.active_runs or {}).keys())),
         "active_runs": _active_runs_snapshot_locked(),
         "valve_driver": driver_name,
-
+        "hw_faulted": bool(getattr(state, "hw_faulted", False)),
+        "hw_fault_reason": getattr(state, "hw_fault_reason", ""),
+        "hw_fault_zone": getattr(state, "hw_fault_zone", None),
+        "hw_fault_since": getattr(state, "hw_fault_since", ""),
     }
 
 # Exports (für andere services/api)
