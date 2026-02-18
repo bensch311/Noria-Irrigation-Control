@@ -13,8 +13,8 @@ class QueueAddRequest(BaseModel):
 
 class ScheduleAddRequest(BaseModel):
     zone: int = Field(..., ge=0)  # 0 = alle Ventile
-    weekdays: List[int] = Field(..., min_items=1)
-    start_times: List[str] = Field(..., min_items=1)
+    weekdays: List[int] = Field(..., min_length=1)
+    start_times: List[str] = Field(..., min_length=1)
     duration_s: int = Field(..., ge=1)
     repeat: bool = True
     time_unit: str = "Minuten"
