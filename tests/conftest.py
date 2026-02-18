@@ -8,6 +8,7 @@ from api.routes_queue import router as queue_router
 from api.routes_schedule import router as schedule_router
 from api.routes_control import router as control_router
 from api.routes_history import router as history_router
+import api.routes_control as routes_control
 
 from core.state import state, state_lock
 from services.valve_driver import SimValveDriver, set_valve_driver, reset_valve_driver
@@ -90,3 +91,11 @@ def reset_state_between_tests():
 
     # Cleanup (falls ein Test etwas “hängen lässt”)
     reset_valve_driver()
+
+@pytest.fixture(autouse=True)
+def disable_disk_persistence_in_tests(monkeypatch):
+    """
+    In Integrationstests keine Disk-I/O durch Runtime-Persistenz (parallel toggles etc.).
+    """
+    monkeypatch.setattr(routes_control, "save_runtime_state_to_disk", lambda: None)
+    yield
