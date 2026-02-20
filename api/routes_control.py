@@ -12,6 +12,7 @@ from services.engine import (
     _start_valve_locked,
     _sync_legacy_single_fields_locked,
     engine_status_payload_locked,
+    _history_add_locked,
 )
 from services.persistence import save_runtime_state_to_disk
 
@@ -31,33 +32,31 @@ def status():
 # ---------------------------
 @router.post("/start")
 def start(req: StartRequest):
+    # Validierungen (unter Lock)
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
-        if bool(getattr(state, "hw_faulted", False)):
-            raise HTTPException(status_code=423, detail="Hardware-Fault aktiv. Bitte prüfen und /fault/clear ausführen.")
+        max_runtime_s = int(getattr(state, "hard_max_runtime_s", MAX_RUNTIME_S))
 
+    # Input-Validierung (ohne Lock)
     if req.zone < 1 or req.zone > max_v:
         raise HTTPException(status_code=400, detail=f"zone muss 1..{max_v} sein.")
 
     if req.duration <= 0:
         raise HTTPException(status_code=400, detail="Die Laufzeit muss > 0 sein!")
     
-    with state_lock:
-        max_runtime_s = int(getattr(state, "hard_max_runtime_s", MAX_RUNTIME_S))
     if req.duration > max_runtime_s:
         raise HTTPException(status_code=400, detail=f"Die Maximale Laufzeit ist {max_runtime_s // 60} Minuten!")
 
+    # Start Ventil OHNE state_lock (Funktion holt Lock intern via Prepare-Execute-Commit)
+    _start_valve_locked(
+        zone=req.zone,
+        duration_s=req.duration,
+        time_unit=req.time_unit,
+        source="manual",
+    )
+
+    # Response zusammenbauen (unter Lock)
     with state_lock:
-        _start_valve_locked(
-            zone=req.zone,
-            duration_s=req.duration,
-            time_unit=req.time_unit,
-            source="manual",
-        )
-
-        # Optional: extra event — _start_valve_locked loggt bereits valve_start.
-        # Ich lasse es absichtlich NICHT doppelt loggen.
-
         return {
             "ok": True,
             "running_zone": req.zone,
@@ -73,6 +72,7 @@ def start(req: StartRequest):
 # ---------------------------
 @router.post("/pause")
 def pause_current():
+    # Phase 1: Prepare (unter Lock) - sammle Zonen die geschlossen werden müssen
     with state_lock:
         if state.running_zone is None or not state.active_runs:
             raise HTTPException(status_code=409, detail="Kein Ventil läuft gerade.")
@@ -80,38 +80,59 @@ def pause_current():
         if state.paused:
             raise HTTPException(status_code=409, detail="Ventile sind bereits pausiert.")
 
-        from services.valve_driver import get_valve_driver, ValveDriverError
-        driver = get_valve_driver()
-
-        failed = []
-        for z in sorted(list(state.active_runs.keys())):
-            try:
-                driver.close(z)
-            except Exception as e:
-                failed.append({"zone": z, "error": str(e)})
-
-        if failed:
-            log_event(
-                "valve_hw_error",
-                level="error",
-                source="manual",
-                action="close",
-                zone="multiple",
-                driver=getattr(driver, "name", "unknown"),
-                reason="pause",
-                failed=failed,
-            )
-            raise HTTPException(status_code=503, detail={"message": "Hardware Fehler beim Pausieren", "failed": failed})
-
-
+        zones_to_close = sorted(list(state.active_runs.keys()))
+        now_m = time.monotonic()
+        
+        # Berechne remaining_s für jede Zone (für später)
+        zones_info = {}
+        for z in zones_to_close:
+            ar = state.active_runs[z]
+            if ar.paused_at == 0.0:
+                remaining_s = max(0, int(ar.end_time - now_m))
+                zones_info[z] = {
+                    "remaining_s": remaining_s,
+                    "paused_at": now_m,
+                }
+    
+    # Phase 2: Execute (OHNE Lock) - Hardware close via IO-Worker
+    from services.io_worker import get_io_worker, IOCommand
+    io_worker = get_io_worker()
+    
+    failed = []
+    for z in zones_to_close:
+        cmd = IOCommand(action="close", zone=z)
+        result = io_worker.send_command(cmd, timeout_s=5.0)
+        
+        if not result.success:
+            failed.append({"zone": z, "error": result.error})
+    
+    # Bei Hardware-Fehler → Rollback, keine State-Änderung
+    if failed:
+        log_event(
+            "valve_hw_error",
+            level="error",
+            source="manual",
+            action="close",
+            zone="multiple",
+            reason="pause",
+            failed=failed,
+        )
+        raise HTTPException(
+            status_code=503, 
+            detail={"message": "Hardware Fehler beim Pausieren", "failed": failed}
+        )
+    
+    # Phase 3: Commit (unter Lock) - nur wenn Hardware erfolgreich
+    with state_lock:
         state.paused = True
         state.queue_state_before_valve_pause = state.queue_state
 
-        now_m = time.monotonic()
-        for ar in state.active_runs.values():
-            if ar.paused_at == 0.0:
-                ar.remaining_s = max(0, int(ar.end_time - now_m))
-                ar.paused_at = now_m
+        # Update ActiveRuns mit berechneten Werten
+        for z, info in zones_info.items():
+            if z in state.active_runs:
+                ar = state.active_runs[z]
+                ar.remaining_s = info["remaining_s"]
+                ar.paused_at = info["paused_at"]
                 ar.end_time = 0.0  # logisch "stoppen" (Timer zählt nicht weiter)
 
         _sync_legacy_single_fields_locked()
@@ -134,9 +155,13 @@ def pause_current():
 # ---------------------------
 @router.post("/resume")
 def resume_current():
+    # Phase 1: Prepare (unter Lock)
     with state_lock:
         if bool(getattr(state, "hw_faulted", False)):
-            raise HTTPException(status_code=423, detail="Hardware-Fault aktiv. Resume gesperrt. Bitte prüfen und /fault/clear ausführen.")
+            raise HTTPException(
+                status_code=423, 
+                detail="Hardware-Fault aktiv. Resume gesperrt. Bitte prüfen und /fault/clear ausführen."
+            )
 
         if not state.active_runs:
             raise HTTPException(status_code=409, detail="Kein Ventil ist aktiv/pausiert.")
@@ -144,34 +169,44 @@ def resume_current():
         if not state.paused:
             raise HTTPException(status_code=409, detail="Ventile sind nicht pausiert.")
 
-        from services.valve_driver import get_valve_driver, ValveDriverError
-        driver = get_valve_driver()
-
-        failed = []
-        # Öffne alle Zonen, die wirklich weiterlaufen sollen
+        # Sammle Zonen die geöffnet werden müssen (nur die mit remaining_s > 0)
+        zones_to_open = []
         for z, ar in state.active_runs.items():
-            if (ar.remaining_s or 0) <= 0:
-                continue
-            try:
-                driver.open(z)
-            except Exception as e:
-                failed.append({"zone": int(z), "error": str(e)})
-
-        if failed:
-            log_event(
-                "valve_hw_error",
-                level="error",
-                source="manual",
-                action="open",
-                zone="multiple",
-                driver=getattr(driver, "name", "unknown"),
-                reason="resume",
-                failed=failed,
-            )
-            # State bleibt pausiert (wir gehen NICHT weiter)
-            raise HTTPException(status_code=503, detail={"message": "Hardware Fehler beim Fortsetzen", "failed": failed})
-
-
+            if (ar.remaining_s or 0) > 0:
+                zones_to_open.append(z)
+        
+        now_m = time.monotonic()
+    
+    # Phase 2: Execute (OHNE Lock) - Hardware open via IO-Worker
+    from services.io_worker import get_io_worker, IOCommand
+    io_worker = get_io_worker()
+    
+    failed = []
+    for z in zones_to_open:
+        cmd = IOCommand(action="open", zone=z)
+        result = io_worker.send_command(cmd, timeout_s=5.0)
+        
+        if not result.success:
+            failed.append({"zone": int(z), "error": result.error})
+    
+    # Bei Hardware-Fehler → Rollback, State bleibt pausiert
+    if failed:
+        log_event(
+            "valve_hw_error",
+            level="error",
+            source="manual",
+            action="open",
+            zone="multiple",
+            reason="resume",
+            failed=failed,
+        )
+        raise HTTPException(
+            status_code=503, 
+            detail={"message": "Hardware Fehler beim Fortsetzen", "failed": failed}
+        )
+    
+    # Phase 3: Commit (unter Lock) - nur wenn Hardware erfolgreich
+    with state_lock:
         now_m = time.monotonic()
 
         for ar in state.active_runs.values():
@@ -213,7 +248,10 @@ def clear_fault():
 
         # Optional: only allow clearing if nothing is running (safer)
         if state.active_runs:
-            raise HTTPException(status_code=409, detail="Fault kann nur quittiert werden, wenn keine Ventile laufen.")
+            raise HTTPException(
+                status_code=409, 
+                detail="Fault kann nur quittiert werden, wenn keine Ventile laufen."
+            )
 
         state.hw_faulted = False
         state.hw_fault_reason = ""
@@ -231,14 +269,10 @@ def clear_fault():
 # ---------------------------
 @router.post("/stop")
 def stop():
-    # History-Update: hier übernehmen wir deine alte Logik 1:1 (pro Zone Duration)
-    # Damit es sauber bleibt, schreiben wir Historie hier direkt.
-    from services.engine import _history_add_locked  # local import to avoid circular
-
+    # Phase 1: Prepare (unter Lock) - sammle alle Infos für Historie
     with state_lock:
         if not state.active_runs:
-            # Invariant: active_runs is the source of truth. If legacy fields are set here,
-            # it's a bug / leftover state; report it but do not try to "stop hardware" blindly.
+            # Invariant: active_runs is the source of truth
             z = state.running_zone
             if z is not None:
                 log_event("legacy_state_inconsistent", level="error", source="system", running_zone=z)
@@ -246,53 +280,71 @@ def stop():
             _sync_legacy_single_fields_locked()
             return {"ok": True, "stopped_zone": z}
 
-        from services.valve_driver import get_valve_driver
-        driver = get_valve_driver()
-
         now_m = time.monotonic()
-        zones = sorted(list(state.active_runs.keys()))
-        stopped = []
-        failed = []
-
-        # Stop should unpause so the system can recover/retry if needed
-        state.paused = False
-
-        for zone in zones:
+        zones_to_close = sorted(list(state.active_runs.keys()))
+        
+        # Sammle Infos für Historie-Berechnung
+        zones_info = {}
+        for zone in zones_to_close:
             ar = state.active_runs.get(zone)
             if not ar:
                 continue
-
-            # 1) Hardware close
-            try:
-                driver.close(zone)
-            except Exception as e:
-                failed.append({"zone": zone, "error": str(e)})
-                continue
-
-            # 2) Only if close succeeded -> compute duration & history & remove run
+                
             paused_total = ar.paused_total_s
             if ar.paused_at:
                 paused_total += (now_m - ar.paused_at)
 
             active = (now_m - ar.started_at) - paused_total
             actual_s = max(0, int(active + 1e-6))
-
-            _history_add_locked(
-                zone=zone,
-                duration_s=actual_s,
-                source=ar.started_source or "manual",
-                time_unit=ar.time_unit,
-            )
-
-            del state.active_runs[zone]
+            
+            zones_info[zone] = {
+                "actual_s": actual_s,
+                "source": ar.started_source or "manual",
+                "time_unit": ar.time_unit,
+            }
+        
+        # Stop should unpause
+        state.paused = False
+    
+    # Phase 2: Execute (OHNE Lock) - Hardware close via IO-Worker
+    from services.io_worker import get_io_worker, IOCommand
+    io_worker = get_io_worker()
+    
+    stopped = []
+    failed = []
+    
+    for zone in zones_to_close:
+        cmd = IOCommand(action="close", zone=zone)
+        result = io_worker.send_command(cmd, timeout_s=5.0)
+        
+        if result.success:
             stopped.append(zone)
+        else:
+            failed.append({"zone": zone, "error": result.error})
+    
+    # Phase 3: Commit (unter Lock) - Update State & Historie
+    with state_lock:
+        # Nur für erfolgreich geschlossene Ventile: Historie + Remove from active_runs
+        for zone in stopped:
+            if zone in zones_info:
+                info = zones_info[zone]
+                _history_add_locked(
+                    zone=zone,
+                    duration_s=info["actual_s"],
+                    source=info["source"],
+                    time_unit=info["time_unit"],
+                )
+            
+            if zone in state.active_runs:
+                del state.active_runs[zone]
 
-        # Reset pause bookkeeping regardless
+        # Reset pause bookkeeping
         state.remaining_s = 0
         state.queue_state_before_valve_pause = "bereit"
 
         _sync_legacy_single_fields_locked()
-
+        
+        # Log failures
         if failed:
             log_event(
                 "valve_hw_error",
@@ -300,22 +352,12 @@ def stop():
                 source="manual",
                 action="close",
                 zone="multiple",
-                driver=getattr(driver, "name", "unknown"),
                 reason="manual_stop",
                 failed=failed,
                 stopped=stopped,
             )
-            raise HTTPException(
-                status_code=503,
-                detail={"message": "Nicht alle Ventile konnten gestoppt werden", "stopped": stopped, "failed": failed},
-            )
 
-        state.paused = False
-        state.remaining_s = 0
-        state.queue_state_before_valve_pause = "bereit"
-
-        _sync_legacy_single_fields_locked()
-
+    # Log success (außerhalb Lock)
     log_event(
         "valve_stop",
         source="manual",
@@ -325,7 +367,20 @@ def stop():
         queue_length=len(state.queue or []),
         parallel_enabled=state.parallel_enabled,
         automation_enabled=state.automation_enabled,
+        stopped_count=len(stopped),
+        failed_count=len(failed),
     )
+    
+    # Bei Teil-Fehler: 503 mit Details
+    if failed:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Nicht alle Ventile konnten gestoppt werden", 
+                "stopped": stopped, 
+                "failed": failed
+            },
+        )
 
     return {"ok": True, "stopped_zones": stopped}
 
@@ -419,7 +474,6 @@ def set_parallel_mode(req: ParallelModeRequest):
 
     # Runtime setting persistieren
     save_runtime_state_to_disk()
-
 
     return {
         "ok": True,

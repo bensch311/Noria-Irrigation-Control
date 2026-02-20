@@ -55,6 +55,8 @@ def queue_add(req: QueueAddRequest):
 
 @router.post("/queue/start")
 def queue_start():
+    # Phase 1: Items sammeln die gestartet werden können (unter Lock)
+    items_to_start = []
     with state_lock:
         if not state.queue:
             raise HTTPException(status_code=400, detail="Die Warteschlange ist leer.")
@@ -62,14 +64,61 @@ def queue_start():
         state.queue_state = "läuft"
         state.queue_dirty = True
 
+        # Sammle Items die gestartet werden können
+        # WICHTIG: Wir müssen manuell tracken wie viele wir schon gesammelt haben,
+        # weil active_runs erst nach Lock-Release upgedatet wird!
         if not state.paused and state.queue_state != "pausiert":
-            while state.queue and _can_start_new_valve_locked():
+            collected_count = 0
+            
+            while state.queue:
+                # Simuliere _can_start_new_valve_locked() für ZUKÜNFTIGE active_runs
+                current_running = len(state.active_runs or {})
+                future_running = current_running + collected_count
+                
+                # Check ob wir noch mehr starten können
+                can_start_more = False
+                if getattr(state, "hw_faulted", False):
+                    # Hardware-Fault → nichts mehr starten
+                    can_start_more = False
+                elif not state.parallel_enabled:
+                    # Seriell-Modus: nur wenn nichts läuft (aktuell + zukünftig)
+                    can_start_more = (future_running == 0)
+                else:
+                    # Parallel-Modus: Check gegen Limit
+                    max_conc = max(1, int(state.max_concurrent_valves))
+                    can_start_more = (future_running < max_conc)
+                
+                if not can_start_more:
+                    break  # Keine weiteren Items sammeln
+                
+                # Item aus Queue nehmen und zum Start vormerken
                 next_item = state.queue.pop(0)
+                items_to_start.append(next_item)
+                collected_count += 1
                 state.queue_dirty = True
-                start_queue_item(next_item)
 
-        log_event("queue_start", source="manual", queue_state=state.queue_state, queue_length=len(state.queue or []))
-        return {"ok": True, "queue_state": state.queue_state}
+        log_event(
+            "queue_start", 
+            source="manual", 
+            queue_state=state.queue_state, 
+            queue_length=len(state.queue or []),
+            items_to_start=len(items_to_start)
+        )
+        queue_state_snapshot = state.queue_state
+    
+    # Phase 2: Items starten (OHNE Lock)
+    for item in items_to_start:
+        try:
+            start_queue_item(item)
+        except HTTPException as e:
+            # Bei Fehler: Item wieder vorne in Queue einfügen
+            with state_lock:
+                state.queue.insert(0, item)
+                state.queue_dirty = True
+            # Exception weiterwerfen → Client bekommt Fehler
+            raise
+    
+    return {"ok": True, "queue_state": queue_state_snapshot, "started_count": len(items_to_start)}
 
 @router.post("/queue/pause")
 def queue_pause():

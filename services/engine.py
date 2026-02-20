@@ -94,72 +94,141 @@ def _calc_actual_run_s_primary(now_m: float) -> int:
     eps = 1e-6
     return int(math.ceil(active - eps)) if had_pause else int(math.floor(active + eps))
 
+
+# ==================== REFACTORED: PREPARE-EXECUTE-COMMIT ====================
+
 def _start_valve_locked(zone: int, duration_s: int, time_unit: str, source: str):
-    if state.active_runs is None:
-        state.active_runs = {}
+    """
+    Startet ein Ventil via IO-Worker mit Prepare-Execute-Commit Pattern.
+    
+    WICHTIG: Diese Funktion muss OHNE state_lock aufgerufen werden!
+    Sie holt sich den Lock intern für Prepare und Commit.
+    
+    Ablauf:
+    1. PREPARE (unter Lock): Validierung, Context erstellen
+    2. EXECUTE (ohne Lock): Hardware-Operation via IO-Worker
+    3. COMMIT (unter Lock):  State-Update wenn Hardware erfolgreich
+    """
+    
+    # ============ PHASE 1: PREPARE (unter Lock) ============
+    with state_lock:
+        if state.active_runs is None:
+            state.active_runs = {}
 
-    if zone in state.active_runs:
-        raise HTTPException(status_code=409, detail=f"Ventil {zone} läuft bereits!")
+        # Validierungen
+        if zone in state.active_runs:
+            raise HTTPException(status_code=409, detail=f"Ventil {zone} läuft bereits!")
 
-    if not _can_start_new_valve_locked():
-        if state.parallel_enabled:
-            raise HTTPException(status_code=409, detail=f"Max. parallele Ventile erreicht ({state.max_concurrent_valves}).")
-        raise HTTPException(status_code=409, detail=f"Es läuft bereits Ventil {state.running_zone}!")
+        if not _can_start_new_valve_locked():
+            if getattr(state, "hw_faulted", False):
+                raise HTTPException(
+                    status_code=423, 
+                    detail="Hardware-Fault aktiv. Start gesperrt. Bitte prüfen und /fault/clear ausführen."
+                )
+            if state.parallel_enabled:
+                raise HTTPException(
+                    status_code=409, 
+                    detail=f"Max. parallele Ventile erreicht ({state.max_concurrent_valves})."
+                )
+            raise HTTPException(
+                status_code=409, 
+                detail=f"Es läuft bereits Ventil {state.running_zone}!"
+            )
 
-    # --- Hardware open MUST succeed before we consider the run active ---
-    from services.valve_driver import get_valve_driver, ValveDriverError  # local import to avoid cycles
-    driver = get_valve_driver()
-    try:
-        driver.open(zone)
-    except ValveDriverError as e:
+        # Context für Hardware-Op + späteren Commit erstellen
+        now_m = time.monotonic()
+        context = {
+            "zone": zone,
+            "duration_s": duration_s,
+            "time_unit": time_unit,
+            "source": source,
+            "started_at": now_m,
+            "end_time": now_m + duration_s,
+        }
+    
+    # ============ PHASE 2: EXECUTE (OHNE Lock via IO-Worker) ============
+    from services.io_worker import get_io_worker, IOCommand
+    
+    io_worker = get_io_worker()
+    cmd = IOCommand(action="open", zone=zone)
+    result = io_worker.send_command(cmd, timeout_s=5.0)
+    
+    if not result.success:
+        # Hardware-Fehler → Event loggen, Exception werfen
         log_event(
             "valve_hw_error",
             level="error",
             source=source,
             action="open",
             zone=zone,
-            driver=getattr(driver, "name", "unknown"),
-            error=str(e),
+            error=result.error,
+            duration_ms=result.duration_ms
         )
-        raise HTTPException(status_code=503, detail=f"Hardware Fehler beim Öffnen von Ventil {zone}: {e}")
-    except Exception as e:
-        log_event(
-            "valve_hw_error",
-            level="error",
-            source=source,
-            action="open",
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Hardware Fehler beim Öffnen von Ventil {zone}: {result.error}"
+        )
+    
+    # ============ PHASE 3: COMMIT (unter Lock) ============
+    with state_lock:
+        # Double-check: Zone könnte theoretisch jetzt schon belegt sein
+        # (wenn zwischen Phase 1 und Phase 3 jemand anderes gestartet hat)
+        if zone in state.active_runs:
+            # Ups! Jemand war schneller. Hardware wieder schließen.
+            log_event(
+                "valve_start_race_condition",
+                level="warning",
+                source=source,
+                zone=zone,
+                message="Zone wurde zwischen Prepare und Commit von anderem Thread gestartet"
+            )
+            
+            # Hardware-Cleanup via IO-Worker (best effort, ohne Lock-Block)
+            # Wir machen das async/non-blocking
+            import threading
+            def cleanup():
+                cleanup_cmd = IOCommand(action="close", zone=zone)
+                io_worker.send_command(cleanup_cmd, timeout_s=5.0)
+            threading.Thread(target=cleanup, daemon=True).start()
+            
+            raise HTTPException(
+                status_code=409, 
+                detail=f"Ventil {zone} wurde von anderem Request gestartet (Race Condition)"
+            )
+        
+        # Alles OK → State updaten
+        state.active_runs[zone] = ActiveRun(
             zone=zone,
-            driver=getattr(driver, "name", "unknown"),
-            error=repr(e),
+            end_time=context["end_time"],
+            time_unit=time_unit,
+            started_at=context["started_at"],
+            started_source=source,
+            started_planned_s=int(duration_s),
         )
-        raise HTTPException(status_code=503, detail=f"Unerwarteter Hardware Fehler beim Öffnen von Ventil {zone}")
 
-    now_m = time.monotonic()
-    state.active_runs[zone] = ActiveRun(
-        zone=zone,
-        end_time=now_m + duration_s,
-        time_unit=time_unit,
-        started_at=now_m,
-        started_source=source,
-        started_planned_s=int(duration_s),
-    )
+        _sync_legacy_single_fields_locked()
 
-    _sync_legacy_single_fields_locked()
+        log_event(
+            "valve_start",
+            source=source,
+            zone=zone,
+            duration_s=duration_s,
+            time_unit=time_unit,
+            hw_duration_ms=result.duration_ms,
+            queue_state=state.queue_state,
+            queue_length=len(state.queue or []),
+            automation_enabled=state.automation_enabled,
+            parallel_enabled=state.parallel_enabled,
+            max_concurrent_valves=state.max_concurrent_valves,
+        )
 
-    log_event(
-        "valve_start",
-        source=source,
-        zone=zone,
-        duration_s=duration_s,
-        time_unit=time_unit,
-        queue_state=state.queue_state,
-        queue_length=len(state.queue or []),
-        automation_enabled=state.automation_enabled,
-        parallel_enabled=state.parallel_enabled,
-        max_concurrent_valves=state.max_concurrent_valves,
-    )
 
 def start_queue_item(item: QueueItem):
+    """
+    Startet ein Queue-Item.
+    
+    WICHTIG: Muss OHNE state_lock aufgerufen werden!
+    """
     _start_valve_locked(
         zone=item.zone,
         duration_s=item.duration,

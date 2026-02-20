@@ -47,13 +47,59 @@ def timer_loop():
                     if state.parallel_drain_logged:
                         state.parallel_drain_logged = False
 
-                # queue fill
+                # queue fill - sammle Items die gestartet werden können
+                items_to_start = []
                 if state.queue_state == "läuft" and not state.paused and state.queue_state != "pausiert":
-                    while state.queue and _can_start_new_valve_locked():
+                    collected_count = 0
+                    
+                    while state.queue:
+                        # Simuliere future active_runs
+                        current_running = len(state.active_runs or {})
+                        future_running = current_running + collected_count
+                        
+                        # Check ob noch Platz ist
+                        can_start_more = False
+                        if getattr(state, "hw_faulted", False):
+                            can_start_more = False
+                        elif not state.parallel_enabled:
+                            can_start_more = (future_running == 0)
+                        else:
+                            max_conc = max(1, int(state.max_concurrent_valves))
+                            can_start_more = (future_running < max_conc)
+                        
+                        if not can_start_more:
+                            break
+                        
                         next_item = state.queue.pop(0)
+                        items_to_start.append(next_item)
+                        collected_count += 1
                         state.queue_dirty = True
-                        start_queue_item(next_item)
-
+                
+                # WICHTIG: queue_finished Check NICHT hier!
+                # Wir müssen erst die Items starten, bevor wir wissen ob fertig!
+            
+            # Starte Items OHNE Lock
+            for item in items_to_start:
+                try:
+                    start_queue_item(item)
+                except Exception as e:
+                    # Bei Fehler: Item wieder in Queue (vorne)
+                    with state_lock:
+                        state.queue.insert(0, item)
+                        state.queue_dirty = True
+                    log_event(
+                        "queue_item_start_failed",
+                        level="error",
+                        source="system",
+                        zone=item.zone,
+                        error=str(e),
+                        action="returned_to_queue"
+                    )
+            
+            # JETZT erst prüfen ob Queue fertig ist (nach Start!)
+            with state_lock:
+                # Queue ist fertig wenn: Queue leer UND nichts läuft
+                if state.queue_state == "läuft":
                     if (not state.queue) and not (state.active_runs and len(state.active_runs) > 0):
                         state.queue_state = "fertig"
                         state.queue_dirty = True
@@ -66,6 +112,7 @@ def timer_loop():
                             max_concurrent_valves=state.max_concurrent_valves,
                         )
 
+            with state_lock:
                 if state.paused:
                     continue
 

@@ -26,6 +26,9 @@ def scheduler_loop():
             hhmm = now.strftime("%H:%M")
             today_key = now.strftime("%Y-%m-%d")
 
+            # Phase 1: Sammle Jobs die gestartet werden sollen (unter Lock)
+            jobs_to_start = []
+            
             with state_lock:
                 if not getattr(state, "automation_enabled", True):
                     continue
@@ -98,7 +101,8 @@ def scheduler_loop():
                     else:
                         job = jobs[0]
                         if _can_start_new_valve_locked() and (not state.paused) and state.queue_state != "pausiert":
-                            start_queue_item(job)
+                            # Merke Job für Start OHNE Lock
+                            jobs_to_start.append(job)
                         else:
                             state.queue = state.queue or []
                             state.queue.append(job)
@@ -116,6 +120,28 @@ def scheduler_loop():
                     state.schedules = [r for r in (state.schedules or []) if r.id not in to_delete_ids]
                     state.schedules_dirty = True
                     log_event("schedule_done", source="system", deleted_ids=to_delete_ids)
+            
+            # Phase 2: Starte Jobs OHNE Lock
+            for job in jobs_to_start:
+                try:
+                    start_queue_item(job)
+                except Exception as e:
+                    # Bei Fehler: Job in Queue einfügen (vorne)
+                    with state_lock:
+                        state.queue = state.queue or []
+                        state.queue.insert(0, job)
+                        state.queue_dirty = True
+                        if state.queue_state in ("bereit", "fertig"):
+                            state.queue_state = "läuft"
+                    
+                    log_event(
+                        "schedule_start_failed",
+                        level="error",
+                        source="system",
+                        zone=job.zone,
+                        error=str(e),
+                        action="moved_to_queue"
+                    )
 
         except Exception:
             from core.logging import logger
