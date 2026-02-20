@@ -18,6 +18,9 @@ from services.timer import timer_loop
 from services.scheduler import scheduler_loop
 from services.persistence import persistence_loop
 
+# NEU: IO-Worker Import
+from services.io_worker import get_io_worker, IOCommand
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # STARTUP
@@ -45,17 +48,35 @@ async def lifespan(app: FastAPI):
     load_queue_from_disk()
     load_history_from_disk()
 
+    # NEU: IO-Worker ZUERST starten (vor Hardware-Operationen!)
+    io_worker = get_io_worker()
+    io_worker.start()
+    log_event("lifecycle_io_worker_started", source="system")
+
     # FAIL-SAFE: after a crash/power loss, valves might be physically open.
     # Always try to close everything on startup (best effort).
+    # NEU: Via IO-Worker statt direkt
     try:
-        from services.valve_driver import get_valve_driver
-        driver = get_valve_driver()
-        driver.close_all()
-        log_event("failsafe_close_all_startup", source="system", driver=getattr(driver, "name", "unknown"))
+        cmd = IOCommand(action="close_all")
+        result = io_worker.send_command(cmd, timeout_s=10.0)
+        
+        if result.success:
+            log_event(
+                "failsafe_close_all_startup",
+                source="system",
+                duration_ms=result.duration_ms
+            )
+        else:
+            log_event(
+                "failsafe_close_all_startup_failed",
+                level="error",
+                source="system",
+                error=result.error
+            )
     except Exception as e:
         logger.exception("failsafe close_all on startup failed")
         log_event(
-            "failsafe_close_all_startup_failed",
+            "failsafe_close_all_startup_exception",
             level="error",
             source="system",
             error=repr(e),
@@ -93,15 +114,28 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Best-effort: try to close everything on shutdown as well.
+    # NEU: Via IO-Worker
     try:
-        from services.valve_driver import get_valve_driver
-        driver = get_valve_driver()
-        driver.close_all()
-        log_event("failsafe_close_all_shutdown", source="system", driver=getattr(driver, "name", "unknown"))
+        cmd = IOCommand(action="close_all")
+        result = io_worker.send_command(cmd, timeout_s=10.0)
+        
+        if result.success:
+            log_event(
+                "failsafe_close_all_shutdown",
+                source="system",
+                duration_ms=result.duration_ms
+            )
+        else:
+            log_event(
+                "failsafe_close_all_shutdown_failed",
+                level="error",
+                source="system",
+                error=result.error
+            )
     except Exception as e:
         logger.exception("failsafe close_all on shutdown failed")
         log_event(
-            "failsafe_close_all_shutdown_failed",
+            "failsafe_close_all_shutdown_exception",
             level="error",
             source="system",
             error=repr(e),
@@ -129,5 +163,18 @@ async def lifespan(app: FastAPI):
             th.join(timeout=2.0)
         except Exception:
             pass
+
+    # NEU: IO-Worker ZULETZT stoppen (nach allen anderen Threads)
+    try:
+        io_worker.shutdown(timeout_s=5.0)
+        log_event("lifecycle_io_worker_stopped", source="system")
+    except Exception as e:
+        logger.exception("IO-Worker shutdown failed")
+        log_event(
+            "lifecycle_io_worker_shutdown_failed",
+            level="error",
+            source="system",
+            error=repr(e)
+        )
 
     log_event("service_stop", source="system")

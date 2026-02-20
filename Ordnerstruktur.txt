@@ -16,8 +16,6 @@ P:.
 │       queue.json
 │       history.json
 │
-├───__pycache__
-│       main.cpython-314.pyc
 │
 ├───core
 │   │   config.py
@@ -26,20 +24,11 @@ P:.
 │   │   lifecycle.py
 │   │   __init__.py
 │   │
-│   └───__pycache__
-│           __init__.cpython-314.pyc
-│           logging.cpython-314.pyc
-│           lifecycle.cpython-314.pyc
-│           config.cpython-314.pyc
-│           state.cpython-314.pyc
 │
 ├───models
 │   │   requests.py
 │   │   __init__.py
 │   │
-│   └───__pycache__
-│           __init__.cpython-314.pyc
-│           requests.cpython-314.pyc
 │
 ├───services
 │   │   engine.py
@@ -49,13 +38,6 @@ P:.
 │   │   __init__.py
 │   │   valve_driver.py
 │   │
-│   └───__pycache__
-│           __init__.cpython-314.pyc
-│           timer.cpython-314.pyc
-│           scheduler.cpython-314.pyc
-│           valve_driver.cpython-314.pyc
-│           engine.cpython-314.pyc
-│           persistence.cpython-314.pyc
 │
 ├───api
 │   │   errors.py
@@ -66,14 +48,6 @@ P:.
 │   │   __init__.py
 │   │   routes_history.py
 │   │
-│   └───__pycache__
-│           __init__.cpython-314.pyc
-│           errors.cpython-314.pyc
-│           routes_history.cpython-314.pyc
-│           routes_health.cpython-314.pyc
-│           routes_queue.cpython-314.pyc
-│           routes_schedule.cpython-314.pyc
-│           routes_control.cpython-314.pyc
 │
 └───tests
     │   test_gpio_validation.py
@@ -82,11 +56,8 @@ P:.
     │   test_api_control.py
     │   test_api_queue.py
     │   test_api_schedule.py
+    │   test_errors_logging.py
+    │   test_parallel_drain.py
+    │   test_hw_errors.py
     │
-    └───__pycache__
-            test_gpio_validation.cpython-314-pytest-9.0.2.pyc
-            test_hw_fault_blocks_start.cpython-314-pytest-9.0.2.pyc
-            conftest.cpython-314-pytest-9.0.2.pyc
-            test_api_control.cpython-314-pytest-9.0.2.pyc
-            test_api_queue.cpython-314-pytest-9.0.2.pyc
-            test_api_schedule.cpython-314-pytest-9.0.2.pyc
+    
