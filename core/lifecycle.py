@@ -18,12 +18,16 @@ from services.timer import timer_loop
 from services.scheduler import scheduler_loop
 from services.persistence import persistence_loop
 
-# NEU: IO-Worker Import
 from services.io_worker import get_io_worker, IOCommand
+from core.security import load_or_create_api_key
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # STARTUP
+
+    # Sicherheit: API-Key laden/generieren (vor allem anderen)
+    load_or_create_api_key()
+
     with state_lock:
         state.queue = state.queue or []
         state.schedules = state.schedules or []
@@ -48,14 +52,13 @@ async def lifespan(app: FastAPI):
     load_queue_from_disk()
     load_history_from_disk()
 
-    # NEU: IO-Worker ZUERST starten (vor Hardware-Operationen!)
+    # IO-Worker ZUERST starten (vor Hardware-Operationen!)
     io_worker = get_io_worker()
     io_worker.start()
     log_event("lifecycle_io_worker_started", source="system")
 
     # FAIL-SAFE: after a crash/power loss, valves might be physically open.
     # Always try to close everything on startup (best effort).
-    # NEU: Via IO-Worker statt direkt
     try:
         cmd = IOCommand(action="close_all")
         result = io_worker.send_command(cmd, timeout_s=10.0)
@@ -114,7 +117,6 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Best-effort: try to close everything on shutdown as well.
-    # NEU: Via IO-Worker
     try:
         cmd = IOCommand(action="close_all")
         result = io_worker.send_command(cmd, timeout_s=10.0)
@@ -164,7 +166,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    # NEU: IO-Worker ZULETZT stoppen (nach allen anderen Threads)
+    # IO-Worker ZULETZT stoppen (nach allen anderen Threads)
     try:
         io_worker.shutdown(timeout_s=5.0)
         log_event("lifecycle_io_worker_stopped", source="system")
