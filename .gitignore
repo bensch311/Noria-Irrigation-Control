@@ -14,3 +14,7 @@ data/
 # OS-Dateien
 .DS_Store
 Thumbs.db
+
+# pytest coverage
+.coverage
+htmlcov/
