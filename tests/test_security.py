@@ -73,7 +73,7 @@ class TestLoadOrCreateApiKey:
     def test_regenerates_key_for_invalid_format(self, tmp_path, monkeypatch):
         """Wenn api_key.txt ein ungültiges Format enthält, wird ein neuer Key generiert."""
         key_file = tmp_path / "api_key.txt"
-        key_file.write_text("zu_kurz_und_ungültig")  # kein valides Format
+        key_file.write_text("tooshort", encoding="utf-8")  # kein valides Format (ASCII, zu kurz)
 
         monkeypatch.setattr(sec, "API_KEY_FILE", str(key_file))
         monkeypatch.setattr(sec, "_api_key", "")

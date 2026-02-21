@@ -70,7 +70,7 @@ def load_or_create_api_key() -> str:
                 detail="Key hat nicht das erwartete Format (64 Hex-Zeichen). Neuer Key wird generiert.",
             )
 
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             logger.exception("api_key: Datei konnte nicht gelesen werden")
             log_event(
                 "api_key_read_error",
