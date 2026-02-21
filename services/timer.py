@@ -51,12 +51,12 @@ def timer_loop():
                 items_to_start = []
                 if state.queue_state == "läuft" and not state.paused and state.queue_state != "pausiert":
                     collected_count = 0
-                    
+
                     while state.queue:
                         # Simuliere future active_runs
                         current_running = len(state.active_runs or {})
                         future_running = current_running + collected_count
-                        
+
                         # Check ob noch Platz ist
                         can_start_more = False
                         if getattr(state, "hw_faulted", False):
@@ -66,18 +66,15 @@ def timer_loop():
                         else:
                             max_conc = max(1, int(state.max_concurrent_valves))
                             can_start_more = (future_running < max_conc)
-                        
+
                         if not can_start_more:
                             break
-                        
+
                         next_item = state.queue.pop(0)
                         items_to_start.append(next_item)
                         collected_count += 1
                         state.queue_dirty = True
-                
-                # WICHTIG: queue_finished Check NICHT hier!
-                # Wir müssen erst die Items starten, bevor wir wissen ob fertig!
-            
+
             # Starte Items OHNE Lock
             for item in items_to_start:
                 try:
@@ -95,23 +92,10 @@ def timer_loop():
                         error=str(e),
                         action="returned_to_queue"
                     )
-            
-            # JETZT erst prüfen ob Queue fertig ist (nach Start!)
-            with state_lock:
-                # Queue ist fertig wenn: Queue leer UND nichts läuft
-                if state.queue_state == "läuft":
-                    if (not state.queue) and not (state.active_runs and len(state.active_runs) > 0):
-                        state.queue_state = "fertig"
-                        state.queue_dirty = True
-                        log_event(
-                            "queue_finished",
-                            source="system",
-                            queue_state=state.queue_state,
-                            queue_length=0,
-                            parallel_enabled=state.parallel_enabled,
-                            max_concurrent_valves=state.max_concurrent_valves,
-                        )
 
+            # Timeout-Verarbeitung + Queue-fertig-Check in einem Lock-Block.
+            # WICHTIG: Der fertig-Check muss NACH dem Entfernen abgelaufener Zonen
+            # stattfinden, damit er den korrekten active_runs-Zustand sieht.
             with state_lock:
                 if state.paused:
                     continue
@@ -151,23 +135,20 @@ def timer_loop():
 
                         if ar.hw_close_failures >= int(HW_CLOSE_MAX_RETRIES):
                             # Latch a hardware fault to prevent any further starts.
-                            fault_ts = datetime.now(TZ).isoformat(timespec="seconds")
                             state.hw_faulted = True
                             state.hw_fault_reason = "close_failed_max_retries"
                             state.hw_fault_zone = zone
-                            state.hw_fault_since = fault_ts
+                            state.hw_fault_since = datetime.now(TZ).isoformat(timespec="seconds")
 
                             log_event(
                                 "hw_fault_latched",
                                 level="critical",
                                 source="system",
-                                reason=state.hw_fault_reason,
                                 zone=zone,
                                 failures=ar.hw_close_failures,
-                                error=str(e),
+                                reason=str(e),
                             )
 
-                            # Best-effort emergency shutdown (may fail too).
                             if not bool(getattr(state, "hw_fault_close_all_attempted", False)):
                                 state.hw_fault_close_all_attempted = True
                                 try:
@@ -200,7 +181,6 @@ def timer_loop():
                         ar.end_time = now_m + 1.0
                         continue
 
-
                     if zone == state.running_zone:
                         actual_s = _calc_actual_run_s_primary(now_m)
                     else:
@@ -225,6 +205,24 @@ def timer_loop():
                     )
 
                 _sync_legacy_single_fields_locked()
+
+                # Queue "fertig" prüfen – erst NACH dem Entfernen abgelaufener Zonen,
+                # damit active_runs den aktuellen (korrekten) Zustand widerspiegelt.
+                # Dies deckt zwei Fälle ab:
+                #   1. Die letzte Zone ist soeben abgelaufen (finished-Schleife oben).
+                #   2. Queue war nach dem Item-Start bereits leer und nichts läuft.
+                if state.queue_state == "läuft":
+                    if (not state.queue) and not (state.active_runs and len(state.active_runs) > 0):
+                        state.queue_state = "fertig"
+                        state.queue_dirty = True
+                        log_event(
+                            "queue_finished",
+                            source="system",
+                            queue_state=state.queue_state,
+                            queue_length=0,
+                            parallel_enabled=state.parallel_enabled,
+                            max_concurrent_valves=state.max_concurrent_valves,
+                        )
 
         except Exception:
             logger.exception("timer_loop crashed")
