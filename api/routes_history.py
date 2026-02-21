@@ -1,8 +1,10 @@
 # app/api/routes_history.py
-from fastapi import APIRouter
-from core.state import state, state_lock
+from fastapi import APIRouter, Depends
 
-router = APIRouter()
+from core.state import state, state_lock
+from core.security import require_api_key
+
+router = APIRouter(dependencies=[Depends(require_api_key)])
 
 @router.get("/history")
 def get_history():

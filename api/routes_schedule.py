@@ -1,11 +1,14 @@
+# app/api/routes_schedule.py
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from core.state import state, state_lock, ScheduleRule
 from core.logging import log_event
+from core.security import require_api_key
 from models.requests import ScheduleAddRequest
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_key)])
+
 
 @router.get("/schedule")
 def get_schedules():
@@ -30,11 +33,13 @@ def get_schedules():
             ],
         }
 
+
 @router.post("/schedule/add")
 def add_schedule(req: ScheduleAddRequest):
     with state_lock:
         max_runtime_s = int(getattr(state, "hard_max_runtime_s", 3600))
         max_v = int(getattr(state, "max_valves", 1))
+
     if req.zone != 0 and (req.zone < 1 or req.zone > max_v):
         raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{max_v} sein.")
 
@@ -51,10 +56,9 @@ def add_schedule(req: ScheduleAddRequest):
         hhi, mmi = int(hh), int(mm)
         if hhi < 0 or hhi > 23 or mmi < 0 or mmi > 59:
             raise HTTPException(status_code=400, detail="start_times muss gültige Uhrzeiten enthalten.")
-        
+
     if req.duration_s > max_runtime_s:
         raise HTTPException(status_code=400, detail=f"duration_s darf max. {max_runtime_s} Sekunden sein.")
-
 
     once_pending = None
     if not req.repeat:
@@ -90,6 +94,7 @@ def add_schedule(req: ScheduleAddRequest):
     )
     return {"ok": True, "id": rule.id}
 
+
 @router.post("/schedule/enable/{schedule_id}")
 def enable_schedule(schedule_id: str):
     with state_lock:
@@ -101,6 +106,7 @@ def enable_schedule(schedule_id: str):
                 return {"ok": True, "enabled": True}
     raise HTTPException(status_code=404, detail="Schedule nicht gefunden.")
 
+
 @router.post("/schedule/disable/{schedule_id}")
 def disable_schedule(schedule_id: str):
     with state_lock:
@@ -111,6 +117,7 @@ def disable_schedule(schedule_id: str):
                 log_event("schedule_disable", source="manual", schedule_id=r.id, zone=r.zone)
                 return {"ok": True, "enabled": False}
     raise HTTPException(status_code=404, detail="Schedule nicht gefunden.")
+
 
 @router.delete("/schedule")
 def delete_schedules(ids: list[str]):
