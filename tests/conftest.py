@@ -5,10 +5,15 @@ Autouse-Fixtures sorgen vor/nach jedem Test für:
   - sauberen RunState (clean_state)
   - SimValveDriver als Valve-Driver (sim_driver)
   - MagicMock als IO-Worker (mock_io)
+  - bekannten API-Key in core.security (_patch_api_key)
 
 Opt-in Fixtures:
   - failing_io  : IO-Worker schlägt immer fehl
-  - client      : FastAPI-TestClient ohne Lifespan
+  - client      : FastAPI-TestClient ohne Lifespan, mit Auth-Header
+
+Konstanten:
+  - TEST_API_KEY: Der für alle Tests verwendete API-Key (64 Hex-Zeichen).
+                  Kann in Sicherheitstests über Header-Override überschrieben werden.
 """
 
 import time
@@ -29,6 +34,13 @@ from core.state import (
 )
 from services.io_worker import IOResult, IOWorker, set_io_worker, reset_io_worker
 from services.valve_driver import SimValveDriver, set_valve_driver, reset_valve_driver
+
+# ---------------------------------------------------------------------------
+# Test-API-Key: 64 gültige Hex-Zeichen (256 bit), fest für alle Tests.
+# Dieser Key wird in _patch_api_key in core.security._api_key injiziert
+# und vom client-Fixture automatisch als Header gesendet.
+# ---------------------------------------------------------------------------
+TEST_API_KEY = "deadbeef" * 8  # 64 Hex-Zeichen
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +124,22 @@ def mock_io():
     reset_io_worker()
 
 
+@pytest.fixture(autouse=True)
+def _patch_api_key(monkeypatch):
+    """
+    Setzt core.security._api_key auf TEST_API_KEY für die Dauer jedes Tests.
+
+    Damit ist die Security-Dependency in allen Tests aktiv, aber mit einem
+    bekannten Key – kein Disk-Zugriff, kein echter Startup nötig.
+
+    Tests die Auth-Fehler prüfen wollen, senden einfach einen falschen oder
+    leeren X-API-Key-Header (das Default-Header im client-Fixture kann per
+    request-Zeit-Header überschrieben werden).
+    """
+    import core.security as sec
+    monkeypatch.setattr(sec, "_api_key", TEST_API_KEY)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Opt-in Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,8 +182,21 @@ def app():
 
 @pytest.fixture
 def client(app):
-    """Starlette-TestClient; Exceptions aus Handlern werden als Responses zurückgegeben."""
-    with TestClient(app, raise_server_exceptions=True) as c:
+    """
+    Starlette-TestClient; Exceptions aus Handlern werden als Responses zurückgegeben.
+
+    Sendet automatisch den TEST_API_KEY als X-API-Key-Header, damit alle
+    bestehenden Tests ohne Änderung weiter funktionieren.
+
+    Für Tests die Auth-Fehler prüfen wollen:
+        resp = client.get("/status", headers={"X-API-Key": ""})      # kein Key
+        resp = client.get("/status", headers={"X-API-Key": "wrong"}) # falscher Key
+    """
+    with TestClient(
+        app,
+        raise_server_exceptions=True,
+        headers={"X-API-Key": TEST_API_KEY},
+    ) as c:
         yield c
 
 
