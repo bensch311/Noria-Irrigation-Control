@@ -63,3 +63,8 @@ HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 DEVICE_CONFIG_FILE = os.path.join(DATA_DIR, "device_config.json")
 USER_SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
 RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
+
+# Security: API-Key wird beim ersten Start generiert und hier abgelegt.
+# Datei sollte Berechtigungen 600 haben (nur Owner lesbar).
+# Niemals in git einchecken – siehe .gitignore.
+API_KEY_FILE = os.path.join(DATA_DIR, "api_key.txt")
