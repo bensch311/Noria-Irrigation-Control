@@ -71,8 +71,10 @@ def test_start_calls_io_open(client, mock_io):
 
 
 def test_start_zone_out_of_range_low(client):
+    # zone=0 verletzt das Pydantic-Constraint ge=1 -> 422 (Pydantic validiert vor dem Handler).
+    # 422 ist korrekt: Strukturell ungueltige Eingabe wird von Pydantic abgelehnt.
     resp = client.post("/start", json={"zone": 0, "duration": 60, "time_unit": "Sekunden"})
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_start_zone_out_of_range_high(client):

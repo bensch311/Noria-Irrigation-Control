@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from typing import Literal
 from core.logging import log_event, logger
 
+# BUGFIX: ValveDriverError muss auf Modul-Ebene importiert werden,
+# damit _execute_command() (separate Methode) darauf zugreifen kann.
+# Vorher war der Import nur innerhalb von _worker_loop() → NameError
+# sobald ein echter GPIO-Fehler auftrat.
+from services.valve_driver import ValveDriverError
+
 
 @dataclass
 class IOCommand:
@@ -160,7 +166,9 @@ class IOWorker:
         Hauptschleife des IO-Workers.
         Läuft in separatem Thread und verarbeitet Commands sequenziell.
         """
-        from services.valve_driver import get_valve_driver, ValveDriverError
+        # BUGFIX: ValveDriverError wird jetzt auf Modul-Ebene importiert,
+        # daher hier nur noch get_valve_driver nötig.
+        from services.valve_driver import get_valve_driver
         
         driver = None
         
@@ -215,6 +223,7 @@ class IOWorker:
         Führt ein einzelnes Command aus.
         
         Misst Ausführungszeit und fängt alle Exceptions.
+        ValveDriverError ist auf Modul-Ebene importiert und daher hier verfügbar.
         """
         if driver is None:
             return IOResult(
@@ -243,7 +252,7 @@ class IOWorker:
                 result.error = f"Unbekannte Action: {cmd.action}"
                 
         except ValveDriverError as e:
-            # Erwarteter Hardware-Fehler
+            # Erwarteter Hardware-Fehler – jetzt korrekt abgefangen dank Modul-Import
             result.error = str(e)
             log_event(
                 "io_worker_valve_error",

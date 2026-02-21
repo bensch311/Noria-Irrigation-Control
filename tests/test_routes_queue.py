@@ -74,8 +74,10 @@ def test_queue_add_multiple_items(client):
 
 
 def test_queue_add_invalid_zone_zero(client):
+    # zone=0 verletzt das Pydantic-Constraint ge=1 -> 422 (Pydantic validiert vor dem Handler).
+    # 422 ist korrekt: Strukturell ungueltige Eingabe wird von Pydantic abgelehnt.
     resp = client.post("/queue/add", json={"zone": 0, "duration": 60, "time_unit": "Sekunden"})
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_queue_add_zone_exceeds_max(client):
