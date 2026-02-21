@@ -1,0 +1,248 @@
+"""
+Gemeinsame Fixtures und Hilfsfunktionen für alle Tests.
+
+Autouse-Fixtures sorgen vor/nach jedem Test für:
+  - sauberen RunState (clean_state)
+  - SimValveDriver als Valve-Driver (sim_driver)
+  - MagicMock als IO-Worker (mock_io)
+
+Opt-in Fixtures:
+  - failing_io  : IO-Worker schlägt immer fehl
+  - client      : FastAPI-TestClient ohne Lifespan
+"""
+
+import time
+import uuid
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from unittest.mock import MagicMock
+
+from core.state import (
+    state,
+    state_lock,
+    ActiveRun,
+    QueueItem,
+    ScheduleRule,
+    HistoryItem,
+)
+from services.io_worker import IOResult, IOWorker, set_io_worker, reset_io_worker
+from services.valve_driver import SimValveDriver, set_valve_driver, reset_valve_driver
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# State-Reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def reset_global_state() -> None:
+    """Setzt den gesamten RunState auf saubere Defaults zurück."""
+    with state_lock:
+        state.active_runs = {}
+        state.queue = []
+        state.schedules = []
+        state.run_history = []
+        state.running_zone = None
+        state.end_time = 0.0
+        state.time_unit = "Minuten"
+        state.paused = False
+        state.remaining_s = 0
+        state.queue_state = "bereit"
+        state.queue_state_before_valve_pause = "bereit"
+        state.parallel_enabled = False
+        state.max_concurrent_valves = 2
+        state.max_valves = 6
+        state.hard_max_runtime_s = 3600
+        state.hard_max_concurrent_valves = 2
+        state.automation_enabled = True
+        state.automation_block_run_key = None
+        state.hw_faulted = False
+        state.hw_fault_reason = ""
+        state.hw_fault_zone = None
+        state.hw_fault_since = ""
+        state.hw_fault_close_all_attempted = False
+        state.schedules_dirty = False
+        state.queue_dirty = False
+        state.history_dirty = False
+        state.started_at = 0.0
+        state.started_source = "manual"
+        state.started_planned_s = 0
+        state.paused_at = 0.0
+        state.paused_total_s = 0.0
+        state.parallel_drain_logged = False
+        state.valve_driver_mode = "sim"
+        state.relay_active_low = True
+        state.gpio_pins_by_zone = {}
+        state.max_history_items = 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Autouse-Fixtures  (laufen für jeden einzelnen Test)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def clean_state():
+    reset_global_state()
+    yield
+    reset_global_state()
+
+
+@pytest.fixture(autouse=True)
+def sim_driver():
+    """Installiert SimValveDriver als globalen Singleton (loggt, kein GPIO)."""
+    drv = SimValveDriver()
+    set_valve_driver(drv)
+    yield drv
+    reset_valve_driver()
+
+
+@pytest.fixture(autouse=True)
+def mock_io():
+    """
+    Installiert einen MagicMock als globalen IO-Worker.
+    Standard-Rückgabe: IOResult(success=True, duration_ms=1.0)
+    """
+    worker = MagicMock(spec=IOWorker)
+    worker.send_command.return_value = IOResult(success=True, duration_ms=1.0)
+    worker._started = True
+    set_io_worker(worker)
+    yield worker
+    reset_io_worker()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Opt-in Fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def failing_io(mock_io):
+    """
+    Überschreibt mock_io so, dass jeder send_command-Aufruf fehlschlägt.
+    Gibt die konfigurierte Zone aus dem Command zurück.
+    """
+
+    def _fail(cmd, timeout_s=5.0):
+        return IOResult(success=False, zone=cmd.zone, error="GPIO Fehler", duration_ms=1.0)
+
+    mock_io.send_command.side_effect = _fail
+    yield mock_io
+    mock_io.send_command.side_effect = None
+
+
+@pytest.fixture
+def app():
+    """FastAPI-App *ohne* Lifespan – für schnelle Route-Tests."""
+    from api.errors import register_error_handlers
+    from api.routes_health import router as health_router
+    from api.routes_queue import router as queue_router
+    from api.routes_schedule import router as schedule_router
+    from api.routes_control import router as control_router
+    from api.routes_history import router as history_router
+
+    _app = FastAPI()
+    register_error_handlers(_app)
+    _app.include_router(health_router)
+    _app.include_router(queue_router)
+    _app.include_router(schedule_router)
+    _app.include_router(control_router)
+    _app.include_router(history_router)
+    return _app
+
+
+@pytest.fixture
+def client(app):
+    """Starlette-TestClient; Exceptions aus Handlern werden als Responses zurückgegeben."""
+    with TestClient(app, raise_server_exceptions=True) as c:
+        yield c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Factory-Fixtures  (erzeugen Objekte, injizieren keine State-Änderungen)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def make_active_run():
+    """Factory: erzeugt einen ActiveRun mit realistischen Defaults."""
+
+    def _factory(
+        zone: int = 1,
+        duration_s: int = 60,
+        source: str = "manual",
+        elapsed: bool = False,
+    ) -> ActiveRun:
+        now = time.monotonic()
+        end_time = (now - 1.0) if elapsed else (now + duration_s)
+        return ActiveRun(
+            zone=zone,
+            end_time=end_time,
+            time_unit="Sekunden",
+            started_at=now - (duration_s if elapsed else 0),
+            started_source=source,
+            started_planned_s=duration_s,
+        )
+
+    return _factory
+
+
+@pytest.fixture
+def make_schedule():
+    """Factory: erzeugt eine ScheduleRule mit sinnvollen Defaults."""
+
+    def _factory(
+        zone: int = 1,
+        weekdays: list | None = None,
+        start_times: list | None = None,
+        duration_s: int = 60,
+        repeat: bool = True,
+        enabled: bool = True,
+        rule_id: str | None = None,
+    ) -> ScheduleRule:
+        days = weekdays if weekdays is not None else list(range(7))
+        times = start_times or ["06:00"]
+        return ScheduleRule(
+            id=rule_id or str(uuid.uuid4())[:8],
+            zone=zone,
+            weekdays=days,
+            start_times=times,
+            duration_s=duration_s,
+            time_unit="Sekunden",
+            repeat=repeat,
+            enabled=enabled,
+            once_pending=(
+                None
+                if repeat
+                else [f"{d} {t}" for d in days for t in times]
+            ),
+        )
+
+    return _factory
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hilfsfunktion (kein Fixture – direkter Import in Tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def set_running_zone(zone: int, duration_s: int = 60, source: str = "manual"):
+    """
+    Setzt state.active_runs + Sync-Felder auf einen laufenden Zustand.
+    Muss OHNE state_lock aufgerufen werden (holt Lock intern).
+    """
+    from services.engine import _sync_legacy_single_fields_locked
+
+    now = time.monotonic()
+    ar = ActiveRun(
+        zone=zone,
+        end_time=now + duration_s,
+        time_unit="Sekunden",
+        started_at=now,
+        started_source=source,
+        started_planned_s=duration_s,
+    )
+    with state_lock:
+        state.active_runs = {zone: ar}
+        _sync_legacy_single_fields_locked()
