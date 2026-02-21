@@ -3,20 +3,21 @@ Tests für services/persistence.py
 
 Getestet werden:
   - save/load schedules      (Roundtrip, fehlende Datei, corrupt JSON,
-                               automation_block_run_key-Setzung)
+                               automation_block_run_key-Setzung, once_pending)
   - save/load queue          (Roundtrip, fehlende Datei, corrupt JSON)
   - save/load history        (Roundtrip, Limit, fehlende Datei, corrupt JSON)
   - load_device_config       (valide, fehlende, korrupte Datei, Normalisierung)
   - load_user_settings       (valide, fehlende, korrupte Datei, Roundtrip)
   - load_runtime_state       (valide, fehlende, korrupte Datei, Clamping, Roundtrip)
   - _atomic_write_json       (atomares Schreiben)
-  - _backup_corrupt_file     (erstellt .corrupt-Datei)
+  - _backup_corrupt_file     (erstellt .corrupt-Datei, Fehler beim Umbenennen)
   - Deserializer-Defaults    (fehlende optionale Felder)
 """
 
 import json
 import os
 import pytest
+from unittest.mock import patch
 
 from core.state import state, state_lock, QueueItem, ScheduleRule, HistoryItem
 
@@ -84,15 +85,65 @@ def test_save_schedules_sets_not_dirty(tmp_path, monkeypatch, make_schedule):
         assert state.schedules_dirty is False
 
 
+def test_load_schedules_corrupt_json_does_not_raise(tmp_path, monkeypatch):
+    """
+    Korruptes schedules.json darf den Start nicht abbrechen.
+    Kritisch: Nach Stromausfall mitten in einem Schreibvorgang kann die Datei
+    partiell korrupt sein. Der Bewässerungscomputer muss trotzdem starten.
+    """
+    import services.persistence as pers
+
+    sched_file = tmp_path / "schedules.json"
+    sched_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "SCHEDULES_FILE", str(sched_file))
+
+    with state_lock:
+        state.schedules = []
+
+    pers.load_schedules_from_disk()  # Darf NICHT werfen
+
+
+def test_load_schedules_corrupt_json_leaves_state_unchanged(tmp_path, monkeypatch):
+    """Bei korruptem JSON bleibt state.schedules unverändert (leer)."""
+    import services.persistence as pers
+
+    sched_file = tmp_path / "schedules.json"
+    sched_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "SCHEDULES_FILE", str(sched_file))
+
+    with state_lock:
+        state.schedules = []
+
+    pers.load_schedules_from_disk()
+
+    with state_lock:
+        assert state.schedules == []
+
+
+def test_load_schedules_corrupt_creates_backup(tmp_path, monkeypatch):
+    """Korruptes schedules.json wird als .corrupt-* gesichert."""
+    import services.persistence as pers
+
+    sched_file = tmp_path / "schedules.json"
+    sched_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "SCHEDULES_FILE", str(sched_file))
+
+    pers.load_schedules_from_disk()
+
+    backups = list(tmp_path.glob("schedules.json.corrupt-*"))
+    assert len(backups) == 1
+
+
 def test_load_schedules_sets_automation_block_run_key_when_enabled(tmp_path, monkeypatch, make_schedule):
     """
     Wenn automation_enabled=True beim Laden, muss automation_block_run_key
-    auf die aktuelle Minute gesetzt werden, damit keine doppelten Starts
-    nach einem Neustart passieren (Crash-Safety).
+    auf die aktuelle Minute gesetzt werden (Crash-Safety: kein Doppelstart
+    nach Neustart innerhalb derselben Minute).
     """
     import services.persistence as pers
-    from datetime import datetime
-    from core.config import TZ
 
     monkeypatch.setattr(pers, "SCHEDULES_FILE", str(tmp_path / "schedules.json"))
 
@@ -110,13 +161,11 @@ def test_load_schedules_sets_automation_block_run_key_when_enabled(tmp_path, mon
 
     with state_lock:
         assert state.automation_block_run_key is not None
-        # Format muss "YYYY-MM-DD HH:MM" sein
-        assert len(state.automation_block_run_key) == 16
+        assert len(state.automation_block_run_key) == 16  # "YYYY-MM-DD HH:MM"
+
 
 def test_load_schedules_block_run_key_none_when_disabled(tmp_path, monkeypatch, make_schedule):
-    """
-    Wenn automation_enabled=False beim Laden, bleibt automation_block_run_key=None.
-    """
+    """Wenn automation_enabled=False beim Laden, bleibt automation_block_run_key=None."""
     import services.persistence as pers
 
     monkeypatch.setattr(pers, "SCHEDULES_FILE", str(tmp_path / "schedules.json"))
@@ -165,15 +214,13 @@ def test_schedule_roundtrip_preserves_once_pending(tmp_path, monkeypatch, make_s
 def test_deserialize_schedule_defaults_for_optional_fields():
     """
     _deserialize_schedule muss auch mit minimalen Dicts umgehen können
-    (ältere Datenbankversionen ohne alle Felder).
+    (Abwärtskompatibilität mit älteren Datenbankversionen).
     """
     from services.persistence import _deserialize_schedule
 
-    minimal = {
-        "id": "abc123",
-        "zone": 2,
-    }
+    minimal = {"id": "abc123", "zone": 2}
     rule = _deserialize_schedule(minimal)
+
     assert rule.id == "abc123"
     assert rule.zone == 2
     assert rule.weekdays == []
@@ -216,7 +263,7 @@ def test_save_load_queue_roundtrip(tmp_path, monkeypatch):
         assert state.queue[0].duration == 60
         assert state.queue[1].zone == 3
         assert state.queue[1].time_unit == "Minuten"
-        assert state.queue_state == "bereit"   # wird beim Laden auf bereit gesetzt
+        assert state.queue_state == "bereit"  # wird beim Laden auf bereit gesetzt
         assert state.queue_dirty is False
 
 
@@ -226,8 +273,60 @@ def test_load_queue_missing_file(tmp_path, monkeypatch):
     monkeypatch.setattr(pers, "QUEUE_FILE", str(tmp_path / "nope.json"))
 
     pers.load_queue_from_disk()  # Darf keinen Fehler werfen
+
     with state_lock:
         assert state.queue == []
+
+
+def test_load_queue_corrupt_json_does_not_raise(tmp_path, monkeypatch):
+    """
+    Korruptes queue.json darf den Start nicht abbrechen.
+    Fehlende Queue beim Start → leer starten, kein Absturz.
+    """
+    import services.persistence as pers
+
+    queue_file = tmp_path / "queue.json"
+    queue_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "QUEUE_FILE", str(queue_file))
+
+    with state_lock:
+        state.queue = []
+
+    pers.load_queue_from_disk()  # Darf NICHT werfen
+
+
+def test_load_queue_corrupt_json_leaves_state_unchanged(tmp_path, monkeypatch):
+    """Bei korruptem JSON bleibt state.queue unverändert."""
+    import services.persistence as pers
+
+    queue_file = tmp_path / "queue.json"
+    queue_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "QUEUE_FILE", str(queue_file))
+
+    with state_lock:
+        state.queue = []
+
+    pers.load_queue_from_disk()
+
+    with state_lock:
+        assert state.queue == []
+
+
+def test_load_queue_corrupt_creates_backup(tmp_path, monkeypatch):
+    """Korruptes queue.json wird als .corrupt-* gesichert."""
+    import services.persistence as pers
+
+    queue_file = tmp_path / "queue.json"
+    queue_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "QUEUE_FILE", str(queue_file))
+
+    pers.load_queue_from_disk()
+
+    backups = list(tmp_path.glob("queue.json.corrupt-*"))
+    assert len(backups) == 1
 
 
 def test_deserialize_queue_item_source_default():
@@ -303,6 +402,57 @@ def test_load_history_missing_file(tmp_path, monkeypatch):
         assert state.run_history == []
 
 
+def test_load_history_corrupt_json_does_not_raise(tmp_path, monkeypatch):
+    """
+    Korruptes history.json darf den Start nicht abbrechen.
+    History-Verlust beim Neustart ist akzeptabel, Absturz nicht.
+    """
+    import services.persistence as pers
+
+    history_file = tmp_path / "history.json"
+    history_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "HISTORY_FILE", str(history_file))
+
+    with state_lock:
+        state.run_history = []
+
+    pers.load_history_from_disk()  # Darf NICHT werfen
+
+
+def test_load_history_corrupt_json_leaves_state_unchanged(tmp_path, monkeypatch):
+    """Bei korruptem JSON bleibt state.run_history unverändert."""
+    import services.persistence as pers
+
+    history_file = tmp_path / "history.json"
+    history_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "HISTORY_FILE", str(history_file))
+
+    with state_lock:
+        state.run_history = []
+
+    pers.load_history_from_disk()
+
+    with state_lock:
+        assert state.run_history == []
+
+
+def test_load_history_corrupt_creates_backup(tmp_path, monkeypatch):
+    """Korruptes history.json wird als .corrupt-* gesichert."""
+    import services.persistence as pers
+
+    history_file = tmp_path / "history.json"
+    history_file.write_text("{ KAPUTT JSON !!!", encoding="utf-8")
+
+    monkeypatch.setattr(pers, "HISTORY_FILE", str(history_file))
+
+    pers.load_history_from_disk()
+
+    backups = list(tmp_path.glob("history.json.corrupt-*"))
+    assert len(backups) == 1
+
+
 def test_deserialize_history_item_defaults():
     """_deserialize_history_item liefert sinnvolle Defaults für fehlende Felder."""
     from services.persistence import _deserialize_history_item
@@ -355,7 +505,6 @@ def test_load_device_config_missing_creates_template(tmp_path, monkeypatch):
 
     pers.load_device_config_from_disk()
 
-    # Template muss erstellt worden sein
     assert cfg_file.exists()
     payload = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert "device" in payload
@@ -373,13 +522,11 @@ def test_load_device_config_corrupt_uses_defaults(tmp_path, monkeypatch):
     pers.load_device_config_from_disk()
 
     with state_lock:
-        # Defaults müssen verwendet werden
         assert state.max_valves == MAX_VALVES
         assert state.valve_driver_mode == "sim"
 
 
 def test_load_device_config_corrupt_creates_backup(tmp_path, monkeypatch):
-    """Korrupte Datei muss als .corrupt-* umbenannt werden."""
     import services.persistence as pers
 
     cfg_file = tmp_path / "device_config.json"
@@ -389,13 +536,11 @@ def test_load_device_config_corrupt_creates_backup(tmp_path, monkeypatch):
 
     pers.load_device_config_from_disk()
 
-    # Originaldatei darf nicht mehr existieren (umbenannt)
     corrupt_files = list(tmp_path.glob("device_config.json.corrupt-*"))
     assert len(corrupt_files) == 1
 
 
 def test_load_device_config_invalid_driver_normalized_to_sim(tmp_path, monkeypatch):
-    """Unbekannter Treiber-Name muss auf 'sim' normalisiert werden."""
     import services.persistence as pers
 
     cfg_file = tmp_path / "device_config.json"
@@ -419,9 +564,6 @@ def test_load_device_config_invalid_driver_normalized_to_sim(tmp_path, monkeypat
 
 
 def test_load_device_config_hard_concurrent_clamped_to_max_valves(tmp_path, monkeypatch):
-    """
-    MAX_CONCURRENT_VALVES darf MAX_VALVES nicht überschreiten.
-    """
     import services.persistence as pers
 
     cfg_file = tmp_path / "device_config.json"
@@ -444,7 +586,6 @@ def test_load_device_config_hard_concurrent_clamped_to_max_valves(tmp_path, monk
     pers.load_device_config_from_disk()
 
     with state_lock:
-        # Muss auf max_valves=2 geclampt werden
         assert state.hard_max_concurrent_valves <= 2
 
 
@@ -471,7 +612,6 @@ def test_load_user_settings_valid(tmp_path, monkeypatch):
 
 
 def test_load_user_settings_missing_creates_defaults(tmp_path, monkeypatch):
-    """Fehlende user_settings.json → Defaults laden und Template schreiben."""
     import services.persistence as pers
     from core.config import MAX_HISTORY_ITEMS
 
@@ -480,14 +620,12 @@ def test_load_user_settings_missing_creates_defaults(tmp_path, monkeypatch):
 
     pers.load_user_settings_from_disk()
 
-    # Template muss erstellt worden sein
     assert settings_file.exists()
     with state_lock:
         assert state.max_history_items == MAX_HISTORY_ITEMS
 
 
 def test_load_user_settings_corrupt_uses_defaults(tmp_path, monkeypatch):
-    """Korrupte user_settings.json → Defaults, Backup."""
     import services.persistence as pers
     from core.config import MAX_HISTORY_ITEMS
 
@@ -501,13 +639,11 @@ def test_load_user_settings_corrupt_uses_defaults(tmp_path, monkeypatch):
     with state_lock:
         assert state.max_history_items == MAX_HISTORY_ITEMS
 
-    # Backup muss erstellt worden sein
     corrupt_files = list(tmp_path.glob("user_settings.json.corrupt-*"))
     assert len(corrupt_files) == 1
 
 
 def test_save_load_user_settings_roundtrip(tmp_path, monkeypatch):
-    """save_user_settings_to_disk + load_user_settings_from_disk Roundtrip."""
     import services.persistence as pers
 
     settings_file = tmp_path / "user_settings.json"
@@ -519,7 +655,7 @@ def test_save_load_user_settings_roundtrip(tmp_path, monkeypatch):
     pers.save_user_settings_to_disk()
 
     with state_lock:
-        state.max_history_items = 99  # Anderen Wert setzen
+        state.max_history_items = 99
 
     pers.load_user_settings_from_disk()
 
@@ -558,7 +694,6 @@ def test_save_load_runtime_state_roundtrip(tmp_path, monkeypatch):
 
 
 def test_load_runtime_state_clamped_to_hard_limit(tmp_path, monkeypatch):
-    """max_concurrent_valves wird auf hard_max_concurrent_valves geclampt."""
     import services.persistence as pers
 
     rt_file = tmp_path / "runtime_state.json"
@@ -566,7 +701,7 @@ def test_load_runtime_state_clamped_to_hard_limit(tmp_path, monkeypatch):
         "version": 1,
         "runtime": {
             "parallel_enabled": True,
-            "max_concurrent_valves": 99,  # Weit über Limit
+            "max_concurrent_valves": 99,
         },
     }), encoding="utf-8")
 
@@ -583,7 +718,6 @@ def test_load_runtime_state_clamped_to_hard_limit(tmp_path, monkeypatch):
 
 
 def test_load_runtime_state_missing_creates_defaults(tmp_path, monkeypatch):
-    """Fehlende runtime_state.json → Defaults laden und Template schreiben."""
     import services.persistence as pers
     from core.config import DEFAULT_PARALLEL_ENABLED
 
@@ -592,14 +726,12 @@ def test_load_runtime_state_missing_creates_defaults(tmp_path, monkeypatch):
 
     pers.load_runtime_state_from_disk()
 
-    # Template muss erstellt worden sein
     assert rt_file.exists()
     with state_lock:
         assert state.parallel_enabled == DEFAULT_PARALLEL_ENABLED
 
 
 def test_load_runtime_state_corrupt_uses_defaults(tmp_path, monkeypatch):
-    """Korrupte runtime_state.json → Defaults, Backup."""
     import services.persistence as pers
     from core.config import DEFAULT_PARALLEL_ENABLED
 
@@ -658,10 +790,7 @@ def test_backup_corrupt_file_renames_file(tmp_path):
 
     _backup_corrupt_file(str(target))
 
-    # Original darf nicht mehr existieren
     assert not target.exists()
-
-    # Backup muss existieren
     backups = list(tmp_path.glob("broken.json.corrupt-*"))
     assert len(backups) == 1
 
@@ -671,3 +800,17 @@ def test_backup_corrupt_file_nonexistent_does_not_raise(tmp_path):
     from services.persistence import _backup_corrupt_file
 
     _backup_corrupt_file(str(tmp_path / "nonexistent.json"))  # Darf nicht werfen
+
+
+def test_backup_corrupt_file_os_error_does_not_raise(tmp_path):
+    """
+    Wenn os.replace() einen OSError wirft (z.B. Dateisystem voll / read-only),
+    darf _backup_corrupt_file nicht crashen. Es ist explizit best-effort.
+    """
+    from services.persistence import _backup_corrupt_file
+
+    target = tmp_path / "broken.json"
+    target.write_text("kaputt", encoding="utf-8")
+
+    with patch("services.persistence.os.replace", side_effect=OSError("read-only fs")):
+        _backup_corrupt_file(str(target))  # Darf NICHT werfen

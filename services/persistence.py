@@ -1,3 +1,4 @@
+# services/persistence.py
 import os
 import json
 from datetime import datetime
@@ -11,21 +12,28 @@ from core.logging import log_event, logger
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _atomic_write_json(path: str, data: dict):
+    """Schreibt JSON atomar: erst .tmp, dann os.replace – crash-safe."""
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
-        os.fsync(f.fileno())    
+        os.fsync(f.fileno())
     os.replace(tmp_path, path)
 
 
 def _backup_corrupt_file(path: str):
+    """Benennt eine korrupte Datei in <name>.corrupt-<ts> um (best effort)."""
     try:
         ts = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
         os.replace(path, f"{path}.corrupt-{ts}")
     except Exception:
-        # best effort
+        # best effort – falls Umbenennung nicht möglich ist, ignorieren
         pass
 
 
@@ -37,13 +45,14 @@ def _default_device_config_payload() -> dict:
             "MAX_VALVES": int(MAX_VALVES),
             "IRRIGATION_VALVE_DRIVER": "sim",          # sim | rpi
             "IRRIGATION_RELAY_ACTIVE_LOW": True,
-            "IRRIGATION_GPIO_PINS": {},                # {"1":17,...} BCM
+            "IRRIGATION_GPIO_PINS": {},                # {"1": 17, ...} BCM
         },
         "hard_limits": {
             "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
             "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
         },
     }
+
 
 def _default_user_settings_payload() -> dict:
     return {
@@ -53,6 +62,7 @@ def _default_user_settings_payload() -> dict:
             "MAX_HISTORY_ITEMS": int(MAX_HISTORY_ITEMS),
         },
     }
+
 
 def _default_runtime_state_payload() -> dict:
     return {
@@ -64,6 +74,10 @@ def _default_runtime_state_payload() -> dict:
         },
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# device_config (Admin-Konfiguration – read-only im Betrieb)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def load_device_config_from_disk():
     payload = None
@@ -79,7 +93,6 @@ def load_device_config_from_disk():
 
     if not isinstance(payload, dict):
         payload = _default_device_config_payload()
-        # Template erzeugen, aber nicht “übergriffig” sein – nur wenn Datei fehlt/korrupt war
         try:
             _atomic_write_json(DEVICE_CONFIG_FILE, payload)
             log_event("device_config_created_template", level="warning", source="system")
@@ -89,10 +102,11 @@ def load_device_config_from_disk():
     dev = payload.get("device") if isinstance(payload.get("device"), dict) else {}
     hl = payload.get("hard_limits") if isinstance(payload.get("hard_limits"), dict) else {}
 
-    # normalize
     def _int(x, default):
-        try: return int(x)
-        except Exception: return default
+        try:
+            return int(x)
+        except Exception:
+            return default
 
     max_valves = max(1, _int(dev.get("MAX_VALVES", MAX_VALVES), MAX_VALVES))
 
@@ -107,13 +121,13 @@ def load_device_config_from_disk():
     if isinstance(pins_raw, dict):
         for k, v in pins_raw.items():
             try:
-                z = int(k); p = int(v)
+                z = int(k)
+                p = int(v)
                 if z >= 1:
                     pins_norm[z] = p
             except Exception:
                 continue
 
-    # hard limits normalize
     hard_max_runtime_s = max(1, _int(hl.get("MAX_RUNTIME_S", MAX_RUNTIME_S), MAX_RUNTIME_S))
     hard_max_conc = max(1, _int(hl.get("MAX_CONCURRENT_VALVES", MAX_CONCURRENT_VALVES), MAX_CONCURRENT_VALVES))
     hard_max_conc = min(hard_max_conc, max_valves)
@@ -123,17 +137,19 @@ def load_device_config_from_disk():
         state.valve_driver_mode = drv
         state.relay_active_low = active_low
         state.gpio_pins_by_zone = pins_norm
-
         state.hard_max_runtime_s = hard_max_runtime_s
         state.hard_max_concurrent_valves = hard_max_conc
 
-    # driver may depend on these
     try:
         from services.valve_driver import reset_valve_driver
         reset_valve_driver()
     except Exception:
         pass
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# user_settings
+# ─────────────────────────────────────────────────────────────────────────────
 
 def load_user_settings_from_disk():
     payload = None
@@ -176,6 +192,10 @@ def save_user_settings_to_disk():
     _atomic_write_json(USER_SETTINGS_FILE, payload)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# runtime_state (Laufzeit-Toggles: parallel, max_concurrent_valves)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def load_runtime_state_from_disk():
     payload = None
     if os.path.exists(RUNTIME_STATE_FILE):
@@ -205,7 +225,6 @@ def load_runtime_state_from_disk():
         max_conc = MAX_CONCURRENT_VALVES
 
     with state_lock:
-        # clamp to current max_valves + hard limit (if present)
         max_valves = int(getattr(state, "max_valves", MAX_VALVES))
         hard_max = int(getattr(state, "hard_max_concurrent_valves", MAX_CONCURRENT_VALVES))
         max_conc = max(1, min(max_valves, min(hard_max, max_conc)))
@@ -226,6 +245,9 @@ def save_runtime_state_to_disk():
     _atomic_write_json(RUNTIME_STATE_FILE, payload)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Serializer / Deserializer
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _serialize_schedule(rule: ScheduleRule) -> dict:
     return {
@@ -241,6 +263,7 @@ def _serialize_schedule(rule: ScheduleRule) -> dict:
         "once_pending": rule.once_pending,
     }
 
+
 def _deserialize_schedule(d: dict) -> ScheduleRule:
     return ScheduleRule(
         id=d["id"],
@@ -255,6 +278,7 @@ def _deserialize_schedule(d: dict) -> ScheduleRule:
         once_pending=d.get("once_pending"),
     )
 
+
 def _serialize_queue_item(item: QueueItem) -> dict:
     return {
         "zone": item.zone,
@@ -263,6 +287,7 @@ def _serialize_queue_item(item: QueueItem) -> dict:
         "source": getattr(item, "source", "queue"),
     }
 
+
 def _deserialize_queue_item(d: dict) -> QueueItem:
     return QueueItem(
         zone=d["zone"],
@@ -270,6 +295,7 @@ def _deserialize_queue_item(d: dict) -> QueueItem:
         time_unit=d.get("time_unit", "Minuten"),
         source=d.get("source", "queue"),
     )
+
 
 def _serialize_history_item(item: HistoryItem) -> dict:
     return {
@@ -280,6 +306,7 @@ def _serialize_history_item(item: HistoryItem) -> dict:
         "time_unit": getattr(item, "time_unit", "Sekunden"),
     }
 
+
 def _deserialize_history_item(d: dict) -> HistoryItem:
     return HistoryItem(
         ts_end=d.get("ts_end", ""),
@@ -288,6 +315,11 @@ def _deserialize_history_item(d: dict) -> HistoryItem:
         source=d.get("source", "manual"),
         time_unit=d.get("time_unit", "Sekunden"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schedules
+# ─────────────────────────────────────────────────────────────────────────────
 
 def save_schedules_to_disk():
     with state_lock:
@@ -301,11 +333,18 @@ def save_schedules_to_disk():
         state.schedules_dirty = False
     _atomic_write_json(SCHEDULES_FILE, payload)
 
+
 def load_schedules_from_disk():
     if not os.path.exists(SCHEDULES_FILE):
         return
-    with open(SCHEDULES_FILE, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    try:
+        with open(SCHEDULES_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        logger.exception("load_schedules_from_disk failed")
+        log_event("schedules_corrupt", level="error", source="system")
+        _backup_corrupt_file(SCHEDULES_FILE)
+        return  # State bleibt unverändert (leer/initialisiert)
 
     auto = payload.get("automation_enabled", True)
     items = payload.get("items", [])
@@ -320,6 +359,11 @@ def load_schedules_from_disk():
         state.schedules = rules
         state.schedules_dirty = False
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Queue
+# ─────────────────────────────────────────────────────────────────────────────
+
 def save_queue_to_disk():
     with state_lock:
         q = list(state.queue or [])
@@ -332,11 +376,18 @@ def save_queue_to_disk():
         state.queue_dirty = False
     _atomic_write_json(QUEUE_FILE, payload)
 
+
 def load_queue_from_disk():
     if not os.path.exists(QUEUE_FILE):
         return
-    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    try:
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        logger.exception("load_queue_from_disk failed")
+        log_event("queue_corrupt", level="error", source="system")
+        _backup_corrupt_file(QUEUE_FILE)
+        return  # State bleibt unverändert
 
     items = payload.get("items", [])
     q = [_deserialize_queue_item(d) for d in items]
@@ -345,6 +396,11 @@ def load_queue_from_disk():
         state.queue = q
         state.queue_state = "bereit"
         state.queue_dirty = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History
+# ─────────────────────────────────────────────────────────────────────────────
 
 def save_history_to_disk():
     with state_lock:
@@ -357,11 +413,19 @@ def save_history_to_disk():
         state.history_dirty = False
     _atomic_write_json(HISTORY_FILE, payload)
 
+
 def load_history_from_disk():
     if not os.path.exists(HISTORY_FILE):
         return
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        logger.exception("load_history_from_disk failed")
+        log_event("history_corrupt", level="error", source="system")
+        _backup_corrupt_file(HISTORY_FILE)
+        return  # State bleibt unverändert
+
     items = payload.get("items", [])
     hist = [_deserialize_history_item(d) for d in items]
 
@@ -370,6 +434,11 @@ def load_history_from_disk():
         limit = max(1, limit)
         state.run_history = hist[:limit]
         state.history_dirty = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistence Loop
+# ─────────────────────────────────────────────────────────────────────────────
 
 def persistence_loop():
     from core.state import shutdown_event
