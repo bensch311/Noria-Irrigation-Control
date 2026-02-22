@@ -1,3 +1,20 @@
+# api/errors.py
+"""
+Zentrales Error-Handling für das Bewässerungs-Backend.
+
+Registriert Exception-Handler für:
+  - RateLimitExceeded  → 429 (mit Logging)
+  - HTTPException      → passender Status-Code (mit Logging für REJECT_LOG_STATUS_CODES)
+  - RequestValidationError → 422 (mit Sanitizing der Pydantic-v2-Fehlerstruktur)
+  - Exception          → 500 Internal Server Error (mit Logging)
+
+Pydantic-v2-Besonderheit (RequestValidationError / @field_validator):
+  Wenn ein @field_validator eine ValueError wirft, speichert Pydantic v2 das
+  Exception-Objekt selbst in ctx["error"]. Dieses Objekt ist nicht JSON-serialisierbar.
+  _sanitize_pydantic_errors() konvertiert ctx["error"] zu str(exc), damit JSONResponse
+  die Fehlerstruktur sicher serialisieren kann.
+"""
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -8,6 +25,39 @@ from core.logging import log_event, logger
 # Status-Codes, die als request_rejected geloggt werden.
 # 429 wird separat über den RateLimitExceeded-Handler geloggt (rate_limit_exceeded).
 REJECT_LOG_STATUS_CODES = {401, 404, 409, 429}
+
+
+def _sanitize_pydantic_errors(errors: list) -> list:
+    """
+    Konvertiert Pydantic-v2-Fehlerstrukturen in JSON-serialisierbares Format.
+
+    Pydantic v2 speichert in Fehlern aus @field_validator das rohe Exception-Objekt
+    unter ctx["error"]. JSONResponse kann Exception-Objekte nicht serialisieren.
+
+    Diese Funktion:
+      - Kopiert alle Fehler-Dicts flach
+      - Konvertiert ctx["error"] (falls Exception) zu str(exc)
+      - Gibt sicher serialisierbare Dicts zurück
+
+    Args:
+        errors: Rückgabewert von RequestValidationError.errors()
+
+    Returns:
+        Liste von Dicts ohne nicht-serialisierbare Werte.
+    """
+    sanitized = []
+    for error in errors:
+        entry = dict(error)
+
+        # ctx ist optional; wenn vorhanden, ctx["error"] ggf. zu String konvertieren
+        if "ctx" in entry and isinstance(entry["ctx"], dict):
+            ctx = dict(entry["ctx"])
+            if "error" in ctx and isinstance(ctx["error"], Exception):
+                ctx["error"] = str(ctx["error"])
+            entry["ctx"] = ctx
+
+        sanitized.append(entry)
+    return sanitized
 
 
 def register_error_handlers(app: FastAPI):
@@ -45,6 +95,17 @@ def register_error_handlers(app: FastAPI):
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        # Pydantic v2: ctx["error"] kann ein Exception-Objekt enthalten → sanitizen.
+        # include_url=False: entfernt Pydantic-Docs-URLs aus der Fehlerstruktur
+        # (z.B. "url": "https://errors.pydantic.dev/...") – unnötige Info für Clients.
+        try:
+            raw_errors = exc.errors(include_url=False)
+        except TypeError:
+            # Ältere Pydantic-Versionen kennen include_url nicht → Fallback
+            raw_errors = exc.errors()
+
+        sanitized = _sanitize_pydantic_errors(raw_errors)
+
         log_event(
             "request_validation_error",
             level="warning",
@@ -52,9 +113,9 @@ def register_error_handlers(app: FastAPI):
             method=request.method,
             path=request.url.path,
             status_code=422,
-            errors=exc.errors(),
+            error_count=len(sanitized),
         )
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        return JSONResponse(status_code=422, content={"detail": sanitized})
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):

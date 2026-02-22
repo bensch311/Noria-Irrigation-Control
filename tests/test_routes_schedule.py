@@ -7,6 +7,11 @@ Getestet werden:
   POST   /schedule/enable/{id}
   POST   /schedule/disable/{id}
   DELETE /schedule
+
+Validierungs-Statuscode-Konvention (Step 5):
+  - Pydantic-Validierungsfehler (time_unit Literal, weekdays 0-6, start_times HH:MM,
+    min_length-Constraints): 422 Unprocessable Entity
+  - Laufzeit-abhängige Grenzen (zone > max_valves, duration_s > hard_max): 400 Bad Request
 """
 
 import pytest
@@ -109,6 +114,7 @@ def test_schedule_add_repeat_false_sets_once_pending(client):
 
 
 def test_schedule_add_invalid_zone_negative(client):
+    """zone=-1 verletzt Pydantic-Constraint ge=0 → 422."""
     payload = {
         "zone": -1,
         "weekdays": [0],
@@ -118,10 +124,11 @@ def test_schedule_add_invalid_zone_negative(client):
         "time_unit": "Sekunden",
     }
     resp = client.post("/schedule/add", json=payload)
-    assert resp.status_code in (400, 422)
+    assert resp.status_code == 422
 
 
 def test_schedule_add_zone_exceeds_max(client):
+    """zone > max_valves: Laufzeit-Prüfung im Handler → 400."""
     with state_lock:
         state.max_valves = 3
     payload = {
@@ -137,6 +144,7 @@ def test_schedule_add_zone_exceeds_max(client):
 
 
 def test_schedule_add_invalid_weekday(client):
+    """weekday=7 verletzt Pydantic-@field_validator → 422 (vorher: 400)."""
     payload = {
         "zone": 1,
         "weekdays": [7],  # Ungültig: 0-6
@@ -146,23 +154,39 @@ def test_schedule_add_invalid_weekday(client):
         "time_unit": "Sekunden",
     }
     resp = client.post("/schedule/add", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
-def test_schedule_add_invalid_time_format(client):
+def test_schedule_add_invalid_weekday_negative(client):
+    """weekday=-1 verletzt Pydantic-@field_validator → 422."""
     payload = {
         "zone": 1,
-        "weekdays": [0],
-        "start_times": ["6:00"],  # Fehlendes führendes Null
+        "weekdays": [-1],
+        "start_times": ["06:00"],
         "duration_s": 60,
         "repeat": True,
         "time_unit": "Sekunden",
     }
     resp = client.post("/schedule/add", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 422
+
+
+def test_schedule_add_invalid_time_format(client):
+    """'6:00' (fehlendes Null) verletzt Pydantic-@field_validator → 422 (vorher: 400)."""
+    payload = {
+        "zone": 1,
+        "weekdays": [0],
+        "start_times": ["6:00"],
+        "duration_s": 60,
+        "repeat": True,
+        "time_unit": "Sekunden",
+    }
+    resp = client.post("/schedule/add", json=payload)
+    assert resp.status_code == 422
 
 
 def test_schedule_add_invalid_time_hours(client):
+    """Stunde 25 verletzt Pydantic-@field_validator → 422 (vorher: 400)."""
     payload = {
         "zone": 1,
         "weekdays": [0],
@@ -172,10 +196,11 @@ def test_schedule_add_invalid_time_hours(client):
         "time_unit": "Sekunden",
     }
     resp = client.post("/schedule/add", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_schedule_add_invalid_time_minutes(client):
+    """Minute 60 verletzt Pydantic-@field_validator → 422 (vorher: 400)."""
     payload = {
         "zone": 1,
         "weekdays": [0],
@@ -185,10 +210,11 @@ def test_schedule_add_invalid_time_minutes(client):
         "time_unit": "Sekunden",
     }
     resp = client.post("/schedule/add", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_schedule_add_duration_exceeds_max(client):
+    """duration_s > hard_max_runtime_s: Laufzeit-Prüfung im Handler → 400."""
     with state_lock:
         state.hard_max_runtime_s = 300
     payload = {
@@ -204,11 +230,25 @@ def test_schedule_add_duration_exceeds_max(client):
 
 
 def test_schedule_add_empty_weekdays_rejected(client):
-    """Pydantic-Validation: min_length=1 für weekdays."""
+    """Pydantic-Validation: min_length=1 für weekdays → 422."""
     payload = {
         "zone": 1,
         "weekdays": [],
         "start_times": ["06:00"],
+        "duration_s": 60,
+        "repeat": True,
+        "time_unit": "Sekunden",
+    }
+    resp = client.post("/schedule/add", json=payload)
+    assert resp.status_code == 422
+
+
+def test_schedule_add_empty_start_times_rejected(client):
+    """Pydantic-Validation: min_length=1 für start_times → 422."""
+    payload = {
+        "zone": 1,
+        "weekdays": [0],
+        "start_times": [],
         "duration_s": 60,
         "repeat": True,
         "time_unit": "Sekunden",

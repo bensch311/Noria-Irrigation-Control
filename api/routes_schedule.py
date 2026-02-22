@@ -1,4 +1,13 @@
 # app/api/routes_schedule.py
+"""
+Schedule-Routen für den Bewässerungscomputer.
+
+Validierungsstrategie (Step 5):
+  - Struktur/Format-Validierung (weekdays 0-6, start_times HH:MM, time_unit Literal)
+    → Pydantic (models/requests.py) → 422 Unprocessable Entity
+  - Laufzeit-abhängige Grenzen (zone > max_valves, duration_s > hard_max_runtime_s)
+    → Route-Handler → 400 Bad Request (State-Abhängig, kann Pydantic nicht prüfen)
+"""
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -38,26 +47,14 @@ def get_schedules():
 @router.post("/schedule/add")
 @limiter.limit(MUTATION_LIMIT)
 def add_schedule(request: Request, req: ScheduleAddRequest):
+    # Laufzeit-abhängige Grenzen: erst hier prüfbar, da State-Abhängig.
+    # Struktur/Format ist bereits durch Pydantic (422) validiert.
     with state_lock:
         max_runtime_s = int(getattr(state, "hard_max_runtime_s", 3600))
         max_v = int(getattr(state, "max_valves", 1))
 
     if req.zone != 0 and (req.zone < 1 or req.zone > max_v):
         raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{max_v} sein.")
-
-    for wd in req.weekdays:
-        if wd < 0 or wd > 6:
-            raise HTTPException(status_code=400, detail="weekdays muss Werte 0..6 enthalten (0=Mo..6=So).")
-
-    for t in req.start_times:
-        if len(t) != 5 or t[2] != ":":
-            raise HTTPException(status_code=400, detail="start_times muss Format 'HH:MM' haben.")
-        hh, mm = t.split(":")
-        if not (hh.isdigit() and mm.isdigit()):
-            raise HTTPException(status_code=400, detail="start_times muss Format 'HH:MM' haben.")
-        hhi, mmi = int(hh), int(mm)
-        if hhi < 0 or hhi > 23 or mmi < 0 or mmi > 59:
-            raise HTTPException(status_code=400, detail="start_times muss gültige Uhrzeiten enthalten.")
 
     if req.duration_s > max_runtime_s:
         raise HTTPException(status_code=400, detail=f"duration_s darf max. {max_runtime_s} Sekunden sein.")
