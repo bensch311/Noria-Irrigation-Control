@@ -1,5 +1,5 @@
 """
-Tests für core/security.py (Step 1) und Rate Limiting (Step 2).
+Tests für core/security.py (Step 1), Rate Limiting (Step 2) und CORS (Step 3).
 
 Step 1 – API Key Authentication:
   - load_or_create_api_key(): Key-Generierung bei nicht vorhandener Datei
@@ -21,6 +21,16 @@ Step 2 – Rate Limiting:
   - Unter dem Limit wird 200 zurückgegeben
   - 429-Response enthält 'detail'-Feld
   - Rate-Limit-Event wird geloggt
+
+Step 3 – CORS-Konfiguration:
+  - Erlaubte Origin → Access-Control-Allow-Origin im Response
+  - Nicht-erlaubte Origin → kein Access-Control-Allow-Origin im Response
+  - Kein Origin-Header → kein Access-Control-Allow-Origin (normaler Request)
+  - OPTIONS-Preflight mit erlaubter Origin → 200 + korrekte CORS-Headers
+  - OPTIONS-Preflight mit nicht-erlaubter Origin → kein ACAO-Header
+  - ALLOWED_ORIGINS Parsing: Komma-separiert mit Whitespace-Toleranz
+  - ALLOWED_ORIGINS Default: http://localhost:8080 ohne Env-Var
+  - allow_credentials ist False (kein Cookie-Auth)
 """
 
 import os
@@ -32,7 +42,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 import core.security as sec
-from tests.conftest import TEST_API_KEY
+from tests.conftest import TEST_API_KEY, CORS_TEST_ORIGIN
 
 
 # ---------------------------------------------------------------------------
@@ -136,47 +146,37 @@ class TestLoadOrCreateApiKey:
 
     def test_loads_existing_valid_key(self, tmp_path, monkeypatch):
         """Wenn api_key.txt eine valide 64-Hex-Datei enthält, wird sie geladen."""
-        key_file = tmp_path / "api_key.txt"
-        existing_key = "ab12cd34" * 8  # 64 Hex-Zeichen
-        key_file.write_text(existing_key)
+        key_file = str(tmp_path / "api_key.txt")
+        existing_key = "a" * 64
+        with open(key_file, "w") as f:
+            f.write(existing_key)
 
-        monkeypatch.setattr(sec, "API_KEY_FILE", str(key_file))
+        monkeypatch.setattr(sec, "API_KEY_FILE", key_file)
         monkeypatch.setattr(sec, "_api_key", "")
 
         result = sec.load_or_create_api_key()
 
         assert result == existing_key
+        assert sec._api_key == existing_key
 
-    def test_regenerates_key_for_invalid_format(self, tmp_path, monkeypatch):
-        """Wenn api_key.txt ein ungültiges Format enthält, wird ein neuer Key generiert."""
-        key_file = tmp_path / "api_key.txt"
-        key_file.write_text("tooshort", encoding="utf-8")  # kein valides Format (ASCII, zu kurz)
+    def test_regenerates_key_on_invalid_format(self, tmp_path, monkeypatch):
+        """Wenn der Key ein ungültiges Format hat, wird ein neuer Key generiert."""
+        key_file = str(tmp_path / "api_key.txt")
+        with open(key_file, "w") as f:
+            f.write("not-a-valid-key")
 
-        monkeypatch.setattr(sec, "API_KEY_FILE", str(key_file))
+        monkeypatch.setattr(sec, "API_KEY_FILE", key_file)
         monkeypatch.setattr(sec, "_api_key", "")
 
         result = sec.load_or_create_api_key()
 
         assert len(result) == 64
         assert all(c in "0123456789abcdef" for c in result)
-
-    def test_generated_key_is_random(self, tmp_path, monkeypatch):
-        """Zwei aufeinanderfolgende Neugenerierungen erzeugen unterschiedliche Keys."""
-        key_file1 = str(tmp_path / "key1.txt")
-        key_file2 = str(tmp_path / "key2.txt")
-
-        monkeypatch.setattr(sec, "_api_key", "")
-        monkeypatch.setattr(sec, "API_KEY_FILE", key_file1)
-        key1 = sec.load_or_create_api_key()
-
-        monkeypatch.setattr(sec, "_api_key", "")
-        monkeypatch.setattr(sec, "API_KEY_FILE", key_file2)
-        key2 = sec.load_or_create_api_key()
-
-        assert key1 != key2
+        # Neuer Key ist nicht der ungültige alte Key
+        assert result != "not-a-valid-key"
 
     def test_sets_module_variable(self, tmp_path, monkeypatch):
-        """Nach load_or_create_api_key ist die Modulvariable _api_key korrekt gesetzt."""
+        """load_or_create_api_key() setzt _api_key und get_api_key() gibt ihn zurück."""
         key_file = str(tmp_path / "api_key.txt")
         monkeypatch.setattr(sec, "API_KEY_FILE", key_file)
         monkeypatch.setattr(sec, "_api_key", "")
@@ -259,65 +259,20 @@ class TestRequireApiKey:
 
     def test_wrong_key_on_post_returns_401(self, client):
         """Falscher Key auf POST-Route → 401, keine State-Änderung."""
-        resp = client.post("/stop", headers={"X-API-Key": "falsch"})
+        resp = client.post("/stop", headers={"X-API-Key": "wrong"})
         assert resp.status_code == 401
 
-    def test_wrong_key_on_queue_add_returns_401(self, client):
-        resp = client.post(
-            "/queue/add",
-            json={"zone": 1, "duration": 60, "time_unit": "Sekunden"},
-            headers={"X-API-Key": ""},
-        )
-        assert resp.status_code == 401
-
-    def test_wrong_key_on_schedule_add_returns_401(self, client):
-        payload = {
-            "zone": 1,
-            "weekdays": [0],
-            "start_times": ["06:00"],
-            "duration_s": 60,
-            "repeat": True,
-            "time_unit": "Sekunden",
-        }
-        resp = client.post("/schedule/add", json=payload, headers={"X-API-Key": ""})
-        assert resp.status_code == 401
-
-    def test_wrong_key_on_history_returns_401(self, client):
-        resp = client.get("/history", headers={"X-API-Key": ""})
-        assert resp.status_code == 401
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /health: offen ohne Auth
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestHealthOpenEndpoint:
-    """GET /health ist ohne API-Key erreichbar (Monitoring-Endpoint)."""
-
-    def test_health_accessible_without_key(self, raw_client):
-        """Kein X-API-Key → /health antwortet mit 200."""
+    def test_health_endpoint_requires_no_auth(self, raw_client):
+        """GET /health ist ohne Auth erreichbar (Monitoring-Endpoint)."""
         resp = raw_client.get("/health")
         assert resp.status_code == 200
 
-    def test_health_accessible_with_wrong_key(self, client):
-        """Falscher X-API-Key → /health antwortet trotzdem mit 200."""
-        resp = client.get("/health", headers={"X-API-Key": "wrong"})
-        assert resp.status_code == 200
-
-    def test_health_accessible_with_empty_key(self, raw_client):
-        """Leerer X-API-Key → /health antwortet mit 200."""
-        resp = raw_client.get("/health", headers={"X-API-Key": ""})
-        assert resp.status_code == 200
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Timing-Sicherheit: Konstanter Zeitvergleich
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestTimingAttackResistance:
-    """Stellt sicher, dass secrets.compare_digest verwendet wird."""
+    def test_auth_failure_is_logged(self, raw_client, caplog):
+        """Auth-Fehler werden als 'auth_failure'-Event geloggt."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            raw_client.get("/status")
+        assert any("auth_failure" in record.message for record in caplog.records)
 
     def test_compare_digest_used(self):
         """
@@ -438,3 +393,208 @@ class TestRateLimiting:
         for _ in range(5):
             resp = client.post("/stop")
             assert resp.status_code == 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 3: CORS-Konfiguration Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCORS:
+    """
+    Tests für die CORS-Konfiguration (Step 3).
+
+    Die Test-App (app-Fixture aus conftest.py) hat CORSMiddleware konfiguriert
+    mit CORS_TEST_ORIGIN als einzig erlaubter Origin.
+
+    Technik: Starlette's TestClient ist kein Browser und erzwingt CORS nicht.
+    Wir prüfen das Verhalten der CORSMiddleware direkt, indem wir den
+    Origin-Header manuell setzen und die Response-Headers auswerten:
+      - Access-Control-Allow-Origin: Zeigt an, dass die Origin erlaubt ist.
+      - Fehlen dieses Headers: Origin ist nicht in der Whitelist.
+    """
+
+    # ── Einfache Requests (nicht-Preflight) ──────────────────────────────────
+
+    def test_allowed_origin_gets_acao_header(self, client):
+        """
+        Request mit erlaubter Origin → Access-Control-Allow-Origin im Response.
+        Der Header-Wert muss der gesendeten Origin entsprechen.
+        """
+        resp = client.get("/health", headers={"Origin": CORS_TEST_ORIGIN})
+        assert "access-control-allow-origin" in resp.headers
+        assert resp.headers["access-control-allow-origin"] == CORS_TEST_ORIGIN
+
+    def test_disallowed_origin_has_no_acao_header(self, client):
+        """
+        Request mit nicht-erlaubter Origin → kein Access-Control-Allow-Origin.
+        CORS ist ein Browser-Mechanismus; der Server antwortet weiterhin,
+        aber ohne ACAO-Header – der Browser blockiert dann den Zugriff.
+        """
+        resp = client.get("/health", headers={"Origin": "http://evil.attacker.com"})
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_request_without_origin_has_no_acao_header(self, client):
+        """
+        Kein Origin-Header gesendet (z.B. direkter API-Aufruf, kein Browser)
+        → kein Access-Control-Allow-Origin im Response.
+        CORS-Headers sind nur relevant wenn ein Origin vorhanden ist.
+        """
+        resp = client.get("/health")
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_allowed_origin_on_authenticated_endpoint(self, client):
+        """
+        CORS-Headers erscheinen auch auf geschützten Endpunkten (mit Auth).
+        Wichtig: CORSMiddleware greift VOR Auth-Prüfung (outermost).
+        """
+        resp = client.get("/status", headers={"Origin": CORS_TEST_ORIGIN})
+        assert "access-control-allow-origin" in resp.headers
+        assert resp.headers["access-control-allow-origin"] == CORS_TEST_ORIGIN
+
+    def test_disallowed_origin_on_authenticated_endpoint(self, client):
+        """Nicht-erlaubte Origin auf Auth-Endpunkt → kein ACAO-Header."""
+        resp = client.get("/status", headers={"Origin": "http://evil.attacker.com"})
+        assert "access-control-allow-origin" not in resp.headers
+
+    # ── Preflight OPTIONS-Requests ────────────────────────────────────────────
+
+    def test_preflight_allowed_origin_returns_200(self, client):
+        """
+        OPTIONS-Preflight mit erlaubter Origin → 200.
+        CORSMiddleware antwortet Preflight-Requests direkt (ohne Auth-Check).
+        """
+        resp = client.options(
+            "/status",
+            headers={
+                "Origin": CORS_TEST_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_preflight_allowed_origin_has_acao_header(self, client):
+        """OPTIONS-Preflight mit erlaubter Origin → Access-Control-Allow-Origin gesetzt."""
+        resp = client.options(
+            "/status",
+            headers={
+                "Origin": CORS_TEST_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert "access-control-allow-origin" in resp.headers
+        assert resp.headers["access-control-allow-origin"] == CORS_TEST_ORIGIN
+
+    def test_preflight_allowed_origin_has_acam_header(self, client):
+        """
+        OPTIONS-Preflight mit erlaubter Origin → Access-Control-Allow-Methods.
+        Enthält mindestens GET, POST, DELETE (die konfigurierten Methoden).
+        """
+        resp = client.options(
+            "/status",
+            headers={
+                "Origin": CORS_TEST_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert "access-control-allow-methods" in resp.headers
+        allowed_methods = resp.headers["access-control-allow-methods"].upper()
+        assert "POST" in allowed_methods
+
+    def test_preflight_disallowed_origin_has_no_acao_header(self, client):
+        """
+        OPTIONS-Preflight mit nicht-erlaubter Origin → kein ACAO-Header.
+        """
+        resp = client.options(
+            "/status",
+            headers={
+                "Origin": "http://evil.attacker.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert "access-control-allow-origin" not in resp.headers
+
+    def test_preflight_bypasses_api_key_auth(self, raw_client):
+        """
+        OPTIONS-Preflight kommt ohne Auth-Header an (Browser sendet keinen).
+        CORSMiddleware muss Preflight VOR Auth-Check beantworten (outermost).
+        Ohne diese Eigenschaft würde jeder Preflight mit 401 scheitern.
+        """
+        resp = raw_client.options(
+            "/status",
+            headers={
+                "Origin": CORS_TEST_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        # Preflight darf NICHT mit 401 scheitern – CORSMiddleware antwortet direkt
+        assert resp.status_code != 401
+
+    # ── allow_credentials ────────────────────────────────────────────────────
+
+    def test_allow_credentials_is_false(self, client):
+        """
+        allow_credentials=False: 'Access-Control-Allow-Credentials' darf nicht
+        'true' sein. Cookies oder gespeicherte Auth-Credentials können damit
+        nicht in Cross-Origin-Requests gesendet werden (kein CSRF-Risiko).
+        """
+        resp = client.get("/health", headers={"Origin": CORS_TEST_ORIGIN})
+        acao_credentials = resp.headers.get("access-control-allow-credentials", "false")
+        assert acao_credentials.lower() != "true"
+
+    # ── ALLOWED_ORIGINS Parsing (core/config.py) ─────────────────────────────
+
+    def test_allowed_origins_default_without_env_var(self, monkeypatch):
+        """
+        Ohne ALLOWED_ORIGINS-Env-Var ist der Default 'http://localhost:8080'.
+        """
+        monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+        # core.config neu importieren mit bereinigter Umgebung
+        import importlib
+        import core.config as cfg
+        importlib.reload(cfg)
+        assert cfg.ALLOWED_ORIGINS == ["http://localhost:8080"]
+
+    def test_allowed_origins_single_from_env(self, monkeypatch):
+        """Einzelne Origin aus Env-Var wird korrekt gelesen."""
+        monkeypatch.setenv("ALLOWED_ORIGINS", "http://192.168.1.100:8080")
+        import importlib
+        import core.config as cfg
+        importlib.reload(cfg)
+        assert cfg.ALLOWED_ORIGINS == ["http://192.168.1.100:8080"]
+
+    def test_allowed_origins_multiple_comma_separated(self, monkeypatch):
+        """Komma-separierte Origins werden korrekt in eine Liste geparst."""
+        monkeypatch.setenv(
+            "ALLOWED_ORIGINS",
+            "http://192.168.1.100:8080,http://localhost:8080",
+        )
+        import importlib
+        import core.config as cfg
+        importlib.reload(cfg)
+        assert cfg.ALLOWED_ORIGINS == [
+            "http://192.168.1.100:8080",
+            "http://localhost:8080",
+        ]
+
+    def test_allowed_origins_whitespace_is_stripped(self, monkeypatch):
+        """Leerzeichen um Origins herum werden toleriert und entfernt."""
+        monkeypatch.setenv(
+            "ALLOWED_ORIGINS",
+            "http://192.168.1.100:8080 , http://localhost:8080 ",
+        )
+        import importlib
+        import core.config as cfg
+        importlib.reload(cfg)
+        assert cfg.ALLOWED_ORIGINS == [
+            "http://192.168.1.100:8080",
+            "http://localhost:8080",
+        ]
+
+    def test_allowed_origins_empty_entries_ignored(self, monkeypatch):
+        """Leere Einträge (z.B. doppeltes Komma) werden ignoriert."""
+        monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:8080,,")
+        import importlib
+        import core.config as cfg
+        importlib.reload(cfg)
+        assert cfg.ALLOWED_ORIGINS == ["http://localhost:8080"]

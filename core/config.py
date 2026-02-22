@@ -68,3 +68,25 @@ RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
 # Datei sollte Berechtigungen 600 haben (nur Owner lesbar).
 # Niemals in git einchecken – siehe .gitignore.
 API_KEY_FILE = os.path.join(DATA_DIR, "api_key.txt")
+
+# ---------------------------------------------------------------------------
+# CORS: Erlaubte Origins für Browser-seitige Cross-Origin-Requests.
+#
+# Komma-separierte Liste aus der Umgebungsvariable ALLOWED_ORIGINS.
+# Leerzeichen um einzelne Origins werden automatisch entfernt.
+#
+# Default: http://localhost:8080 (Shiny-Express-Entwicklungsstandard).
+#
+# Produktions-Beispiel in .env oder systemd-Service:
+#   ALLOWED_ORIGINS=http://192.168.1.100:8080,http://localhost:8080
+#
+# HINWEIS: Dieser Wert wird beim Modulimport einmalig aus der Umgebung
+# gelesen. Änderungen an der Umgebungsvariable zur Laufzeit haben
+# KEINEN Effekt – ein Neustart des Servers ist erforderlich.
+# ---------------------------------------------------------------------------
+_raw_allowed_origins: str = os.environ.get("ALLOWED_ORIGINS", "http://localhost:8080")
+ALLOWED_ORIGINS: list[str] = [
+    origin.strip()
+    for origin in _raw_allowed_origins.split(",")
+    if origin.strip()
+]

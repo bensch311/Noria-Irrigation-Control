@@ -12,8 +12,10 @@ Opt-in Fixtures:
   - client      : FastAPI-TestClient ohne Lifespan, mit Auth-Header
 
 Konstanten:
-  - TEST_API_KEY: Der für alle Tests verwendete API-Key (64 Hex-Zeichen).
-                  Kann in Sicherheitstests über Header-Override überschrieben werden.
+  - TEST_API_KEY    : Der für alle Tests verwendete API-Key (64 Hex-Zeichen).
+                      Kann in Sicherheitstests über Header-Override überschrieben werden.
+  - CORS_TEST_ORIGIN: Die für CORS-Tests konfigurierte erlaubte Origin.
+                      Wird im app-Fixture als einzige allow_origin gesetzt.
 
 Rate-Limiting-Hinweis:
   Das app-Fixture erstellt pro Test einen NEUEN Limiter (eigene leere Storage).
@@ -25,6 +27,7 @@ import uuid
 
 import pytest
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from slowapi import Limiter
 from slowapi.middleware import SlowAPIMiddleware
@@ -48,6 +51,13 @@ from services.valve_driver import SimValveDriver, set_valve_driver, reset_valve_
 # und vom client-Fixture automatisch als Header gesendet.
 # ---------------------------------------------------------------------------
 TEST_API_KEY = "deadbeef" * 8  # 64 Hex-Zeichen
+
+# ---------------------------------------------------------------------------
+# CORS-Test-Origin: die einzige erlaubte Origin in der Test-App.
+# In CORS-Tests wird dieser Wert als Origin-Header gesendet (→ erlaubt)
+# oder eine abweichende Origin (→ blockiert).
+# ---------------------------------------------------------------------------
+CORS_TEST_ORIGIN = "http://test.example.com"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,11 +182,15 @@ def app():
     """
     FastAPI-App *ohne* Lifespan – für schnelle Route-Tests.
 
+    Middleware-Stack (spiegelt Produktion exakt):
+      Browser → CORSMiddleware → SlowAPIMiddleware → Route-Handler
+
+    CORSMiddleware verwendet CORS_TEST_ORIGIN als einzige erlaubte Origin,
+    damit CORS-Tests ohne Umgebungsvariablen-Manipulation funktionieren.
+
     Rate-Limiting:
     Jeder Test bekommt eine NEUE Limiter-Instanz mit leerer in-memory Storage.
     Damit akkumulieren Rate-Limit-Zähler nicht über Tests hinweg.
-    Die Limiter-Instanz wird als app.state.limiter gesetzt – genau so wie
-    in der Produktion (main.py). SlowAPIMiddleware liest daraus.
     """
     from api.errors import register_error_handlers
     from api.routes_health import router as health_router
@@ -190,7 +204,18 @@ def app():
 
     _app = FastAPI()
     _app.state.limiter = test_limiter
+
+    # Middleware-Reihenfolge: zuletzt hinzugefügt = outermost = verarbeitet zuerst.
+    # SlowAPIMiddleware zuerst (innermost), CORSMiddleware zuletzt (outermost).
     _app.add_middleware(SlowAPIMiddleware)
+    _app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[CORS_TEST_ORIGIN],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "X-API-Key"],
+    )
+
     register_error_handlers(_app)
     _app.include_router(health_router)
     _app.include_router(queue_router)

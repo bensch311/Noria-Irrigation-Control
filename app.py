@@ -323,7 +323,7 @@ def close_backend_modal_if_open():
 
 @reactive.Effect
 def backend_health_watcher():
-    reactive.invalidate_later(0.25)
+    reactive.invalidate_later(0.5)
 
     ok = ping_health()
 
@@ -399,7 +399,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         
         @render.ui
         def status():
-            reactive.invalidate_later(0.25)
+            reactive.invalidate_later(0.5)
             response = _session.get(BASE_URL + "/status")
             if response.status_code == 200:
                 data = response.json()
@@ -463,7 +463,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
             
         @render.ui
         def queue_status():
-            reactive.invalidate_later(0.25)
+            reactive.invalidate_later(0.5)
             response = _session.get(BASE_URL + "/queue")
             if response.status_code == 200:
                 data = response.json()
@@ -634,7 +634,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
 
         @render.ui
         def schedule_status():
-            reactive.invalidate_later(0.25)
+            reactive.invalidate_later(0.5)
             response = _session.get(BASE_URL + "/schedule")
 
             if response.status_code != 200:
