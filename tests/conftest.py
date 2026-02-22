@@ -24,6 +24,7 @@ Rate-Limiting-Hinweis:
 
 import time
 import uuid
+from dataclasses import fields as dc_fields
 
 import pytest
 from fastapi import FastAPI
@@ -38,6 +39,7 @@ from api.middleware import SecurityHeadersMiddleware
 from core.state import (
     state,
     state_lock,
+    RunState,
     ActiveRun,
     QueueItem,
     ScheduleRule,
@@ -67,24 +69,38 @@ CORS_TEST_ORIGIN = "http://test.example.com"
 
 
 def reset_global_state() -> None:
-    """Setzt den gesamten RunState auf saubere Defaults zurück."""
+    """
+    Setzt den gesamten RunState atomar auf saubere Defaults zurück.
+
+    Implementierung via dataclasses.fields():
+    - Erzeugt eine frische RunState()-Instanz (enthält alle korrekten Defaults)
+    - Kopiert jeden Feldwert via setattr auf den globalen state
+    - Garantiert korrekte Feldnamen und Default-Werte, auch nach Refactoring
+    - Collections (None-Default in Dataclass) werden für Tests als leere
+      Instanzen gesetzt, damit Tests direkt append() etc. nutzen können
+
+    Warum nicht direkt ``state = RunState()``?
+    - Der globale `state` wird von allen Modulen importiert. Eine Neuzuweisung
+      würde nur die lokale Referenz in conftest ersetzen, nicht den importierten
+      Singleton in den Produktions-Modulen.
+    """
+    fresh = RunState()
     with state_lock:
-        state.active_run = None
-        state.active_runs = {}
-        state.zone = None
-        state.end_time = None
-        state.time_unit = None
-        state.started_at = None
-        state.started_source = None
-        state.started_planned_s = None
-        state.paused = False
-        state.fault = False
+        for f in dc_fields(fresh):
+            setattr(state, f.name, getattr(fresh, f.name))
+
+        # Collections haben in RunState None als Default (mypy-freundlich).
+        # Für Tests setzen wir leere Instanzen, damit Tests direkt
+        # state.queue.append() usw. nutzen können ohne None-Guards.
         state.queue = []
         state.schedules = []
-        state.history = []
-        state.automation_enabled = False
-        state.parallel_enabled = False
-        state.automation_block_run_key = None
+        state.active_runs = {}
+        state.run_history = []
+
+        # gpio_pins_by_zone: None bedeutet "noch nicht geladen" – im Test-Kontext
+        # ist ein leeres Dict das sinnvollere Default (SimDriver benötigt keine Pins).
+        if state.gpio_pins_by_zone is None:
+            state.gpio_pins_by_zone = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
