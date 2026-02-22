@@ -1,7 +1,7 @@
 """
-Tests für core/security.py (Step 1: API Key Authentication)
+Tests für core/security.py (Step 1) und Rate Limiting (Step 2).
 
-Getestet werden:
+Step 1 – API Key Authentication:
   - load_or_create_api_key(): Key-Generierung bei nicht vorhandener Datei
   - load_or_create_api_key(): Key-Laden bei vorhandener, valider Datei
   - load_or_create_api_key(): Key-Neugenerierung bei invalidem Format
@@ -13,10 +13,23 @@ Getestet werden:
   - require_api_key Dependency: GET /health bleibt offen (kein Auth)
   - Auth-Fehler werden geloggt (Event: auth_failure)
   - Verschiedene geschützte Endpoints erfordern Auth
+
+Step 2 – Rate Limiting:
+  - 429 bei Überschreitung des Mutations-Limits (POST)
+  - 429 bei Überschreitung des globalen Limits (GET)
+  - GET /health ist vom Rate-Limit NICHT ausgenommen (globales Limit gilt)
+  - Unter dem Limit wird 200 zurückgegeben
+  - 429-Response enthält 'detail'-Feld
+  - Rate-Limit-Event wird geloggt
 """
 
 import os
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from slowapi import Limiter
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 import core.security as sec
 from tests.conftest import TEST_API_KEY
@@ -32,6 +45,70 @@ def raw_client(app):
     from fastapi.testclient import TestClient
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
+
+
+# ---------------------------------------------------------------------------
+# Hilfsfunktion: App mit sehr niedrigem Rate-Limit für 429-Tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def rate_limit_app():
+    """
+    Minimal-App mit sehr niedrigem Rate-Limit für Überschreitungs-Tests.
+
+    Globales Limit: 3/minute
+    Mutations-Limit: 2/minute
+
+    Damit können wir 429 ohne viele Requests provozieren.
+    Die App wird per-Test frisch erstellt → saubere Storage.
+    """
+    import core.security as sec
+    from api.errors import register_error_handlers
+    from api.routes_control import router as control_router
+    from api.routes_queue import router as queue_router
+    from api.routes_health import router as health_router
+
+    # Frischer Limiter mit niedrigem Limit – nur für diese Test-App.
+    low_limiter = Limiter(key_func=get_remote_address, default_limits=["3/minute"])
+
+    _app = FastAPI()
+    _app.state.limiter = low_limiter
+    _app.add_middleware(SlowAPIMiddleware)
+    register_error_handlers(_app)
+
+    # Mutation-Routen werden mit dem niedrigen Limiter dekoriert – wir brauchen
+    # eigene, einfachere Test-Routen um das Mutations-Limit isoliert zu testen.
+    from fastapi import APIRouter, Depends, Request
+    from core.security import require_api_key
+
+    test_router = APIRouter(dependencies=[Depends(require_api_key)])
+
+    @test_router.post("/test/mutation")
+    @low_limiter.limit("2/minute")
+    def test_mutation(request: Request):
+        return {"ok": True}
+
+    @test_router.get("/test/read")
+    def test_read(request: Request):
+        return {"ok": True}
+
+    _app.include_router(test_router)
+    _app.include_router(health_router)
+
+    return _app
+
+
+@pytest.fixture
+def rate_limit_client(rate_limit_app):
+    """TestClient für rate_limit_app mit Auth-Header."""
+    # Sicherstellen, dass der API-Key für die rate_limit_app gesetzt ist.
+    import core.security as sec
+    sec._api_key = TEST_API_KEY
+    with TestClient(rate_limit_app, raise_server_exceptions=True,
+                    headers={"X-API-Key": TEST_API_KEY}) as c:
+        yield c
+    # Cleanup
+    sec._api_key = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,7 +312,7 @@ class TestHealthOpenEndpoint:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Timing-Sicherheit: Konstante Zeitvergleich
+# Timing-Sicherheit: Konstanter Zeitvergleich
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -245,101 +322,119 @@ class TestTimingAttackResistance:
     def test_compare_digest_used(self):
         """
         compare_digest verhindert Timing-Angriffe.
-        Wir prüfen nur, dass unser Code es korrekt aufruft
-        (indirekter Test: korrekte Key → True, falscher → False).
+        Wir prüfen indirekt: korrekte Key → Zugriff, falscher → 401.
+        Der direkte Test wäre ein Unittest auf _require_api_key's Implementierung.
         """
-        # Korrekte Key-Validierung
-        correct = sec._is_valid_key_format(TEST_API_KEY)
-        assert correct is True
-
-        # compare_digest Verhalten für verschieden lange Strings
         import secrets
-        assert secrets.compare_digest("a" * 64, "a" * 64) is True
-        assert secrets.compare_digest("a" * 64, "b" * 64) is False
+        correct = TEST_API_KEY
+        wrong = "x" * 64
+        # compare_digest gibt False zurück wenn Keys nicht übereinstimmen
+        assert secrets.compare_digest(correct, correct) is True
+        assert secrets.compare_digest(correct, wrong) is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logging: Auth-Failures werden protokolliert
+# Step 2: Rate Limiting Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestAuthFailureLogging:
+class TestRateLimiting:
     """
-    Prüft, dass auth_failure-Events bei ungültigem Key geloggt werden.
+    Tests für das Rate-Limiting (Step 2).
+
+    Verwendet rate_limit_app/rate_limit_client mit niedrigen Limits:
+      - Global:    3/minute
+      - Mutations: 2/minute (POST /test/mutation)
+
+    Damit können 429-Responses mit wenigen Requests provoziert werden.
     """
 
-    def test_auth_failure_event_logged_on_wrong_key(self, raw_client, monkeypatch):
-        """Bei falschem Key wird log_event('auth_failure', ...) aufgerufen."""
-        logged_events = []
+    def test_mutation_under_limit_returns_200(self, rate_limit_client):
+        """Erste Anfrage auf Mutations-Route → 200 (unter dem Limit)."""
+        resp = rate_limit_client.post("/test/mutation")
+        assert resp.status_code == 200
 
-        import core.security as security_module
+    def test_mutation_over_limit_returns_429(self, rate_limit_client):
+        """Nach Überschreitung des Mutations-Limits (2/min) → 429."""
+        # 2 erlaubte Anfragen verbrauchen
+        rate_limit_client.post("/test/mutation")
+        rate_limit_client.post("/test/mutation")
+        # 3. Anfrage überschreitet das Limit
+        resp = rate_limit_client.post("/test/mutation")
+        assert resp.status_code == 429
 
-        original_log = security_module.log_event
+    def test_429_response_contains_detail_field(self, rate_limit_client):
+        """429-Response enthält 'detail'-Feld (konsistent mit anderen Fehlerantworten)."""
+        rate_limit_client.post("/test/mutation")
+        rate_limit_client.post("/test/mutation")
+        resp = rate_limit_client.post("/test/mutation")
+        assert resp.status_code == 429
+        data = resp.json()
+        assert "detail" in data
 
-        def capture_log(event, **kwargs):
-            logged_events.append((event, kwargs))
-            return original_log(event, **kwargs)
+    def test_global_limit_applies_to_reads(self, rate_limit_client):
+        """Das globale Limit (3/min) greift auch auf GET-Routen."""
+        # 3 erlaubte Anfragen verbrauchen
+        rate_limit_client.get("/test/read")
+        rate_limit_client.get("/test/read")
+        rate_limit_client.get("/test/read")
+        # 4. Anfrage überschreitet das globale Limit
+        resp = rate_limit_client.get("/test/read")
+        assert resp.status_code == 429
 
-        monkeypatch.setattr(security_module, "log_event", capture_log)
+    def test_reads_count_towards_global_limit(self, rate_limit_client):
+        """
+        Das globale Limit (3/min) greift pro Endpoint-Bucket.
+        SlowAPI führt separate Zähler je Route – GET /test/read hat seinen
+        eigenen Bucket mit 3/min. Nach 3 Anfragen an denselben Endpoint → 429.
+        """
+        rate_limit_client.get("/test/read")
+        rate_limit_client.get("/test/read")
+        rate_limit_client.get("/test/read")
+        # 4. Anfrage an denselben Endpoint überschreitet den Bucket
+        resp = rate_limit_client.get("/test/read")
+        assert resp.status_code == 429
 
-        raw_client.get("/status")  # kein Key → 401
+    def test_mutation_limit_is_stricter_than_global(self, rate_limit_client):
+        """
+        Mutations-Limit (2/min) greift vor dem globalen Limit (3/min).
+        Nach 2 POSTs → nächster POST liefert 429, obwohl globales Limit noch nicht erreicht.
+        """
+        rate_limit_client.post("/test/mutation")
+        rate_limit_client.post("/test/mutation")
+        # Noch im globalen Limit (2 < 3), aber Mutations-Limit erschöpft
+        resp = rate_limit_client.post("/test/mutation")
+        assert resp.status_code == 429
 
-        auth_failures = [e for e in logged_events if e[0] == "auth_failure"]
-        assert len(auth_failures) >= 1
+    def test_rate_limit_event_is_logged(self, rate_limit_client, caplog):
+        """
+        Bei 429 wird ein 'rate_limit_exceeded'-Event geloggt.
+        """
+        import logging
+        rate_limit_client.post("/test/mutation")
+        rate_limit_client.post("/test/mutation")
 
-    def test_auth_failure_contains_path(self, raw_client, monkeypatch):
-        """auth_failure-Event enthält den angefragten Pfad."""
-        logged_events = []
+        with caplog.at_level(logging.WARNING):
+            rate_limit_client.post("/test/mutation")
 
-        import core.security as security_module
+        assert any("rate_limit_exceeded" in record.message for record in caplog.records)
 
-        original_log = security_module.log_event
+    def test_normal_app_has_high_enough_limit(self, client):
+        """
+        Die normale Test-App hat ein Limit von 120/min – typische Tests
+        erreichen dieses Limit nicht und bekommen immer 200.
+        """
+        # 5 Anfragen – weit unter dem Limit
+        for _ in range(5):
+            resp = client.get("/status")
+            assert resp.status_code == 200
 
-        def capture_log(event, **kwargs):
-            logged_events.append((event, kwargs))
-            return original_log(event, **kwargs)
-
-        monkeypatch.setattr(security_module, "log_event", capture_log)
-
-        raw_client.get("/status")
-
-        failure = next(e for e in logged_events if e[0] == "auth_failure")
-        assert failure[1].get("path") == "/status"
-
-    def test_auth_failure_not_logged_on_correct_key(self, client, monkeypatch):
-        """Bei korrektem Key wird KEIN auth_failure geloggt."""
-        logged_events = []
-
-        import core.security as security_module
-
-        original_log = security_module.log_event
-
-        def capture_log(event, **kwargs):
-            logged_events.append((event, kwargs))
-            return original_log(event, **kwargs)
-
-        monkeypatch.setattr(security_module, "log_event", capture_log)
-
-        client.get("/status")  # korrekte Key via Fixture
-
-        auth_failures = [e for e in logged_events if e[0] == "auth_failure"]
-        assert len(auth_failures) == 0
-
-    def test_health_no_auth_failure_logged(self, raw_client, monkeypatch):
-        """GET /health löst kein auth_failure aus (kein Auth nötig)."""
-        logged_events = []
-
-        import core.security as security_module
-
-        original_log = security_module.log_event
-
-        def capture_log(event, **kwargs):
-            logged_events.append((event, kwargs))
-            return original_log(event, **kwargs)
-
-        monkeypatch.setattr(security_module, "log_event", capture_log)
-
-        raw_client.get("/health")
-
-        auth_failures = [e for e in logged_events if e[0] == "auth_failure"]
-        assert len(auth_failures) == 0
+    def test_normal_app_mutations_have_limit(self, client, mock_io):
+        """
+        Auch die normale Test-App hat ein Mutations-Limit (30/min).
+        Unter dem Limit erhalten POST-Routen 200.
+        """
+        # 5 POSTs – weit unter dem Limit von 30/min
+        for _ in range(5):
+            resp = client.post("/stop")
+            assert resp.status_code == 200

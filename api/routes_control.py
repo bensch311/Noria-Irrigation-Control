@@ -1,12 +1,13 @@
 # app/api/routes_control.py
 import time
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock
 from core.config import MAX_RUNTIME_S, TZ
 from core.logging import log_event
 from core.security import require_api_key
+from core.limiter import limiter, MUTATION_LIMIT
 from models.requests import StartRequest, ParallelModeRequest
 
 from services.engine import (
@@ -33,7 +34,8 @@ def status():
 # POST /start -> Startet eine Zone
 # ---------------------------
 @router.post("/start")
-def start(req: StartRequest):
+@limiter.limit(MUTATION_LIMIT)
+def start(request: Request, req: StartRequest):
     # Validierungen (unter Lock)
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
@@ -73,7 +75,8 @@ def start(req: StartRequest):
 # POST /pause -> Pausiert alle aktuell laufenden Ventile (global pause)
 # ---------------------------
 @router.post("/pause")
-def pause_current():
+@limiter.limit(MUTATION_LIMIT)
+def pause_current(request: Request):
     # Phase 1: Prepare (unter Lock) - sammle Zonen die geschlossen werden müssen
     with state_lock:
         if state.running_zone is None or not state.active_runs:
@@ -156,7 +159,8 @@ def pause_current():
 # POST /resume -> Setzt pausierte Ventile fort
 # ---------------------------
 @router.post("/resume")
-def resume_current():
+@limiter.limit(MUTATION_LIMIT)
+def resume_current(request: Request):
     # Phase 1: Prepare (unter Lock)
     with state_lock:
         if bool(getattr(state, "hw_faulted", False)):
@@ -243,7 +247,8 @@ def resume_current():
 # POST /fault/clear -> Quittiert Hardware-Fault (Operator-Ack)
 # ---------------------------
 @router.post("/fault/clear")
-def clear_fault():
+@limiter.limit(MUTATION_LIMIT)
+def clear_fault(request: Request):
     with state_lock:
         if not bool(getattr(state, "hw_faulted", False)):
             return {"ok": True, "cleared": False, "reason": "no_fault"}
@@ -270,7 +275,8 @@ def clear_fault():
 # POST /stop -> Stoppt sofort alle Ventile
 # ---------------------------
 @router.post("/stop")
-def stop():
+@limiter.limit(MUTATION_LIMIT)
+def stop(request: Request):
     # Phase 1: Prepare (unter Lock) - sammle alle Infos für Historie
     with state_lock:
         if not state.active_runs:
@@ -312,9 +318,8 @@ def stop():
     from services.io_worker import get_io_worker, IOCommand
     io_worker = get_io_worker()
 
-    stopped = []
     failed = []
-
+    stopped = []
     for zone in zones_to_close:
         cmd = IOCommand(action="close", zone=zone)
         result = io_worker.send_command(cmd, timeout_s=5.0)
@@ -324,54 +329,43 @@ def stop():
         else:
             failed.append({"zone": zone, "error": result.error})
 
-    # Phase 3: Commit (unter Lock) - Update State & Historie
+    # Phase 3: Commit (unter Lock) - auch bei Teil-Fehler State bereinigen
     with state_lock:
-        # Nur für erfolgreich geschlossene Ventile: Historie + Remove from active_runs
-        for zone in stopped:
-            if zone in zones_info:
-                info = zones_info[zone]
+        now_m = time.monotonic()
+
+        for zone in zones_to_close:
+            info = zones_info.get(zone)
+            if info:
                 _history_add_locked(
                     zone=zone,
                     duration_s=info["actual_s"],
                     source=info["source"],
                     time_unit=info["time_unit"],
                 )
+            state.active_runs.pop(zone, None)
 
-            if zone in state.active_runs:
-                del state.active_runs[zone]
+        state.running_zone = None
+        state.end_time = 0.0
+        state.paused = False
 
-        # Reset pause bookkeeping
-        state.remaining_s = 0
-        state.queue_state_before_valve_pause = "bereit"
+        if not state.active_runs:
+            if state.queue_state not in ("läuft", "pausiert"):
+                pass  # queue_state bleibt wie es ist
+            state.queue_state_before_valve_pause = "bereit"
 
         _sync_legacy_single_fields_locked()
 
-        # Log failures
-        if failed:
-            log_event(
-                "valve_hw_error",
-                level="error",
-                source="manual",
-                action="close",
-                zone="multiple",
-                reason="manual_stop",
-                failed=failed,
-                stopped=stopped,
-            )
-
-    # Log success (außerhalb Lock)
-    log_event(
-        "valve_stop",
-        source="manual",
-        zone="all",
-        reason="manual_stop",
-        queue_state=state.queue_state,
-        queue_length=len(state.queue or []),
-        parallel_enabled=state.parallel_enabled,
-        automation_enabled=state.automation_enabled,
-        stopped_count=len(stopped),
-        failed_count=len(failed),
-    )
+        log_event(
+            "valve_stop",
+            source="manual",
+            zone="all",
+            queue_state=state.queue_state,
+            queue_length=len(state.queue or []),
+            parallel_enabled=state.parallel_enabled,
+            automation_enabled=state.automation_enabled,
+            stopped_count=len(stopped),
+            failed_count=len(failed),
+        )
 
     # Bei Teil-Fehler: 503 mit Details
     if failed:
@@ -397,7 +391,8 @@ def get_automation():
 
 
 @router.post("/automation/enable")
-def enable_automation():
+@limiter.limit(MUTATION_LIMIT)
+def enable_automation(request: Request):
     with state_lock:
         state.automation_enabled = True
         state.schedules_dirty = True
@@ -409,7 +404,8 @@ def enable_automation():
 
 
 @router.post("/automation/disable")
-def disable_automation():
+@limiter.limit(MUTATION_LIMIT)
+def disable_automation(request: Request):
     with state_lock:
         state.automation_enabled = False
         state.schedules_dirty = True
@@ -420,7 +416,8 @@ def disable_automation():
 
 
 @router.post("/automation/toggle")
-def toggle_automation():
+@limiter.limit(MUTATION_LIMIT)
+def toggle_automation(request: Request):
     with state_lock:
         state.automation_enabled = not state.automation_enabled
         state.schedules_dirty = True
@@ -446,7 +443,8 @@ def get_parallel_mode():
 
 
 @router.post("/parallel")
-def set_parallel_mode(req: ParallelModeRequest):
+@limiter.limit(MUTATION_LIMIT)
+def set_parallel_mode(request: Request, req: ParallelModeRequest):
     with state_lock:
         prev = bool(state.parallel_enabled)
         state.parallel_enabled = bool(req.enabled)

@@ -14,6 +14,10 @@ Opt-in Fixtures:
 Konstanten:
   - TEST_API_KEY: Der für alle Tests verwendete API-Key (64 Hex-Zeichen).
                   Kann in Sicherheitstests über Header-Override überschrieben werden.
+
+Rate-Limiting-Hinweis:
+  Das app-Fixture erstellt pro Test einen NEUEN Limiter (eigene leere Storage).
+  Damit akkumulieren Rate-Limit-Zähler nicht über Tests hinweg.
 """
 
 import time
@@ -22,6 +26,9 @@ import uuid
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from slowapi import Limiter
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 from unittest.mock import MagicMock
 
 from core.state import (
@@ -162,7 +169,15 @@ def failing_io(mock_io):
 
 @pytest.fixture
 def app():
-    """FastAPI-App *ohne* Lifespan – für schnelle Route-Tests."""
+    """
+    FastAPI-App *ohne* Lifespan – für schnelle Route-Tests.
+
+    Rate-Limiting:
+    Jeder Test bekommt eine NEUE Limiter-Instanz mit leerer in-memory Storage.
+    Damit akkumulieren Rate-Limit-Zähler nicht über Tests hinweg.
+    Die Limiter-Instanz wird als app.state.limiter gesetzt – genau so wie
+    in der Produktion (main.py). SlowAPIMiddleware liest daraus.
+    """
     from api.errors import register_error_handlers
     from api.routes_health import router as health_router
     from api.routes_queue import router as queue_router
@@ -170,7 +185,12 @@ def app():
     from api.routes_control import router as control_router
     from api.routes_history import router as history_router
 
+    # Frische Limiter-Instanz pro Test – identische Konfiguration wie Produktion.
+    test_limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+
     _app = FastAPI()
+    _app.state.limiter = test_limiter
+    _app.add_middleware(SlowAPIMiddleware)
     register_error_handlers(_app)
     _app.include_router(health_router)
     _app.include_router(queue_router)

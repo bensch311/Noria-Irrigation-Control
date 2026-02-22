@@ -1,10 +1,11 @@
 # app/api/routes_schedule.py
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock, ScheduleRule
 from core.logging import log_event
 from core.security import require_api_key
+from core.limiter import limiter, MUTATION_LIMIT
 from models.requests import ScheduleAddRequest
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -35,7 +36,8 @@ def get_schedules():
 
 
 @router.post("/schedule/add")
-def add_schedule(req: ScheduleAddRequest):
+@limiter.limit(MUTATION_LIMIT)
+def add_schedule(request: Request, req: ScheduleAddRequest):
     with state_lock:
         max_runtime_s = int(getattr(state, "hard_max_runtime_s", 3600))
         max_v = int(getattr(state, "max_valves", 1))
@@ -96,7 +98,8 @@ def add_schedule(req: ScheduleAddRequest):
 
 
 @router.post("/schedule/enable/{schedule_id}")
-def enable_schedule(schedule_id: str):
+@limiter.limit(MUTATION_LIMIT)
+def enable_schedule(request: Request, schedule_id: str):
     with state_lock:
         for r in state.schedules or []:
             if r.id == schedule_id:
@@ -108,7 +111,8 @@ def enable_schedule(schedule_id: str):
 
 
 @router.post("/schedule/disable/{schedule_id}")
-def disable_schedule(schedule_id: str):
+@limiter.limit(MUTATION_LIMIT)
+def disable_schedule(request: Request, schedule_id: str):
     with state_lock:
         for r in state.schedules or []:
             if r.id == schedule_id:
@@ -120,7 +124,8 @@ def disable_schedule(schedule_id: str):
 
 
 @router.delete("/schedule")
-def delete_schedules(ids: list[str]):
+@limiter.limit(MUTATION_LIMIT)
+def delete_schedules(request: Request, ids: list[str]):
     with state_lock:
         rules = state.schedules or []
         new_rules = [r for r in rules if r.id not in ids]

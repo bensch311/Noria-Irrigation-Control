@@ -1,12 +1,34 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from slowapi.errors import RateLimitExceeded
 
 from core.logging import log_event, logger
 
-REJECT_LOG_STATUS_CODES = {404, 409}
+# Status-Codes, die als request_rejected geloggt werden.
+# 429 wird separat über den RateLimitExceeded-Handler geloggt (rate_limit_exceeded).
+REJECT_LOG_STATUS_CODES = {401, 404, 409, 429}
+
 
 def register_error_handlers(app: FastAPI):
+    # --- RateLimitExceeded (429) – muss vor dem generischen HTTPException-Handler
+    #     registriert werden, damit der spezifischere Handler greift.
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+        client_ip = request.client.host if request.client else "unknown"
+        log_event(
+            "rate_limit_exceeded",
+            level="warning",
+            source="security",
+            client_ip=client_ip,
+            method=request.method,
+            path=request.url.path,
+        )
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too Many Requests – Rate Limit überschritten."},
+        )
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
         if exc.status_code in REJECT_LOG_STATUS_CODES:

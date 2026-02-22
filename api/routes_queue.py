@@ -1,10 +1,11 @@
 # app/api/routes_queue.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock, QueueItem
 from core.config import MAX_RUNTIME_S
 from core.logging import log_event
 from core.security import require_api_key
+from core.limiter import limiter, MUTATION_LIMIT
 from models.requests import QueueAddRequest
 from services.engine import _can_start_new_valve_locked, start_queue_item
 
@@ -23,7 +24,8 @@ def get_queue():
 
 
 @router.post("/queue/add")
-def queue_add(req: QueueAddRequest):
+@limiter.limit(MUTATION_LIMIT)
+def queue_add(request: Request, req: QueueAddRequest):
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
     if req.zone < 1 or req.zone > max_v:
@@ -58,7 +60,8 @@ def queue_add(req: QueueAddRequest):
 
 
 @router.post("/queue/start")
-def queue_start():
+@limiter.limit(MUTATION_LIMIT)
+def queue_start(request: Request):
     # Phase 1: Items sammeln die gestartet werden können (unter Lock)
     items_to_start = []
     with state_lock:
@@ -125,7 +128,8 @@ def queue_start():
 
 
 @router.post("/queue/pause")
-def queue_pause():
+@limiter.limit(MUTATION_LIMIT)
+def queue_pause(request: Request):
     with state_lock:
         state.queue_state = "pausiert"
         state.queue_dirty = True
@@ -135,7 +139,8 @@ def queue_pause():
 
 
 @router.post("/queue/clear")
-def queue_clear():
+@limiter.limit(MUTATION_LIMIT)
+def queue_clear(request: Request):
     with state_lock:
         state.queue_state = "bereit"
         state.queue_state_before_valve_pause = "bereit"
