@@ -3,10 +3,15 @@
 Zentrales Error-Handling für das Bewässerungs-Backend.
 
 Registriert Exception-Handler für:
-  - RateLimitExceeded  → 429 (mit Logging)
-  - HTTPException      → passender Status-Code (mit Logging für REJECT_LOG_STATUS_CODES)
-  - RequestValidationError → 422 (mit Sanitizing der Pydantic-v2-Fehlerstruktur)
+  - RateLimitExceeded  → 429 (mit Logging inkl. Client-IP)
+  - HTTPException      → passender Status-Code (mit Logging für REJECT_LOG_STATUS_CODES inkl. Client-IP)
+  - RequestValidationError → 422 (mit Sanitizing der Pydantic-v2-Fehlerstruktur inkl. Client-IP)
   - Exception          → 500 Internal Server Error (mit Logging)
+
+Step 6 – Audit Logging mit Client-IP:
+  Alle sicherheitsrelevanten Fehler-Events (401, 422, 429, 409, 404) enthalten
+  jetzt das Feld client_ip. Die IP-Extraktion erfolgt über get_client_ip() aus
+  core.security, die auch X-Forwarded-For für Proxy-Setups berücksichtigt.
 
 Pydantic-v2-Besonderheit (RequestValidationError / @field_validator):
   Wenn ein @field_validator eine ValueError wirft, speichert Pydantic v2 das
@@ -21,6 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 
 from core.logging import log_event, logger
+from core.security import get_client_ip
 
 # Status-Codes, die als request_rejected geloggt werden.
 # 429 wird separat über den RateLimitExceeded-Handler geloggt (rate_limit_exceeded).
@@ -65,12 +71,11 @@ def register_error_handlers(app: FastAPI):
     #     registriert werden, damit der spezifischere Handler greift.
     @app.exception_handler(RateLimitExceeded)
     async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
-        client_ip = request.client.host if request.client else "unknown"
         log_event(
             "rate_limit_exceeded",
             level="warning",
             source="security",
-            client_ip=client_ip,
+            client_ip=get_client_ip(request),
             method=request.method,
             path=request.url.path,
         )
@@ -86,6 +91,7 @@ def register_error_handlers(app: FastAPI):
                 "request_rejected",
                 level="warning",
                 source="manual",
+                client_ip=get_client_ip(request),
                 method=request.method,
                 path=request.url.path,
                 status_code=exc.status_code,
@@ -110,6 +116,7 @@ def register_error_handlers(app: FastAPI):
             "request_validation_error",
             level="warning",
             source="manual",
+            client_ip=get_client_ip(request),
             method=request.method,
             path=request.url.path,
             status_code=422,

@@ -12,6 +12,11 @@ Design:
 - Fehlversuche werden mit Client-IP geloggt (Event: auth_failure).
 
 Konstante Zeitvergleich via secrets.compare_digest() verhindert Timing-Angriffe.
+
+Step 6 – Audit Logging:
+- get_client_ip(): zentrale Hilfsfunktion für IP-Extraktion aus Request.
+  Berücksichtigt X-Forwarded-For für Proxy-Setups (nginx).
+  NUR für Logging – nicht für Sicherheitsentscheidungen verwenden.
 """
 
 import os
@@ -108,6 +113,32 @@ def get_api_key() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Hilfsfunktion: Client-IP für Logging
+# ---------------------------------------------------------------------------
+
+def get_client_ip(request: Request) -> str:
+    """
+    Gibt die Client-IP für Logging-Zwecke zurück.
+
+    Prüft zuerst X-Forwarded-For (für Betrieb hinter einem Reverse Proxy
+    wie nginx), fällt auf request.client.host zurück.
+
+    WICHTIG: Ausschließlich für Logging verwenden, NICHT für
+    Sicherheitsentscheidungen. X-Forwarded-For kann von Clients gefälscht
+    werden. Im LAN-Kontext mit bekanntem Proxy ist das für
+    Nachverfolgbarkeit akzeptabel – wer im Worst Case seine eigene
+    Log-IP fälscht, schadet nur sich selbst.
+
+    Format bei mehreren Proxies: "client, proxy1, proxy2"
+    → wir nehmen den ersten (leftmost) Eintrag = originaler Client.
+    """
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# ---------------------------------------------------------------------------
 # FastAPI Dependency
 # ---------------------------------------------------------------------------
 
@@ -138,12 +169,11 @@ async def require_api_key(
     key_ok = bool(x_api_key) and secrets.compare_digest(x_api_key, _api_key)
 
     if not key_ok:
-        client_ip = request.client.host if request.client else "unknown"
         log_event(
             "auth_failure",
             level="warning",
             source="security",
-            client_ip=client_ip,
+            client_ip=get_client_ip(request),
             method=request.method,
             path=str(request.url.path),
             key_present=bool(x_api_key),
