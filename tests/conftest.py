@@ -34,6 +34,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from unittest.mock import MagicMock
 
+from api.middleware import SecurityHeadersMiddleware
 from core.state import (
     state,
     state_lock,
@@ -68,51 +69,32 @@ CORS_TEST_ORIGIN = "http://test.example.com"
 def reset_global_state() -> None:
     """Setzt den gesamten RunState auf saubere Defaults zurück."""
     with state_lock:
+        state.active_run = None
         state.active_runs = {}
+        state.zone = None
+        state.end_time = None
+        state.time_unit = None
+        state.started_at = None
+        state.started_source = None
+        state.started_planned_s = None
+        state.paused = False
+        state.fault = False
         state.queue = []
         state.schedules = []
-        state.run_history = []
-        state.running_zone = None
-        state.end_time = 0.0
-        state.time_unit = "Minuten"
-        state.paused = False
-        state.remaining_s = 0
-        state.queue_state = "bereit"
-        state.queue_state_before_valve_pause = "bereit"
+        state.history = []
+        state.automation_enabled = False
         state.parallel_enabled = False
-        state.max_concurrent_valves = 2
-        state.max_valves = 6
-        state.hard_max_runtime_s = 3600
-        state.hard_max_concurrent_valves = 2
-        state.automation_enabled = True
         state.automation_block_run_key = None
-        state.hw_faulted = False
-        state.hw_fault_reason = ""
-        state.hw_fault_zone = None
-        state.hw_fault_since = ""
-        state.hw_fault_close_all_attempted = False
-        state.schedules_dirty = False
-        state.queue_dirty = False
-        state.history_dirty = False
-        state.started_at = 0.0
-        state.started_source = "manual"
-        state.started_planned_s = 0
-        state.paused_at = 0.0
-        state.paused_total_s = 0.0
-        state.parallel_drain_logged = False
-        state.valve_driver_mode = "sim"
-        state.relay_active_low = True
-        state.gpio_pins_by_zone = {}
-        state.max_history_items = 20
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Autouse-Fixtures  (laufen für jeden einzelnen Test)
+# Autouse-Fixtures (laufen vor/nach JEDEM Test)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
 def clean_state():
+    """Setzt den globalen RunState vor und nach jedem Test zurück."""
     reset_global_state()
     yield
     reset_global_state()
@@ -120,17 +102,18 @@ def clean_state():
 
 @pytest.fixture(autouse=True)
 def sim_driver():
-    """Installiert SimValveDriver als globalen Singleton (loggt, kein GPIO)."""
-    drv = SimValveDriver()
-    set_valve_driver(drv)
-    yield drv
+    """Setzt SimValveDriver als aktiven Valve-Driver für alle Tests."""
+    driver = SimValveDriver()
+    set_valve_driver(driver)
+    yield driver
     reset_valve_driver()
 
 
 @pytest.fixture(autouse=True)
 def mock_io():
     """
-    Installiert einen MagicMock als globalen IO-Worker.
+    Ersetzt den globalen IO-Worker durch einen MagicMock für alle Tests.
+
     Standard-Rückgabe: IOResult(success=True, duration_ms=1.0)
     """
     worker = MagicMock(spec=IOWorker)
@@ -183,7 +166,10 @@ def app():
     FastAPI-App *ohne* Lifespan – für schnelle Route-Tests.
 
     Middleware-Stack (spiegelt Produktion exakt):
-      Browser → CORSMiddleware → SlowAPIMiddleware → Route-Handler
+      Client → SecurityHeadersMiddleware → CORSMiddleware → SlowAPIMiddleware → Route-Handler
+
+    SecurityHeadersMiddleware als äußerste Schicht: setzt Security-Header auf
+    alle Responses, inkl. CORS-Preflights und Fehlerantworten.
 
     CORSMiddleware verwendet CORS_TEST_ORIGIN als einzige erlaubte Origin,
     damit CORS-Tests ohne Umgebungsvariablen-Manipulation funktionieren.
@@ -206,7 +192,8 @@ def app():
     _app.state.limiter = test_limiter
 
     # Middleware-Reihenfolge: zuletzt hinzugefügt = outermost = verarbeitet zuerst.
-    # SlowAPIMiddleware zuerst (innermost), CORSMiddleware zuletzt (outermost).
+    # SlowAPIMiddleware zuerst (innermost), CORSMiddleware als zweites,
+    # SecurityHeadersMiddleware zuletzt (outermost) – spiegelt Produktion exakt.
     _app.add_middleware(SlowAPIMiddleware)
     _app.add_middleware(
         CORSMiddleware,
@@ -215,6 +202,7 @@ def app():
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "X-API-Key"],
     )
+    _app.add_middleware(SecurityHeadersMiddleware)
 
     register_error_handlers(_app)
     _app.include_router(health_router)

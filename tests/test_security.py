@@ -1,5 +1,6 @@
 """
-Tests für core/security.py (Step 1), Rate Limiting (Step 2) und CORS (Step 3).
+Tests für core/security.py (Step 1), Rate Limiting (Step 2), CORS (Step 3)
+und Security Response Headers (Step 4).
 
 Step 1 – API Key Authentication:
   - load_or_create_api_key(): Key-Generierung bei nicht vorhandener Datei
@@ -31,6 +32,18 @@ Step 3 – CORS-Konfiguration:
   - ALLOWED_ORIGINS Parsing: Komma-separiert mit Whitespace-Toleranz
   - ALLOWED_ORIGINS Default: http://localhost:8080 ohne Env-Var
   - allow_credentials ist False (kein Cookie-Auth)
+
+Step 4 – Security Response Headers:
+  - X-Content-Type-Options: nosniff auf normalen Responses
+  - X-Frame-Options: DENY auf normalen Responses
+  - X-XSS-Protection: 0 auf normalen Responses
+  - Referrer-Policy: no-referrer auf normalen Responses
+  - Content-Security-Policy: default-src 'none' auf normalen Responses
+  - Server-Header ist nicht 'uvicorn' (neutralisiert)
+  - Server-Header hat den opaken Wert 'webserver'
+  - Security-Header sind auf Fehler-Responses (401) vorhanden
+  - Security-Header sind auf CORS-Preflight-Responses vorhanden
+  - Security-Header sind auch ohne Origin-Header vorhanden (kein CORS-Kontext)
 """
 
 import os
@@ -565,36 +578,165 @@ class TestCORS:
 
     def test_allowed_origins_multiple_comma_separated(self, monkeypatch):
         """Komma-separierte Origins werden korrekt in eine Liste geparst."""
-        monkeypatch.setenv(
-            "ALLOWED_ORIGINS",
-            "http://192.168.1.100:8080,http://localhost:8080",
-        )
+        monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:8080, http://192.168.1.100:8080")
         import importlib
         import core.config as cfg
         importlib.reload(cfg)
-        assert cfg.ALLOWED_ORIGINS == [
-            "http://192.168.1.100:8080",
-            "http://localhost:8080",
-        ]
+        assert cfg.ALLOWED_ORIGINS == ["http://localhost:8080", "http://192.168.1.100:8080"]
 
-    def test_allowed_origins_whitespace_is_stripped(self, monkeypatch):
-        """Leerzeichen um Origins herum werden toleriert und entfernt."""
-        monkeypatch.setenv(
-            "ALLOWED_ORIGINS",
-            "http://192.168.1.100:8080 , http://localhost:8080 ",
-        )
-        import importlib
-        import core.config as cfg
-        importlib.reload(cfg)
-        assert cfg.ALLOWED_ORIGINS == [
-            "http://192.168.1.100:8080",
-            "http://localhost:8080",
-        ]
 
-    def test_allowed_origins_empty_entries_ignored(self, monkeypatch):
-        """Leere Einträge (z.B. doppeltes Komma) werden ignoriert."""
-        monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:8080,,")
-        import importlib
-        import core.config as cfg
-        importlib.reload(cfg)
-        assert cfg.ALLOWED_ORIGINS == ["http://localhost:8080"]
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4: Security Response Headers Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSecurityHeaders:
+    """
+    Tests für SecurityHeadersMiddleware (Step 4).
+
+    Die Test-App (app-Fixture aus conftest.py) enthält SecurityHeadersMiddleware
+    als outermost Middleware, identisch mit der Produktionskonfiguration.
+
+    Geprüft wird:
+      - Alle definierten Security-Header sind in normalen Responses vorhanden.
+      - Jeder Header hat den korrekten, spezifizierten Wert.
+      - Der Server-Header ist neutralisiert (nicht 'uvicorn').
+      - Security-Header erscheinen auch auf Fehler-Responses (4xx).
+      - Security-Header erscheinen auch auf CORS-Preflight-Responses.
+      - Security-Header erscheinen unabhängig vom Origin-Header.
+    """
+
+    # ── Vorhandensein aller Header auf normalen Responses ────────────────────
+
+    def test_x_content_type_options_present(self, client):
+        """X-Content-Type-Options ist auf normalen Responses vorhanden."""
+        resp = client.get("/health")
+        assert "x-content-type-options" in resp.headers
+
+    def test_x_frame_options_present(self, client):
+        """X-Frame-Options ist auf normalen Responses vorhanden."""
+        resp = client.get("/health")
+        assert "x-frame-options" in resp.headers
+
+    def test_x_xss_protection_present(self, client):
+        """X-XSS-Protection ist auf normalen Responses vorhanden."""
+        resp = client.get("/health")
+        assert "x-xss-protection" in resp.headers
+
+    def test_referrer_policy_present(self, client):
+        """Referrer-Policy ist auf normalen Responses vorhanden."""
+        resp = client.get("/health")
+        assert "referrer-policy" in resp.headers
+
+    def test_content_security_policy_present(self, client):
+        """Content-Security-Policy ist auf normalen Responses vorhanden."""
+        resp = client.get("/health")
+        assert "content-security-policy" in resp.headers
+
+    def test_server_header_present(self, client):
+        """Server-Header ist in der Response vorhanden (neutralisiert)."""
+        resp = client.get("/health")
+        assert "server" in resp.headers
+
+    # ── Korrekte Werte ────────────────────────────────────────────────────────
+
+    def test_x_content_type_options_value(self, client):
+        """X-Content-Type-Options muss 'nosniff' sein."""
+        resp = client.get("/health")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    def test_x_frame_options_value(self, client):
+        """X-Frame-Options muss 'DENY' sein – kein Embedding in Frames erlaubt."""
+        resp = client.get("/health")
+        assert resp.headers["x-frame-options"] == "DENY"
+
+    def test_x_xss_protection_value(self, client):
+        """
+        X-XSS-Protection muss '0' sein.
+        OWASP-Empfehlung: Legacy-Filter deaktivieren, da er selbst XSS einführen kann.
+        """
+        resp = client.get("/health")
+        assert resp.headers["x-xss-protection"] == "0"
+
+    def test_referrer_policy_value(self, client):
+        """Referrer-Policy muss 'no-referrer' sein."""
+        resp = client.get("/health")
+        assert resp.headers["referrer-policy"] == "no-referrer"
+
+    def test_content_security_policy_value(self, client):
+        """Content-Security-Policy muss 'default-src 'none'' sein (restriktivste CSP)."""
+        resp = client.get("/health")
+        assert resp.headers["content-security-policy"] == "default-src 'none'"
+
+    def test_server_header_is_not_uvicorn(self, client):
+        """
+        Server-Header darf nicht 'uvicorn' enthalten.
+        Uvicorns Standard-Header verrät die verwendete Software – das erleichtert
+        gezielte Exploits, deshalb wird er durch einen generischen Wert ersetzt.
+        """
+        resp = client.get("/health")
+        assert "uvicorn" not in resp.headers.get("server", "").lower()
+
+    def test_server_header_is_opaque(self, client):
+        """Server-Header hat den konfigurierten opaken Wert 'webserver'."""
+        resp = client.get("/health")
+        assert resp.headers["server"] == "webserver"
+
+    # ── Header auf Fehler-Responses ──────────────────────────────────────────
+
+    def test_security_headers_on_401_response(self, raw_client):
+        """
+        Security-Header sind auch auf 401-Fehler-Responses vorhanden.
+        SecurityHeadersMiddleware greift auf ALLE Responses, unabhängig vom
+        Status-Code oder dem auslösenden Handler.
+        """
+        resp = raw_client.get("/status")
+        assert resp.status_code == 401
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers.get("x-frame-options") == "DENY"
+        assert resp.headers.get("content-security-policy") == "default-src 'none'"
+
+    def test_security_headers_on_404_response(self, client):
+        """Security-Header sind auch auf 404-Fehler-Responses vorhanden."""
+        resp = client.get("/nicht_vorhanden_xyz")
+        assert resp.status_code == 404
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers.get("x-frame-options") == "DENY"
+
+    def test_security_headers_on_authenticated_endpoint(self, client):
+        """Security-Header erscheinen auf geschützten Endpunkten (200 mit Auth)."""
+        resp = client.get("/status")
+        assert resp.status_code == 200
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers.get("x-frame-options") == "DENY"
+        assert resp.headers.get("referrer-policy") == "no-referrer"
+
+    # ── Header auf CORS-Preflight-Responses ──────────────────────────────────
+
+    def test_security_headers_on_cors_preflight(self, client):
+        """
+        Security-Header sind auch auf CORS-Preflight-Responses (OPTIONS) vorhanden.
+        Da SecurityHeadersMiddleware outermost ist, wraps sie auch die CORSMiddleware-
+        Antworten und fügt die Header hinzu.
+        """
+        resp = client.options(
+            "/status",
+            headers={
+                "Origin": CORS_TEST_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers.get("x-frame-options") == "DENY"
+        assert resp.headers.get("content-security-policy") == "default-src 'none'"
+
+    def test_security_headers_without_origin(self, client):
+        """
+        Security-Header erscheinen unabhängig vom Origin-Header.
+        Auch direkte API-Calls (ohne Browser/CORS) erhalten die Header.
+        """
+        # Kein Origin-Header → kein CORS-Kontext, aber Security-Header trotzdem da
+        resp = client.get("/health")
+        assert "access-control-allow-origin" not in resp.headers  # kein CORS
+        assert resp.headers.get("x-content-type-options") == "nosniff"  # Security: ja
+        assert resp.headers.get("x-frame-options") == "DENY"

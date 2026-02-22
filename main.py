@@ -10,6 +10,7 @@
 # - API Authentifizierung (Basic Auth / Token)? -> erledigt (Step 1)
 # - Rate Limiting -> erledigt (Step 2)
 # - CORS -> erledigt (Step 3)
+# - Security Response Headers -> erledigt (Step 4)
 # - Historie -> erledigt
 # - Software / Hardware Watchdog (Raspberry PI)
 # - Refactoring
@@ -20,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 
 from api import routes_history
+from api.middleware import SecurityHeadersMiddleware
 from core.lifecycle import lifespan
 from core.limiter import limiter
 from core.config import ALLOWED_ORIGINS
@@ -39,25 +41,30 @@ app.state.limiter = limiter
 # Middleware-Stack (Reihenfolge beachten!)
 #
 # In Starlette/FastAPI gilt: das ZULETZT hinzugefügte Middleware ist OUTERMOST
-# und verarbeitet eingehende Requests als ERSTES.
+# und verarbeitet eingehende Requests als ERSTES (und ausgehende Responses
+# als LETZTES, direkt vor Auslieferung an den Client).
 #
 # Gewünschte Request-Reihenfolge:
-#   Browser → CORSMiddleware → SlowAPIMiddleware → Route-Handler
+#   Client → SecurityHeadersMiddleware → CORSMiddleware → SlowAPIMiddleware → Route-Handler
 #
 # Damit gilt:
-#   1. CORSMiddleware antwortet OPTIONS-Preflight-Requests direkt, BEVOR
+#   1. SecurityHeadersMiddleware setzt Security-Header auf ALLE Responses
+#      (inkl. CORS-Preflight-Antworten), da es die äußerste Schicht ist.
+#   2. CORSMiddleware antwortet OPTIONS-Preflight-Requests direkt, BEVOR
 #      der Rate-Limiter sie zählen würde (kein sinnloser 429 auf Preflight).
-#   2. Reguläre Requests passieren zuerst CORS, dann Rate-Limiting.
+#   3. Reguläre Requests passieren zuerst Security-Headers, dann CORS,
+#      dann Rate-Limiting.
 #
 # Daher: SlowAPIMiddleware ZUERST hinzufügen (innermost),
-#         CORSMiddleware ZULETZT hinzufügen (outermost).
+#         CORSMiddleware als zweites (middle),
+#         SecurityHeadersMiddleware ZULETZT hinzufügen (outermost).
 # ---------------------------------------------------------------------------
 
 # SlowAPIMiddleware VOR register_error_handlers hinzufügen, damit der
 # RateLimitExceeded-Handler aus errors.py greift.
 app.add_middleware(SlowAPIMiddleware)
 
-# CORSMiddleware als äußerste Schicht: verarbeitet alle Requests zuerst.
+# CORSMiddleware als mittlere Schicht: verarbeitet alle Requests nach SecurityHeaders.
 # allow_credentials=False: kein Cookie-basiertes Auth, kein CSRF-Risiko.
 # allow_methods/allow_headers: minimale Whitelist – nur was die API tatsächlich nutzt.
 app.add_middleware(
@@ -67,6 +74,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
+
+# SecurityHeadersMiddleware als äußerste Schicht: setzt Security-Header auf
+# jede Response – inklusive CORS-Preflights und Fehlerantworten.
+app.add_middleware(SecurityHeadersMiddleware)
 
 register_error_handlers(app)
 
