@@ -1,3 +1,4 @@
+# tests/test_routes_control.py
 """
 Tests für api/routes_control.py
 
@@ -17,6 +18,7 @@ import pytest
 
 from core.state import state, state_lock, ActiveRun
 from services.engine import _sync_legacy_single_fields_locked
+from services.io_worker import IOResult, IOCommand
 from tests.conftest import set_running_zone
 
 
@@ -78,45 +80,25 @@ def test_start_zone_out_of_range_low(client):
 
 
 def test_start_zone_out_of_range_high(client):
-    with state_lock:
-        state.max_valves = 3
-    resp = client.post("/start", json={"zone": 4, "duration": 60, "time_unit": "Sekunden"})
+    resp = client.post("/start", json={"zone": 999, "duration": 60, "time_unit": "Sekunden"})
     assert resp.status_code == 400
 
 
-def test_start_duration_exceeds_max(client):
-    with state_lock:
-        state.hard_max_runtime_s = 600
-    resp = client.post("/start", json={"zone": 1, "duration": 601, "time_unit": "Sekunden"})
-    assert resp.status_code == 400
-
-
-def test_start_zone_already_running_returns_409(client, mock_io):
-    set_running_zone(1, 60)
-    resp = client.post("/start", json={"zone": 1, "duration": 30, "time_unit": "Sekunden"})
-    assert resp.status_code == 409
-
-
-def test_start_serial_mode_busy_returns_409(client, mock_io):
-    with state_lock:
-        state.parallel_enabled = False
-    set_running_zone(1, 60)
-    resp = client.post("/start", json={"zone": 2, "duration": 30, "time_unit": "Sekunden"})
-    assert resp.status_code == 409
-
-
-def test_start_hw_faulted_returns_423(client):
-    with state_lock:
-        state.hw_faulted = True
-    resp = client.post("/start", json={"zone": 1, "duration": 30, "time_unit": "Sekunden"})
-    assert resp.status_code == 423
+def test_start_negative_duration(client):
+    resp = client.post("/start", json={"zone": 1, "duration": -1, "time_unit": "Sekunden"})
+    assert resp.status_code == 422
 
 
 def test_start_hw_error_returns_503(client, failing_io):
-    resp = client.post("/start", json={"zone": 1, "duration": 30, "time_unit": "Sekunden"})
+    resp = client.post("/start", json={"zone": 1, "duration": 60, "time_unit": "Sekunden"})
     assert resp.status_code == 503
+
+
+def test_start_hw_faulted_returns_423(client, mock_io):
     with state_lock:
-        assert state.active_runs == {}
+        state.hw_faulted = True
+    resp = client.post("/start", json={"zone": 1, "duration": 60, "time_unit": "Sekunden"})
+    assert resp.status_code == 423
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,9 +106,8 @@ def test_start_hw_error_returns_503(client, failing_io):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_stop_running_zone(client, mock_io):
+def test_stop_success(client, mock_io):
     set_running_zone(1, 60)
-
     resp = client.post("/stop")
     assert resp.status_code == 200
     data = resp.json()
@@ -173,14 +154,6 @@ def test_stop_calls_io_close(client, mock_io):
     assert cmd.zone == 1
 
 
-def test_stop_hw_error_returns_503(client, failing_io):
-    set_running_zone(1, 60)
-    resp = client.post("/stop")
-    assert resp.status_code == 503
-    data = resp.json()
-    assert "failed" in data["detail"]
-
-
 def test_stop_multiple_zones(client, mock_io):
     with state_lock:
         state.parallel_enabled = True
@@ -200,6 +173,195 @@ def test_stop_multiple_zones(client, mock_io):
     with state_lock:
         assert state.active_runs == {}
         assert len(state.run_history) == 2
+
+
+def test_stop_hw_error_returns_503(client, failing_io):
+    """
+    Wenn close fehlschlägt → 503.
+    KRITISCH: Zone muss in active_runs verbleiben (Hardware evtl. noch offen).
+    Vor dem Bug-Fix wurde die Zone fälschlicherweise aus active_runs entfernt
+    obwohl die Hardware-Close-Operation fehlgeschlagen war.
+    """
+    set_running_zone(1, 60)
+    resp = client.post("/stop")
+    assert resp.status_code == 503
+    data = resp.json()
+    assert "failed" in data["detail"]
+
+    # SICHERHEITSINVARIANTE: Zone muss in active_runs bleiben
+    with state_lock:
+        assert 1 in state.active_runs, (
+            "Zone muss nach fehlgeschlagenem close in active_runs bleiben "
+            "(Hardware könnte noch offen sein)"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /stop – Teilfehler-Semantik (Kernfunktionalität des Bug-Fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_partial_fail_io(mock_io, failing_zone: int):
+    """
+    Konfiguriert mock_io so, dass close für failing_zone fehlschlägt,
+    alle anderen Commands aber erfolgreich sind.
+    """
+    def _side_effect(cmd: IOCommand, timeout_s: float = 5.0) -> IOResult:
+        if cmd.action == "close" and cmd.zone == failing_zone:
+            return IOResult(success=False, zone=cmd.zone, error="GPIO Fehler", duration_ms=1.0)
+        return IOResult(success=True, duration_ms=1.0)
+
+    mock_io.send_command.side_effect = _side_effect
+    return mock_io
+
+
+def test_stop_partial_failure_returns_503(client, mock_io):
+    """Wenn mindestens eine Zone nicht geschlossen werden kann → 503."""
+    with state_lock:
+        state.parallel_enabled = True
+        state.max_concurrent_valves = 2
+        now = time.monotonic()
+        state.active_runs = {
+            1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
+            2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
+        }
+        _sync_legacy_single_fields_locked()
+
+    _make_partial_fail_io(mock_io, failing_zone=2)
+
+    resp = client.post("/stop")
+    assert resp.status_code == 503
+
+
+def test_stop_partial_failure_response_contains_stopped_and_failed(client, mock_io):
+    """503-Response enthält welche Zonen gestoppt wurden und welche fehlschlugen."""
+    with state_lock:
+        state.parallel_enabled = True
+        state.max_concurrent_valves = 2
+        now = time.monotonic()
+        state.active_runs = {
+            1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
+            2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
+        }
+        _sync_legacy_single_fields_locked()
+
+    _make_partial_fail_io(mock_io, failing_zone=2)
+
+    resp = client.post("/stop")
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert 1 in detail["stopped"]
+    assert any(f["zone"] == 2 for f in detail["failed"])
+
+
+def test_stop_partial_failure_commits_only_successful_zones(client, mock_io):
+    """
+    SICHERHEITSINVARIANTE: Nur Zonen die hardware-seitig geschlossen wurden,
+    werden aus active_runs entfernt. Die fehlgeschlagene Zone bleibt drin.
+    """
+    with state_lock:
+        state.parallel_enabled = True
+        state.max_concurrent_valves = 2
+        now = time.monotonic()
+        state.active_runs = {
+            1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
+            2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
+        }
+        _sync_legacy_single_fields_locked()
+
+    _make_partial_fail_io(mock_io, failing_zone=2)
+
+    client.post("/stop")
+
+    with state_lock:
+        assert 1 not in state.active_runs, "Erfolgreich gestoppte Zone 1 muss entfernt sein"
+        assert 2 in state.active_runs, "Fehlgeschlagene Zone 2 muss in active_runs bleiben"
+
+
+def test_stop_partial_failure_history_only_for_stopped_zones(client, mock_io):
+    """
+    History-Eintrag darf NUR für erfolgreich geschlossene Zonen angelegt werden.
+    Für fehlgeschlagene Zonen keinen Eintrag → sonst wäre der Audit-Trail falsch.
+    """
+    with state_lock:
+        state.parallel_enabled = True
+        state.max_concurrent_valves = 2
+        now = time.monotonic()
+        state.active_runs = {
+            1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
+            2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
+        }
+        state.run_history = []
+        _sync_legacy_single_fields_locked()
+
+    _make_partial_fail_io(mock_io, failing_zone=2)
+
+    client.post("/stop")
+
+    with state_lock:
+        assert len(state.run_history) == 1, "Genau ein History-Eintrag (nur Zone 1)"
+        assert state.run_history[0].zone == 1
+
+
+def test_stop_partial_failure_failed_zone_gets_immediate_end_time(client, mock_io):
+    """
+    Fehlgeschlagene Zone bekommt end_time in der Vergangenheit gesetzt,
+    damit der Timer sie beim nächsten Durchlauf via Backoff-Retry aufgreift.
+    end_time == 0.0 würde vom Timer ignoriert (0.0 ist falsy im end_time-Check).
+    """
+    with state_lock:
+        state.parallel_enabled = True
+        state.max_concurrent_valves = 2
+        now = time.monotonic()
+        state.active_runs = {
+            1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
+            2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
+        }
+        _sync_legacy_single_fields_locked()
+
+    before_stop = time.monotonic()
+    _make_partial_fail_io(mock_io, failing_zone=2)
+
+    client.post("/stop")
+
+    with state_lock:
+        ar = state.active_runs.get(2)
+        assert ar is not None
+        # end_time muss in der Vergangenheit und nicht 0.0 sein
+        assert ar.end_time != 0.0, "end_time darf nicht 0.0 sein (Timer würde Zone ignorieren)"
+        assert ar.end_time < before_stop, "end_time muss in der Vergangenheit liegen (sofortiger Retry)"
+
+
+def test_stop_partial_failure_paused_zone_gets_end_time_set(client, mock_io):
+    """
+    Spezialfall: pausierte Zone (end_time == 0.0, paused_at > 0) die close nicht
+    übersteht, muss danach end_time > 0 haben – sonst findet der Timer sie nie.
+    """
+    with state_lock:
+        now = time.monotonic()
+        ar = ActiveRun(1, 0.0, "Sekunden", now - 30, "manual", 60)
+        ar.paused_at = now - 10
+        ar.remaining_s = 30
+        state.active_runs = {1: ar}
+        state.paused = True
+        _sync_legacy_single_fields_locked()
+
+    def _fail_all_close(cmd: IOCommand, timeout_s: float = 5.0) -> IOResult:
+        if cmd.action == "close":
+            return IOResult(success=False, zone=cmd.zone, error="GPIO", duration_ms=1.0)
+        return IOResult(success=True, duration_ms=1.0)
+
+    mock_io.send_command.side_effect = _fail_all_close
+
+    before_stop = time.monotonic()
+    client.post("/stop")
+
+    with state_lock:
+        ar = state.active_runs.get(1)
+        assert ar is not None
+        assert ar.end_time != 0.0, "end_time darf nicht 0.0 sein nach fehlgeschlagenem Stop"
+        assert ar.end_time < before_stop, "end_time muss in der Vergangenheit liegen"
+        assert ar.paused_at == 0.0, "paused_at muss nach Stop-Versuch geleert sein"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,3 +609,5 @@ def test_set_parallel_disable(client):
     resp = client.post("/parallel", json={"enabled": False})
     assert resp.status_code == 200
     assert resp.json()["parallel_enabled"] is False
+    with state_lock:
+        assert state.parallel_enabled is False

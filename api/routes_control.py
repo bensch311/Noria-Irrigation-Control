@@ -1,4 +1,4 @@
-# app/api/routes_control.py
+# api/routes_control.py
 import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -69,6 +69,152 @@ def start(request: Request, req: StartRequest):
             "parallel_enabled": state.parallel_enabled,
             "max_concurrent_valves": state.max_concurrent_valves,
         }
+
+
+# ---------------------------
+# POST /stop -> Stoppt sofort alle Ventile
+#
+# Teilfehler-Semantik (sicherheitskritisch):
+#   Nur Zonen die hardware-seitig erfolgreich geschlossen wurden, werden aus
+#   active_runs entfernt und in die Historie geschrieben.
+#   Fehlgeschlagene Zonen verbleiben in active_runs mit end_time = jetzt - 1 s,
+#   damit der Timer sie beim nächsten Durchlauf via Backoff-Mechanismus erneut
+#   versucht zu schließen – identisch zum normalen Timeout-Pfad.
+#
+#   Damit ist garantiert: logischer Zustand "gestoppt" <=> Hardware ist zu.
+# ---------------------------
+@router.post("/stop")
+@limiter.limit(MUTATION_LIMIT)
+def stop(request: Request):
+    # Phase 1: Prepare (unter Lock) - sammle alle Infos für Historie
+    with state_lock:
+        if not state.active_runs:
+            # Invariant: active_runs is the source of truth
+            z = state.running_zone
+            if z is not None:
+                log_event("legacy_state_inconsistent", level="error", source="system", running_zone=z)
+            state.running_zone = None
+            _sync_legacy_single_fields_locked()
+            return {"ok": True, "stopped_zone": z}
+
+        now_m = time.monotonic()
+        zones_to_close = sorted(list(state.active_runs.keys()))
+
+        # Sammle Infos für Historie-Berechnung (vor dem Hardware-Close)
+        zones_info = {}
+        for zone in zones_to_close:
+            ar = state.active_runs.get(zone)
+            if not ar:
+                continue
+
+            paused_total = ar.paused_total_s
+            if ar.paused_at:
+                paused_total += (now_m - ar.paused_at)
+
+            active = (now_m - ar.started_at) - paused_total
+            actual_s = max(0, int(active + 1e-6))
+
+            zones_info[zone] = {
+                "actual_s": actual_s,
+                "source": ar.started_source or "manual",
+                "time_unit": ar.time_unit,
+                "was_paused": ar.paused_at > 0.0,  # benötigt für end_time-Korrektur bei Fehler
+            }
+
+        # Logisches Unpause vorab – wir versuchen den Stop, paused=False ist der Intent.
+        # Fehlgeschlagene Zonen werden so vom Timer gefunden (end_time-Prüfung greift).
+        state.paused = False
+
+    # Phase 2: Execute (OHNE Lock) - Hardware close via IO-Worker
+    from services.io_worker import get_io_worker, IOCommand
+    io_worker = get_io_worker()
+
+    failed = []
+    stopped = []
+    for zone in zones_to_close:
+        cmd = IOCommand(action="close", zone=zone)
+        result = io_worker.send_command(cmd, timeout_s=5.0)
+
+        if result.success:
+            stopped.append(zone)
+        else:
+            failed.append({"zone": zone, "error": result.error})
+
+    # Phase 3: Commit (unter Lock)
+    #
+    # Sicherheitsinvariante: Nur Zonen die hardware-seitig geschlossen wurden
+    # (stopped-Liste) werden aus active_runs entfernt und in die Historie geschrieben.
+    # Fehlgeschlagene Zonen (failed-Liste) bleiben in active_runs und werden vom
+    # Timer beim nächsten Durchlauf über den Backoff-Retry-Pfad erneut geschlossen.
+    with state_lock:
+        now_m = time.monotonic()
+
+        # Erfolgreich gestoppte Zonen: Historie schreiben + aus active_runs entfernen
+        for zone in stopped:
+            info = zones_info.get(zone)
+            if info:
+                _history_add_locked(
+                    zone=zone,
+                    duration_s=info["actual_s"],
+                    source=info["source"],
+                    time_unit=info["time_unit"],
+                )
+            state.active_runs.pop(zone, None)
+
+        # Fehlgeschlagene Zonen: in active_runs belassen, end_time für sofortigen
+        # Timer-Retry setzen. Paused-Felder leeren damit der Timer-Check greift
+        # (Timer überspringt Zonen mit end_time == 0.0, da 0.0 falsy ist).
+        for zone in [f["zone"] for f in failed]:
+            ar = state.active_runs.get(zone)
+            if ar is None:
+                continue
+            # Paused-Accounting abschließen (paused_at leeren) damit actual_s im
+            # Timer korrekt berechnet wird, falls close beim nächsten Retry klappt.
+            if ar.paused_at:
+                ar.paused_total_s += (now_m - ar.paused_at)
+                ar.paused_at = 0.0
+            # end_time in die Vergangenheit setzen → Timer greift sofort
+            ar.end_time = now_m - 1.0
+            log_event(
+                "valve_stop_hw_error_retry_scheduled",
+                level="error",
+                source="manual",
+                zone=zone,
+                error=next((f["error"] for f in failed if f["zone"] == zone), "unknown"),
+                action="timer_will_retry",
+            )
+
+        state.paused = False  # idempotent, aber explizit
+
+        if not state.active_runs:
+            state.queue_state_before_valve_pause = "bereit"
+
+        _sync_legacy_single_fields_locked()
+
+        log_event(
+            "valve_stop",
+            source="manual",
+            zone="all",
+            queue_state=state.queue_state,
+            queue_length=len(state.queue or []),
+            parallel_enabled=state.parallel_enabled,
+            automation_enabled=state.automation_enabled,
+            stopped_count=len(stopped),
+            failed_count=len(failed),
+        )
+
+    if failed:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Nicht alle Ventile konnten gestoppt werden. "
+                           "Fehlgeschlagene Zonen werden automatisch nachgeschlossen.",
+                "stopped": stopped,
+                "failed": failed,
+            },
+        )
+
+    return {"ok": True, "stopped_zones": stopped}
 
 
 # ---------------------------
@@ -181,8 +327,6 @@ def resume_current(request: Request):
             if (ar.remaining_s or 0) > 0:
                 zones_to_open.append(z)
 
-        now_m = time.monotonic()  # noqa: F841
-
     # Phase 2: Execute (OHNE Lock) - Hardware open via IO-Worker
     from services.io_worker import get_io_worker, IOCommand
     io_worker = get_io_worker()
@@ -269,116 +413,6 @@ def clear_fault(request: Request):
         log_event("hw_fault_cleared", level="warning", source="manual")
 
     return {"ok": True, "cleared": True}
-
-
-# ---------------------------
-# POST /stop -> Stoppt sofort alle Ventile
-# ---------------------------
-@router.post("/stop")
-@limiter.limit(MUTATION_LIMIT)
-def stop(request: Request):
-    # Phase 1: Prepare (unter Lock) - sammle alle Infos für Historie
-    with state_lock:
-        if not state.active_runs:
-            # Invariant: active_runs is the source of truth
-            z = state.running_zone
-            if z is not None:
-                log_event("legacy_state_inconsistent", level="error", source="system", running_zone=z)
-            state.running_zone = None
-            _sync_legacy_single_fields_locked()
-            return {"ok": True, "stopped_zone": z}
-
-        now_m = time.monotonic()
-        zones_to_close = sorted(list(state.active_runs.keys()))
-
-        # Sammle Infos für Historie-Berechnung
-        zones_info = {}
-        for zone in zones_to_close:
-            ar = state.active_runs.get(zone)
-            if not ar:
-                continue
-
-            paused_total = ar.paused_total_s
-            if ar.paused_at:
-                paused_total += (now_m - ar.paused_at)
-
-            active = (now_m - ar.started_at) - paused_total
-            actual_s = max(0, int(active + 1e-6))
-
-            zones_info[zone] = {
-                "actual_s": actual_s,
-                "source": ar.started_source or "manual",
-                "time_unit": ar.time_unit,
-            }
-
-        # Stop should unpause
-        state.paused = False
-
-    # Phase 2: Execute (OHNE Lock) - Hardware close via IO-Worker
-    from services.io_worker import get_io_worker, IOCommand
-    io_worker = get_io_worker()
-
-    failed = []
-    stopped = []
-    for zone in zones_to_close:
-        cmd = IOCommand(action="close", zone=zone)
-        result = io_worker.send_command(cmd, timeout_s=5.0)
-
-        if result.success:
-            stopped.append(zone)
-        else:
-            failed.append({"zone": zone, "error": result.error})
-
-    # Phase 3: Commit (unter Lock) - auch bei Teil-Fehler State bereinigen
-    with state_lock:
-        now_m = time.monotonic()
-
-        for zone in zones_to_close:
-            info = zones_info.get(zone)
-            if info:
-                _history_add_locked(
-                    zone=zone,
-                    duration_s=info["actual_s"],
-                    source=info["source"],
-                    time_unit=info["time_unit"],
-                )
-            state.active_runs.pop(zone, None)
-
-        state.running_zone = None
-        state.end_time = 0.0
-        state.paused = False
-
-        if not state.active_runs:
-            if state.queue_state not in ("läuft", "pausiert"):
-                pass  # queue_state bleibt wie es ist
-            state.queue_state_before_valve_pause = "bereit"
-
-        _sync_legacy_single_fields_locked()
-
-        log_event(
-            "valve_stop",
-            source="manual",
-            zone="all",
-            queue_state=state.queue_state,
-            queue_length=len(state.queue or []),
-            parallel_enabled=state.parallel_enabled,
-            automation_enabled=state.automation_enabled,
-            stopped_count=len(stopped),
-            failed_count=len(failed),
-        )
-
-    # Bei Teil-Fehler: 503 mit Details
-    if failed:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": "Nicht alle Ventile konnten gestoppt werden",
-                "stopped": stopped,
-                "failed": failed
-            },
-        )
-
-    return {"ok": True, "stopped_zones": stopped}
 
 
 # ---------------------------

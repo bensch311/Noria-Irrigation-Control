@@ -1,5 +1,4 @@
 from datetime import datetime
-from fastapi import HTTPException
 
 from core.state import state, state_lock, QueueItem, ScheduleRule
 from core.config import TZ, MAX_VALVES
