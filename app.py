@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from urllib import response
 from pathlib import Path
 from shiny import *
 from shiny.express import render, ui, input, expressify, output
@@ -40,6 +39,47 @@ except OSError:
 
 _session = requests.Session()
 _session.headers.update({"X-API-Key": _API_KEY})
+
+
+@dataclass
+class ApiResponse:
+    status_code: int
+    data: dict | list | None = None
+    error: str | None = None
+
+    def json(self) -> dict | list:
+        if self.data is None:
+            return {}
+        return self.data
+
+
+REQUEST_TIMEOUT_S = 2.0
+
+
+def api_request(method: str, path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
+    try:
+        response = _session.request(method, BASE_URL + path, json=json, timeout=timeout)
+    except requests.RequestException as exc:
+        return ApiResponse(status_code=0, error=str(exc))
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+
+    return ApiResponse(status_code=response.status_code, data=data)
+
+
+def api_get(path: str, *, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
+    return api_request("GET", path, timeout=timeout)
+
+
+def api_post(path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
+    return api_request("POST", path, json=json, timeout=timeout)
+
+
+def api_delete(path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
+    return api_request("DELETE", path, json=json, timeout=timeout)
 
 # ---------------------------
 # CSS-Anpassungen
@@ -285,7 +325,7 @@ def ping_health() -> bool:
     Niemals Exceptions nach außen werfen.
     """
     try:
-        r = _session.get(BASE_URL + "/health", timeout=HEALTH_TIMEOUT_S)
+        r = api_get("/health", timeout=HEALTH_TIMEOUT_S)
         if r.status_code != 200:
             return False
         data = r.json()
@@ -359,7 +399,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @render.ui
         def show_automation_status():
             reactive.invalidate_later(1)
-            response = _session.get(BASE_URL + "/status")
+            response = api_get("/status")
             if response.status_code == 200:
                 data = response.json()
                 if data['parallel_enabled']:
@@ -384,7 +424,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.event(input["switch_concurrent"])
         def toggle_parallel():
             new_value = input.switch_concurrent()
-            response = _session.post(BASE_URL + "/parallel", json={"enabled": new_value})
+            response = api_post("/parallel", json={"enabled": new_value})
             if response.status_code == 200:
                 if new_value:
                     ui.notification_show("Parallelbetrieb aktiviert!", duration=3, close_button=False, type="message")
@@ -400,7 +440,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @render.ui
         def status():
             reactive.invalidate_later(0.5)
-            response = _session.get(BASE_URL + "/status")
+            response = api_get("/status")
             if response.status_code == 200:
                 data = response.json()
                 if data['state'] == "bereit":
@@ -432,7 +472,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_resume_active"])
         def button_resume_active():
-            response = _session.post(BASE_URL + "/resume")
+            response = api_post("/resume")
             if response.status_code == 200:
                 ui.notification_show("Bewässerung fortgesetzt!", duration=3, close_button=False, type="message")
             else:
@@ -441,7 +481,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_stop_active"])
         def button_stop_active():
-            response = _session.post(BASE_URL + "/pause")
+            response = api_post("/pause")
             if response.status_code == 200:
                 ui.notification_show("Bewässerung pausiert!", duration=3, close_button=False, type="message")
             else:
@@ -450,7 +490,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_cancel_active"])
         def button_cancel_active():
-            response = _session.post(BASE_URL + "/stop")
+            response = api_post("/stop")
             if response.status_code == 200:
                 ui.notification_show("Bewässerung gestoppt!", duration=3, close_button=False, type="message")
                 #ui.update_action_button("btn_cancel_active", disabled=True)
@@ -464,7 +504,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @render.ui
         def queue_status():
             reactive.invalidate_later(0.5)
-            response = _session.get(BASE_URL + "/queue")
+            response = api_get("/queue")
             if response.status_code == 200:
                 data = response.json()
                 if data['queue_length'] == 0:
@@ -487,7 +527,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_q_start"])
         def button_q_start():
-            response = _session.post(BASE_URL + "/queue/start")
+            response = api_post("/queue/start")
             if response.status_code == 200:
                 ui.notification_show("Warteschlange gestartet!", duration=3, close_button=False, type="message")
             else:
@@ -501,7 +541,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_q_stop"])
         def button_q_stop():
-            response = _session.post(BASE_URL + "/queue/pause")
+            response = api_post("/queue/pause")
             if response.status_code == 200:
                 ui.notification_show("Warteschlange pausiert!", duration=3, close_button=False, type="message")
             else:
@@ -510,7 +550,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_q_clear"])
         def button_q_clear():
-            response = _session.post(BASE_URL + "/queue/clear")
+            response = api_post("/queue/clear")
             if response.status_code == 200:
                 ui.notification_show("Warteschlange gelöscht!", duration=3, close_button=False, type="message")
                 ui.update_action_button("btn_q_clear", disabled=True)
@@ -530,7 +570,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
             @reactive.event(input[f"start{i}"])
             def button_start(i=i):
                 start_payload = {"zone": i, "duration": input[f"sld_time_{i}"]() if input[f"rb_secmin{i}"]() == "Sekunden" else input[f"sld_time_{i}"]() * 60, "time_unit": input[f"rb_secmin{i}"]()}
-                response = _session.post(BASE_URL + "/start", json=start_payload)
+                response = api_post("/start", json=start_payload)
                 if response.status_code == 200:
                     ui.notification_show("Bewässerung gestartet!", duration=3, close_button=False, type="message")
                     #ui.update_action_button("btn_cancel_active", disabled=False)
@@ -554,7 +594,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
             @reactive.event(input[f"queue{i}"])
             def button_queue(i=i):
                 queue_payload = {"zone": i, "duration": input[f"sld_time_{i}"]() if input[f"rb_secmin{i}"]() == "Sekunden" else input[f"sld_time_{i}"]() * 60, "time_unit": input[f"rb_secmin{i}"]()}
-                response = _session.post(BASE_URL + "/queue/add", json=queue_payload)
+                response = api_post("/queue/add", json=queue_payload)
                 if response.status_code == 200:
                     ui.notification_show("Eintrag zur Warteschlange hinzugefügt!", duration=3, close_button=False, type="message")
                 else:
@@ -607,7 +647,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
                 "repeat": selected_repeat
             }
             print(schedule_payload)
-            response = _session.post(BASE_URL + "/schedule/add", json=schedule_payload)
+            response = api_post("/schedule/add", json=schedule_payload)
             if response.status_code == 200:
                 ui.notification_show("Zeitplan hinzugefügt!", duration=3, close_button=False, type="message")
             else:
@@ -635,7 +675,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @render.ui
         def schedule_status():
             reactive.invalidate_later(0.5)
-            response = _session.get(BASE_URL + "/schedule")
+            response = api_get("/schedule")
 
             if response.status_code != 200:
                 return "Fehler bei der Anfrage an den Server!"
@@ -693,7 +733,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_enable_automation"])
         def button_enable_automation():
-            response = _session.post(BASE_URL + "/automation/enable")
+            response = api_post("/automation/enable")
             if response.status_code == 200:
                 ui.notification_show("Automatik aktiviert!", duration=3, close_button=False, type="message")
             else:
@@ -702,7 +742,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_disable_automation"])
         def button_disable_automation():
-            response = _session.post(BASE_URL + "/automation/disable")
+            response = api_post("/automation/disable")
             if response.status_code == 200:
                 ui.notification_show("Automatik deaktiviert!", duration=3, close_button=False, type="message")
             else:
@@ -711,7 +751,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_schedule_delete"])
         def button_schedule_delete():
-            response = _session.get(BASE_URL + "/schedule")
+            response = api_get("/schedule")
             if response.status_code == 200:
                 data = response.json()
                 schedules_count = data["count"]
@@ -785,7 +825,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @reactive.Effect
         @reactive.event(input["btn_confirm_delete_schedules"])
         def button_confirm_delete_schedules():
-            response = _session.get(BASE_URL + "/schedule")
+            response = api_get("/schedule")
             if response.status_code == 200:
                 data = response.json()
                 ids_to_delete = []
@@ -798,7 +838,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
 
                 if ids_to_delete:
                     print("Zu löschende IDs:", ids_to_delete)
-                    delete_response = _session.delete(BASE_URL + "/schedule", json=ids_to_delete)
+                    delete_response = api_delete("/schedule", json=ids_to_delete)
                     if delete_response.status_code == 200:
                         ui.notification_show("Ausgewählte Zeitpläne gelöscht!", duration=3, close_button=False, type="message")
                     else:
@@ -817,7 +857,7 @@ with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
         @render.ui
         def history_status():
             reactive.invalidate_later(1)
-            response = _session.get(BASE_URL + "/history")
+            response = api_get("/history")
             if response.status_code == 200:
                 data = response.json()
                 history_count = data["count"]
