@@ -1,897 +1,1157 @@
-from dataclasses import dataclass
+
+# app.py - Bewaesserungscomputer Frontend
+# Shiny Express | FastAPI Backend: http://127.0.0.1:8000
+
+# Rate-Limit-Strategie:
+#   - Alle shared @reactive.calc (status, automation, parallel) werden
+#     auf Seitenebene EINMAL pro Poll-Tick definiert.
+#   - Shiny cached @reactive.calc-Ergebnisse innerhalb eines reaktiven
+#     Ticks: Egal wie viele Renders darauf zugreifen, es entsteht nur
+#     EIN HTTP-Request pro Intervall.
+#   - Kein Render darf _get("/status") direkt aufrufen - immer _status_data().
+
+
+from __future__ import annotations
+
+import datetime
+import re
 from pathlib import Path
-from shiny import *
-from shiny.express import render, ui, input, expressify, output
-from faicons import icon_svg as icon
-import time as time
-import datetime as dt
-import locale
+from typing import Any
+
 import requests
+from shiny import reactive
+from shiny.express import input, output, render, ui
+from faicons import icon_svg as icon
 
+# --- Konfiguration -----------------------------------------------------------
+BASE_URL               = "http://127.0.0.1:8000"
+ANZAHL_VENTILE         = 6
+POLL_STATUS_S          = 1      # Status-Polling: 1s -> max 60 Req/min (weit unter Limit)
+POLL_SLOW_S            = 5      # Queue / Zeitplaene / Verlauf
+BACKEND_FAIL_THRESHOLD = 3
+HEALTH_TIMEOUT_S       = 0.8
 
-# ---------------------------
-# ToDos:
-# - Check ob API-Server läuft, sonst Fehlermeldung
-# - UI-Verbesserungen
-# - Responsives Design testen
-# - Check ob alle Meldungen eingebaut und sinnvoll sind
-# - Evtl. WebSocket für Statusupdates statt Polling
-# - POST /fault/clear -> Quittiert Hardware-Fault (Operator-Ack) integrieren, damit nach Fehlern wieder Bewässerung möglich ist (derzeit muss main.py neu gestartet werden)
-# ---------------------------
+WEEKDAY_CHOICES = {
+    "0": "Mo", "1": "Di", "2": "Mi",
+    "3": "Do", "4": "Fr", "5": "Sa", "6": "So",
+}
 
-# ---------------------------
-# Konfiguration
-# ---------------------------
-
-BASE_URL = "http://127.0.0.1:8000"
-
-anzahl_ventile = 6
-
-# ---------------------------
-# API-Key Authentifizierung
-# ---------------------------
-
+# --- API-Key -----------------------------------------------------------------
 try:
     _API_KEY = Path("./data/api_key.txt").read_text(encoding="utf-8").strip()
 except OSError:
     _API_KEY = ""
-    print("WARNUNG: ./data/api_key.txt nicht lesbar – Requests werden mit leerem Key gesendet.")
+    print("WARNUNG: ./data/api_key.txt nicht lesbar - Requests laufen ohne Key.")
 
 _session = requests.Session()
 _session.headers.update({"X-API-Key": _API_KEY})
 
+# --- HTTP-Hilfsfunktionen ----------------------------------------------------
 
-@dataclass
-class ApiResponse:
-    status_code: int
-    data: dict | list | None = None
-    error: str | None = None
-
-    def json(self) -> dict | list:
-        if self.data is None:
-            return {}
-        return self.data
-
-
-REQUEST_TIMEOUT_S = 2.0
-
-
-def api_request(method: str, path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
+def _get(path: str, timeout: float = 2.0) -> requests.Response | None:
     try:
-        response = _session.request(method, BASE_URL + path, json=json, timeout=timeout)
-    except requests.RequestException as exc:
-        return ApiResponse(status_code=0, error=str(exc))
+        return _session.get(BASE_URL + path, timeout=timeout)
+    except Exception:
+        return None
 
+def _post(path: str, json: Any = None, timeout: float = 3.0) -> requests.Response | None:
     try:
-        data = response.json()
-    except ValueError:
-        data = None
+        return _session.post(BASE_URL + path, json=json, timeout=timeout)
+    except Exception:
+        return None
 
-    return ApiResponse(status_code=response.status_code, data=data)
+def _delete(path: str, json: Any = None, timeout: float = 3.0) -> requests.Response | None:
+    try:
+        return _session.delete(BASE_URL + path, json=json, timeout=timeout)
+    except Exception:
+        return None
 
+def _json_or_none(r: requests.Response | None) -> dict | None:
+    if r is None:
+        return None
+    try:
+        return r.json()
+    except Exception:
+        return None
 
-def api_get(path: str, *, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
-    return api_request("GET", path, timeout=timeout)
+# --- Formatierungshilfsfunktionen --------------------------------------------
 
+def fmt_mmss(total_s: int) -> str:
+    m, s = divmod(max(0, int(total_s)), 60)
+    return f"{m}:{s:02d}"
 
-def api_post(path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
-    return api_request("POST", path, json=json, timeout=timeout)
+def fmt_duration(duration_s: int, time_unit: str = "Sekunden") -> str:
+    if time_unit == "Minuten" or duration_s % 60 == 0:
+        return f"{duration_s // 60} Min"
+    return f"{duration_s} Sek"
 
+def fmt_weekdays(weekdays: list[int]) -> str:
+    return ", ".join(WEEKDAY_CHOICES.get(str(w), str(w)) for w in sorted(weekdays))
 
-def api_delete(path: str, *, json: dict | list | None = None, timeout: float = REQUEST_TIMEOUT_S) -> ApiResponse:
-    return api_request("DELETE", path, json=json, timeout=timeout)
+def state_badge(state_str: str) -> ui.Tag:
+    label_map = {
+        "laeuft":   ("success",   "Laeuft"),
+        "pausiert": ("warning",   "Pausiert"),
+        "bereit":   ("secondary", "Bereit"),
+        "fertig":   ("info",      "Fertig"),
+    }
+    # Umlaut-tolerant: "laeuft" matcht auch "lauft" falls Backend ohne Umlaut
+    key = (state_str
+           .replace("\u00e4", "ae")
+           .replace("\u00f6", "oe")
+           .replace("\u00fc", "ue"))
+    color, label = label_map.get(key, ("secondary", state_str))
+    return ui.span(label, class_=f"badge text-bg-{color}")
 
-# ---------------------------
-# CSS-Anpassungen
-# ---------------------------
+# --- Reaktive Werte (modul-global, session-scoped durch Shiny Express) -------
 
-ui.tags.style("""
-/* Task Button */
-button.bslib-task-button {
-    background-color: #82372a !important;
-    border-color: #82372a !important;
-    color: white;
-}             
-
-/* Radio: Punkt + Rahmen */
-.shiny-input-radiogroup input[type="radio"]:checked {
-    accent-color: #82372a !important;
-    background-color: #82372a !important;
-    border-color: #82372a !important;
-}
-              
-/* Slider-Leiste (Hintergrund) */
-.irs--shiny .irs-line {
-    background-color: #e6e6e6;
-}
-
-/* Aktiver Bereich (gefüllter Teil) */
-.irs--shiny .irs-bar {
-    background-color: #82372a;
-}
-
-/* Griff (Handle) */
-.irs--shiny .irs-handle {
-    background-color: #82372a;
-}
-
-/* Griff (Handle) hover */
-.irs--shiny .irs-handle:hover {
-    background-color: #82372a;
-}              
-
-/* Griff (Handle) state-hover */
-.irs--shiny .irs-handle.state-hover {
-    background-color: #82372a;
-}               
-
-/* Griff (Handle) active */
-.irs--shiny .irs-handle:active {
-    background-color: #82372a;              
-}
-              
-/* Aktueller Wert (Zahl über dem Slider) */
-.irs--shiny .irs-single {
-    background-color: #82372a;
-    color: white;
-}
-
-/* Pfeil unter der Zahl */
-.irs--shiny .irs-single:after {
-    border-top-color: #82372a;
-}
-
-/* Min / Max Werte */
-.irs--shiny .irs-min,
-.irs--shiny .irs-max {
-    color: #82372a;
-}
-"""
-)
-
-ui.tags.style("""
-.shiny-input-checkboxgroup .checkbox label {
-    white-space: nowrap;
-}
-""")
-
-ui.tags.style("""
-/* NUR Tabellen mit Checkbox-Spalte */
-table.table-with-checkbox td:first-child {
-  width: 1%;
-  white-space: nowrap;
-  padding-right: .4rem !important;
-}
-
-/* Shiny Input-Container nur dort überschreiben */
-table.table-with-checkbox td:first-child
-.shiny-input-container:not(.shiny-input-container-inline) {
-  width: auto !important;
-}
-
-/* Wrapper-Abstände nur dort entfernen */
-table.table-with-checkbox td:first-child
-.form-group.shiny-input-container {
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-table.table-with-checkbox td:first-child .checkbox {
-  margin: 0 !important;
-}
-
-table.table-with-checkbox td:first-child .checkbox label {
-  margin: 0 !important;
-  padding: 0 !important;
-}
-""")
-
-ui.tags.style("""
-.nowrap {
-    white-space: nowrap !important;
-}
-""")
-
-
-# ---------------------------
-# Hilfsfunktionen
-# ---------------------------
-
-def format_mmss(total_seconds: int) -> str:
-    """
-    Wandelt eine Anzahl Sekunden in 'M:SS' um (z.B. 321 -> '5:21').
-    """
-    if total_seconds < 0:
-        raise ValueError("total_seconds muss >= 0 sein")
-
-    minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes}:{seconds:02d}"
-
-
-def render_active_runs_table(active_runs: dict, paused: bool) -> str:
-    if not active_runs:
-        return "<i>Keine Ventile aktiv</i>"
-
-    def fmt_s(sec: int) -> str:
-        sec = int(sec)
-        if sec >= 60:
-            return f"{sec//60}m {sec%60:02d}s" if sec % 60 else f"{sec//60}m"
-        return f"{sec}s"
-
-    def src_label(src: str) -> str:
-        return {"manual": "Manuell", "queue": "Queue", "schedule": "Automatik"}.get(src, src)
-
-    rows = []
-    for zone, r in sorted(active_runs.items()):
-        pause_icon = "⏸️" if paused else ""
-        rows.append(f"""
-        <tr>
-          <td><b>{zone}</b></td>
-          <td>{pause_icon} {fmt_s(r.get("remaining_s", 0))}</td>
-          <td>{fmt_s(r.get("planned_s", 0))}</td>
-          <td>{src_label(r.get("started_source", ""))}</td>
-        </tr>
-        """)
-
-    return f"""
-    <table style="width:100%; border-collapse:collapse; font-size:14px;">
-      <thead>
-        <tr style="border-bottom:2px solid #ddd;">
-          <th>Ventil</th>
-          <th>Noch</th>
-          <th>Geplant</th>
-          <th>Start</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows)}
-      </tbody>
-    </table>
-    """
-
-
-def render_queue_table(queue_items: list, queue_state: str) -> str:
-    if not queue_items:
-        return "<i>Keine Einträge in der Warteschlange</i>"
-
-    def fmt_s(sec: int) -> str:
-        sec = int(sec)
-        if sec >= 60:
-            return f"{sec//60}m {sec%60:02d}s" if sec % 60 else f"{sec//60}m"
-        return f"{sec}s"
-
-    def src_label(src: str) -> str:
-        return {"manual": "Manuell", "queue": "Queue", "schedule": "Automatik"}.get(src, src)
-
-    paused_icon = "⏸️" if queue_state == "pausiert" else ""
-
-    rows = []
-    for i, q in enumerate(queue_items, start=1):
-        rows.append(f"""
-        <tr>
-          <td>{i}</td>
-          <td><b>{q["zone"]}</b></td>
-          <td>{fmt_s(q["duration"])}</td>
-          <td>{src_label(q.get("source", ""))}</td>
-        </tr>
-        """)
-
-    return f"""
-    <table style="width:100%; border-collapse:collapse; font-size:14px;">
-      <thead>
-        <tr style="border-bottom:2px solid #ddd;">
-          <th>#</th>
-          <th>Ventil</th>
-          <th>Dauer</th>
-          <th>Quelle {paused_icon}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows)}
-      </tbody>
-    </table>
-    """
-
-
-WEEKDAY_NAMES = {
-    0: "Montag",
-    1: "Dienstag",
-    2: "Mittwoch",
-    3: "Donnerstag",
-    4: "Freitag",
-    5: "Samstag",
-    6: "Sonntag",
-}
-
-
-automation_status = reactive.Value(False)
-
-
-# ---------------------------
-# Backend-Health / Debounce
-# ---------------------------
-
-backend_ok = reactive.Value(True)
 _backend_fail_streak = reactive.Value(0)
-_backend_modal_open = reactive.Value(False)
+_backend_ok          = reactive.Value(True)
+_backend_modal_open  = reactive.Value(False)
 
-BACKEND_FAIL_THRESHOLD = 3   # erst nach 3 Fehlschlägen "down" melden (Debounce)
-HEALTH_TIMEOUT_S = 0.8       # kurz halten, damit UI nicht hängt
+# Manuelle Trigger fuer sofortige UI-Aktualisierung nach Button-Klicks
+_status_trigger   = reactive.Value(0)
+_queue_trigger    = reactive.Value(0)
+_schedule_trigger = reactive.Value(0)
+_history_trigger  = reactive.Value(0)
 
+def _bump_status():   _status_trigger.set(_status_trigger.get() + 1)
+def _bump_queue():    _queue_trigger.set(_queue_trigger.get() + 1)
+def _bump_schedule(): _schedule_trigger.set(_schedule_trigger.get() + 1)
+def _bump_history():  _history_trigger.set(_history_trigger.get() + 1)
 
-def ping_health() -> bool:
-    """
-    True, wenn Backend erreichbar (HTTP 200 + ok==True).
-    Niemals Exceptions nach außen werfen.
-    """
+# --- Backend-Health ----------------------------------------------------------
+
+def _ping_health() -> bool:
     try:
-        r = api_get("/health", timeout=HEALTH_TIMEOUT_S)
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        return bool(data.get("ok", False))
+        r = _session.get(BASE_URL + "/health", timeout=HEALTH_TIMEOUT_S)
+        return r.status_code == 200 and bool(r.json().get("ok", False))
     except Exception:
         return False
 
-
-def show_backend_down_modal():
-    # Wichtig: nicht mehrfach öffnen
+def _show_backend_modal():
     if _backend_modal_open.get():
         return
-
-    m = ui.modal(
-        ui.tags.div(
-            ui.tags.p("Das Backend (main.py) ist aktuell nicht erreichbar."),
-            ui.tags.p("Bitte Backend starten oder Netzwerk/URL prüfen."),
-            ui.tags.hr(),
-            ui.tags.p(ui.tags.b("Tipp:"), " Prüfe: uvicorn main:app --host 0.0.0.0 --port 8000"),
-        ),
-        title="ERROR: Backend nicht erreichbar",
-        easy_close=False,
-        footer=None,
-        size="m",
-    )
-    ui.modal_show(m)
     _backend_modal_open.set(True)
+    ui.modal_show(
+        ui.modal(
+            ui.tags.div(
+                ui.tags.p(ui.tags.strong("Das Backend ist nicht erreichbar!"),
+                          class_="text-danger"),
+                ui.tags.p("Bitte pruefen ob main.py laeuft und die URL korrekt ist."),
+                ui.tags.p(f"URL: {BASE_URL}", class_="font-monospace text-muted small"),
+            ),
+            title="Verbindungsfehler",
+            easy_close=False,
+            footer=ui.modal_button("OK", class_="btn btn-secondary"),
+        )
+    )
 
+# --- CSS ---------------------------------------------------------------------
 
-def close_backend_modal_if_open():
-    if _backend_modal_open.get():
-        ui.modal_remove()
-        _backend_modal_open.set(False)
+ACCENT = "#82372a"
 
+ui.tags.style(f"""
+:root {{ --accent: {ACCENT}; }}
 
-@reactive.Effect
-def backend_health_watcher():
-    reactive.invalidate_later(0.5)
+button.bslib-task-button {{
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: #fff !important;
+}}
+button.bslib-task-button:hover {{ filter: brightness(1.15); }}
 
-    ok = ping_health()
+.btn.btn-primary {{
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+}}
+.btn.btn-primary:hover {{ filter: brightness(1.15); }}
 
+.irs--shiny .irs-bar,
+.irs--shiny .irs-handle,
+.irs--shiny .irs-handle.state-hover {{ background-color: var(--accent); }}
+.irs--shiny .irs-single          {{ background-color: var(--accent); color: #fff; }}
+.irs--shiny .irs-single:after    {{ border-top-color: var(--accent); }}
+.irs--shiny .irs-min,
+.irs--shiny .irs-max             {{ color: var(--accent); }}
+
+.shiny-input-radiogroup input[type="radio"]:checked,
+.shiny-input-checkboxgroup input[type="checkbox"]:checked {{
+    accent-color: var(--accent) !important;
+}}
+
+.navbar {{ background-color: {ACCENT} !important; }}
+.navbar .navbar-brand, .navbar .nav-link {{ color: #fff !important; }}
+.navbar .nav-link.active,
+.navbar .nav-link:hover {{
+    background-color: rgba(255,255,255,0.15) !important;
+    border-radius: 4px;
+}}
+
+#nav-clock {{
+    color: #fff;
+    font-weight: 600;
+    font-size: 1.05rem;
+    padding: 0.4rem 0.75rem;
+    letter-spacing: 0.05em;
+}}
+.nav-backend-ok  {{color: #a8ffb0 !important; font-size: 0.8rem; padding: 0.4rem 0.75rem;}}
+.nav-backend-err {{color: #ffcccb !important; font-size: 0.8rem; padding: 0.4rem 0.75rem; animation: blink 1s step-end infinite;}}
+@keyframes blink {{ 50% {{ opacity: 0.4; }} }}
+
+.valve-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+    gap: 1rem;
+    padding: 1rem;
+}}
+
+.zone-running {{
+    background-color: #d4edda;
+    border-left: 4px solid #28a745;
+    border-radius: 4px;
+    padding: 0.35rem 0.6rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.92rem;
+}}
+
+.form-section-title {{
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #666;
+    margin: 0.9rem 0 0.3rem;
+}}
+
+.fault-banner {{
+    background: #f8d7da;
+    border: 1px solid #f5c2c7;
+    border-radius: 6px;
+    padding: 0.7rem 1rem;
+    margin-bottom: 1rem;
+}}
+
+table.history-table {{ font-size: 0.88rem; }}
+table.history-table th {{ background-color: #f5f5f5; }}
+
+.valve-status-area {{
+    min-height: 1.8rem;
+    padding: 0.2rem 0;
+}}
+""")
+
+# =============================================================================
+# SEITE
+# =============================================================================
+
+ui.page_opts(title="", window_title="Bewaesserung", lang="de")
+
+# -----------------------------------------------------------------------------
+# GETEILTE REACTIVE CALCS - Seitenebene
+#
+# Diese Calcs werden EINMAL pro Poll-Intervall ausgefuehrt, egal wie viele
+# Renders darauf zugreifen. Shiny cached @reactive.calc innerhalb eines
+# reaktiven Ticks. Kein Render darf _get() direkt aufrufen!
+# -----------------------------------------------------------------------------
+
+@reactive.calc
+def _status_data() -> dict:
+    """Einzige Quelle fuer /status - gecached pro reaktivem Tick."""
+    reactive.invalidate_later(POLL_STATUS_S)
+    _status_trigger.get()   # manuelle Invalidierung nach Button-Klicks
+    r = _get("/status")
+    if r is None or not r.ok:
+        return {}
+    return r.json()
+
+@reactive.calc
+def _automation_data() -> dict:
+    """Gecachter /automation-Fetch."""
+    reactive.invalidate_later(POLL_SLOW_S)
+    _status_trigger.get()
+    return _json_or_none(_get("/automation")) or {}
+
+@reactive.calc
+def _parallel_data() -> dict:
+    """Gecachter /parallel-Fetch."""
+    reactive.invalidate_later(POLL_SLOW_S)
+    _status_trigger.get()
+    return _json_or_none(_get("/parallel")) or {}
+
+# Globaler Health-Poller (unabhaengig von Status-Calls)
+@reactive.effect
+def _health_poll():
+    reactive.invalidate_later(POLL_STATUS_S)
+    ok = _ping_health()
     if ok:
         _backend_fail_streak.set(0)
-        if not backend_ok.get():
-            # Reconnect: Modal schließen
-            backend_ok.set(True)
-            close_backend_modal_if_open()
+        _backend_ok.set(True)
+        if _backend_modal_open.get():
+            _backend_modal_open.set(False)
+            ui.modal_remove()
     else:
-        _backend_fail_streak.set(_backend_fail_streak.get() + 1)
-        if backend_ok.get() and _backend_fail_streak.get() >= BACKEND_FAIL_THRESHOLD:
-            backend_ok.set(False)
-            show_backend_down_modal()
+        streak = _backend_fail_streak.get() + 1
+        _backend_fail_streak.set(streak)
+        if streak >= BACKEND_FAIL_THRESHOLD:
+            _backend_ok.set(False)
+            _show_backend_modal()
 
+# =============================================================================
+# NAVBAR
+# =============================================================================
 
-# ---------------------------
-# Shiny App
-# ---------------------------
+with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
-#ui.page_opts(title="Bewässerungssteuerung")
+    # Uhr + Backend-Status im Navbar
+    with ui.nav_control():
 
-with ui.layout_columns(col_widths=[12,12,6,6,4,4,4,4,4,4,4,8,12]):
-
-    @render.ui
-    def date():
-        locale.setlocale(locale.LC_TIME, "de_DE.utf8")
-        reactive.invalidate_later(0.25)
-        return ui.HTML(f"<b>{dt.datetime.now().strftime('%A, %d.%m.%y<br>%H:%M:%S')}</b>")
-    
-    with ui.card():     
-       
         @render.ui
-        def show_automation_status():
+        def _nav_clock():
             reactive.invalidate_later(1)
-            response = api_get("/status")
-            if response.status_code == 200:
-                data = response.json()
-                if data['parallel_enabled']:
-                    ui.update_switch("switch_concurrent", label="Parallelbetrieb aktiviert", value=True)
-                elif data['parallel_enabled'] == False:
-                    ui.update_switch("switch_concurrent", label="Parallelbetrieb deaktiviert", value=False)
-                if data['automation_enabled']:
-                    automation_status.set(True)
-                    ui.update_action_button("btn_enable_automation", disabled=True)
-                    ui.update_action_button("btn_disable_automation", disabled=False)
-                    return ui.HTML("<span><b>Automatik: </b>""<span style='color: #28a745; font-weight: 600;'>aktiviert</span>""</span>")
-                else:
-                    ui.update_action_button("btn_enable_automation", disabled=False)
-                    ui.update_action_button("btn_disable_automation", disabled=True)
-                    automation_status.set(False)
-                    return ui.HTML(f"<span><b>Automatik: </b>""<span style='color: #dc3545; font-weight: 600;'>deaktiviert</span>""</span>")   
-            else:
-                return "Fehler bei der Anfrage an den Server!"
-
-        ui.input_switch("switch_concurrent", "Parallelbetrieb aktivieren", value=False)
-        @reactive.Effect
-        @reactive.event(input["switch_concurrent"])
-        def toggle_parallel():
-            new_value = input.switch_concurrent()
-            response = api_post("/parallel", json={"enabled": new_value})
-            if response.status_code == 200:
-                if new_value:
-                    ui.notification_show("Parallelbetrieb aktiviert!", duration=3, close_button=False, type="message")
-                else:
-                    ui.notification_show("Parallelbetrieb deaktiviert!", duration=3, close_button=False, type="message")
-            else:
-                ui.notification_show("Fehler beim Ändern des Parallelbetriebs.", duration=3, close_button=False, type="error")
-  
-
-    with ui.card(max_height="350px"):
-        ui.card_header("Status:")
-        
-        @render.ui
-        def status():
-            reactive.invalidate_later(0.5)
-            response = api_get("/status")
-            if response.status_code == 200:
-                data = response.json()
-                if data['state'] == "bereit":
-                    ui.update_action_button("btn_cancel_active", disabled=True)
-                    ui.update_action_button("btn_stop_active", disabled=True)
-                    ui.update_action_button("btn_resume_active", disabled=True)
-                    for i in range(1,anzahl_ventile + 1):
-                        ui.update_task_button(f"start{i}", state = "ready")
-                    return ui.HTML("<span><b>Keine Bewässerung aktiv</b></span>")
-                else:
-                    ui.update_action_button("btn_cancel_active", disabled=False)
-                    ui.update_action_button("btn_stop_active", disabled=False)
-                    if data['paused'] == True:
-                        ui.update_action_button("btn_resume_active", disabled=False)
-                        ui.update_action_button("btn_stop_active", disabled=True)
-                    else:
-                        ui.update_action_button("btn_stop_active", disabled=False)
-                        ui.update_action_button("btn_resume_active", disabled=True)
-                    return ui.HTML(render_active_runs_table(data.get('active_runs', {}), data.get('paused', False)))
-            else:  
-                return "Fehler bei der Anfrage an den Server!"
-
-        ui.card_footer(    
-            ui.input_action_button(id="btn_resume_active", label=None, icon=icon("play"), disabled=True, title="Bewässerung fortsetzen"),
-            ui.input_action_button(id="btn_stop_active", label=None, icon=icon("pause"), disabled=True, title="Bewässerung pausieren"),
-            ui.input_action_button(id="btn_cancel_active", label="Bewässerung stoppen", disabled=True, icon=icon("stop"), title="Aktive Bewässerung stoppen")
-        )
-        
-        @reactive.Effect
-        @reactive.event(input["btn_resume_active"])
-        def button_resume_active():
-            response = api_post("/resume")
-            if response.status_code == 200:
-                ui.notification_show("Bewässerung fortgesetzt!", duration=3, close_button=False, type="message")
-            else:
-                ui.notification_show("Fehler beim Fortsetzen der Bewässerung.", duration=3, close_button=False, type="error")
-
-        @reactive.Effect
-        @reactive.event(input["btn_stop_active"])
-        def button_stop_active():
-            response = api_post("/pause")
-            if response.status_code == 200:
-                ui.notification_show("Bewässerung pausiert!", duration=3, close_button=False, type="message")
-            else:
-                ui.notification_show("Fehler beim Pausieren der Bewässerung.", duration=3, close_button=False, type="error")
-
-        @reactive.Effect
-        @reactive.event(input["btn_cancel_active"])
-        def button_cancel_active():
-            response = api_post("/stop")
-            if response.status_code == 200:
-                ui.notification_show("Bewässerung gestoppt!", duration=3, close_button=False, type="message")
-                #ui.update_action_button("btn_cancel_active", disabled=True)
-            else:
-                ui.notification_show("Fehler beim Stoppen der Bewässerung.", duration=3, close_button=False, type="error")
-
-    
-    with ui.card(full_screen=True, max_height="350px"):
-        ui.card_header("Warteschlange:")
-            
-        @render.ui
-        def queue_status():
-            reactive.invalidate_later(0.5)
-            response = api_get("/queue")
-            if response.status_code == 200:
-                data = response.json()
-                if data['queue_length'] == 0:
-                    ui.update_task_button("btn_q_start", state = "ready")
-                    ui.update_action_button("btn_q_stop", disabled=True)
-                    ui.update_action_button("btn_q_clear", disabled=True)
-                else:
-                    ui.update_task_button("btn_q_start", state = "busy" if data['queue_state'] == "läuft" else "ready")
-                    ui.update_action_button("btn_q_stop", disabled=False)
-                    ui.update_action_button("btn_q_clear", disabled=False)
-                return ui.HTML(render_queue_table(data.get('items', []), data.get('queue_state', 'bereit')))
-            else:  
-                return "Fehler bei der Anfrage an den Server!"
-        ui.card_footer(
-            ui.input_task_button(id="btn_q_start", label="Warteschlange starten", label_busy="Warteschlange läuft...", auto_reset=False, icon=icon("play")),
-            ui.input_action_button(id="btn_q_stop", label=None, icon=icon("pause"), disabled=True, title="Warteschlange pausieren"),
-            ui.input_action_button(id="btn_q_clear", label=None, icon=icon("trash"), disabled=True, title="Warteschlange löschen")
-        )
-
-        @reactive.Effect
-        @reactive.event(input["btn_q_start"])
-        def button_q_start():
-            response = api_post("/queue/start")
-            if response.status_code == 200:
-                ui.notification_show("Warteschlange gestartet!", duration=3, close_button=False, type="message")
-            else:
-                if response.status_code == 400:
-                    data = response.json()
-                    ui.notification_show(f"{data['detail']}", duration=3, close_button=False, type="warning")
-                    ui.update_task_button("btn_q_start", state = "ready")
-                else:
-                    ui.notification_show("Fehler beim Starten der Warteschlange.", duration=3, close_button=False, type="error")
-
-        @reactive.Effect
-        @reactive.event(input["btn_q_stop"])
-        def button_q_stop():
-            response = api_post("/queue/pause")
-            if response.status_code == 200:
-                ui.notification_show("Warteschlange pausiert!", duration=3, close_button=False, type="message")
-            else:
-                ui.notification_show("Fehler beim Pausieren der Warteschlange.", duration=3, close_button=False, type="error")
-
-        @reactive.Effect
-        @reactive.event(input["btn_q_clear"])
-        def button_q_clear():
-            response = api_post("/queue/clear")
-            if response.status_code == 200:
-                ui.notification_show("Warteschlange gelöscht!", duration=3, close_button=False, type="message")
-                ui.update_action_button("btn_q_clear", disabled=True)
-            else:
-                ui.notification_show("Fehler beim Löschen der Warteschlange.", duration=3, close_button=False, type="error")
-
-    for i in range(1,anzahl_ventile + 1):
-
-        with ui.card():
-            ui.card_header(f"Ventil {i}")
-            ui.input_slider(id=f"sld_time_{i}", label="Dauer:", min=1, max=60, value=5)
-            ui.input_radio_buttons(id=f"rb_secmin{i}", label=None, choices=["Minuten", "Sekunden"], inline=True)
-            ui.input_task_button(id=f"start{i}", label="Bewässerung starten", label_busy="Bewässerung läuft...", auto_reset=False, icon=icon("play"))
-            ui.input_action_button(id=f"queue{i}", label="In die Warteschlange...")
-
-            @reactive.Effect
-            @reactive.event(input[f"start{i}"])
-            def button_start(i=i):
-                start_payload = {"zone": i, "duration": input[f"sld_time_{i}"]() if input[f"rb_secmin{i}"]() == "Sekunden" else input[f"sld_time_{i}"]() * 60, "time_unit": input[f"rb_secmin{i}"]()}
-                response = api_post("/start", json=start_payload)
-                if response.status_code == 200:
-                    ui.notification_show("Bewässerung gestartet!", duration=3, close_button=False, type="message")
-                    #ui.update_action_button("btn_cancel_active", disabled=False)
-                else:
-                    if response.status_code == 409:
-                        data = response.json()
-                        print(data)
-                        ui.notification_show(f"{data['detail']}", duration=3, close_button=False, type="warning")
-                        ui.update_task_button(f"start{i}", state = "ready")
-                    elif response.status_code == 400:
-                        data = response.json()
-                        ui.notification_show(f"{data['detail']}", duration=3, close_button=False, type="error")
-                    elif response.status_code == 500:
-                        data = response.json()
-                        ui.notification_show(f"Serverfehler: {data['detail']}", duration=3, close_button=False, type="error")
-                    else:
-                        ui.notification_show(f"Fehler beim Starten von Ventil {i}.", duration=3, close_button=False, type="error")
-
-            
-            @reactive.Effect
-            @reactive.event(input[f"queue{i}"])
-            def button_queue(i=i):
-                queue_payload = {"zone": i, "duration": input[f"sld_time_{i}"]() if input[f"rb_secmin{i}"]() == "Sekunden" else input[f"sld_time_{i}"]() * 60, "time_unit": input[f"rb_secmin{i}"]()}
-                response = api_post("/queue/add", json=queue_payload)
-                if response.status_code == 200:
-                    ui.notification_show("Eintrag zur Warteschlange hinzugefügt!", duration=3, close_button=False, type="message")
-                else:
-                    if response.status_code == 400:
-                        data = response.json()
-                        ui.notification_show(f"{data['detail']}", duration=3, close_button=False, type="error")
-                    else:
-                        ui.notification_show(f"Fehler beim Hinzufügen zur Warteschlange von Ventil {i}.", duration=3, close_button=False, type="error")
-
-
-    with ui.card():
-        ui.card_header("Aufgaben")
-        ui.input_select("select_schedule_valve", "Ventil auswählen:", choices={0: "Alle Ventile", **{f"{i}": f"Ventil {i}" for i in range(1, anzahl_ventile + 1)}})
-        ui.input_slider("sld_schedule_duration", "Dauer:", min=1, max=60, value=10)
-        ui.input_radio_buttons("rb_schedule_secmin", label=None, choices=["Minuten", "Sekunden"], inline=True)
-        ui.input_checkbox_group("checkbox_schedule_days", "Tage auswählen:", {"0":"Montag", "1":"Dienstag", "2":"Mittwoch", "3":"Donnerstag", "4":"Freitag", "5":"Samstag", "6":"Sonntag"})
-        ui.input_checkbox("chk_schedule_all_days", "Alle Tage auswählen")
-        ui.input_text("txt_schedule_time", "Startzeit (HH:MM, 24h):", value="10:00")
-        ui.input_radio_buttons("rb_schedule_repeat", "Wiederholung:", choices={"false":"Einmalig", "true":"Wöchentlich"}, inline=True)
-        ui.input_action_button("btn_schedule_add", "Zeitplan hinzufügen", icon=icon("plus"))
-
-        @reactive.Effect
-        @reactive.event(input["chk_schedule_all_days"])
-        def check_all_days():
-            if input["chk_schedule_all_days"]():
-                ui.update_checkbox_group("checkbox_schedule_days", selected=["0","1","2","3","4","5","6"])
-            else:
-                ui.update_checkbox_group("checkbox_schedule_days", selected=[])
-
-        @reactive.Effect
-        @reactive.event(input["btn_schedule_add"])
-        def button_schedule_add():
-            selected_zone = int(input["select_schedule_valve"]())
-            selected_duration = input["sld_schedule_duration"]() if input["rb_schedule_secmin"]() == "Sekunden" else input["sld_schedule_duration"]() * 60
-            selected_time_unit = input["rb_schedule_secmin"]()
-            selected_days = [int(day) for day in input["checkbox_schedule_days"]()]
-            selected_time = input["txt_schedule_time"]()
-            selected_repeat = input["rb_schedule_repeat"]() == "true"
-
-            if not selected_days:
-                ui.notification_show("Bitte mindestens einen Tag auswählen!", duration=3, close_button=False, type="error")
-                return
-
-            schedule_payload = {
-                "zone": selected_zone,
-                "duration_s": selected_duration,
-                "time_unit": selected_time_unit,
-                "weekdays": selected_days,
-                "start_times": [selected_time],
-                "repeat": selected_repeat
-            }
-            print(schedule_payload)
-            response = api_post("/schedule/add", json=schedule_payload)
-            if response.status_code == 200:
-                ui.notification_show("Zeitplan hinzugefügt!", duration=3, close_button=False, type="message")
-            else:
-                if response.status_code == 400:
-                    data = response.json()
-                    ui.notification_show(f"{data['detail']}", duration=3, close_button=False, type="error")
-                else:
-                    ui.notification_show("Fehler beim Hinzufügen des Zeitplans.", duration=3, close_button=False, type="error")
-
-
-    with ui.card():
-        ui.card_header("Zeitpläne:")
-        
-        @render.ui
-        def shedule_header():
-            reactive.invalidate_later(1)
-            auto = automation_status.get()
-            if auto == True:
-                return ui.HTML("<span><b>Automatik: </b>""<span style='color: #28a745; font-weight: 600;'>aktiviert</span>""</span>")
-            elif auto == False:
-                return ui.HTML(f"<span><b>Automatik: </b>""<span style='color: #dc3545; font-weight: 600;'>deaktiviert</span>""</span>")
-            else:
-                return ui.HTML("Fehler bei der Anfrage an den Server!")
-
-        @render.ui
-        def schedule_status():
-            reactive.invalidate_later(0.5)
-            response = api_get("/schedule")
-
-            if response.status_code != 200:
-                return "Fehler bei der Anfrage an den Server!"
-
-            data = response.json()
-            schedules_count = data["count"]
-
-            if schedules_count == 0:
-                ui.update_action_button("btn_schedule_delete", disabled=True)
-                return ui.tags.div("Keine Zeitpläne vorhanden.")
-
-            ui.update_action_button("btn_schedule_delete", disabled=False)
-
-            rows = []
-            for item in data["items"]:
-                days_str = ", ".join(WEEKDAY_NAMES[d] for d in item["weekdays"])
-                times_str = " / ".join(sorted(f"{t} Uhr" for t in item["start_times"]))
-                repeat_str = "Einmalig" if item["repeat"] is False else "Wöchentlich"
-
-                if item["time_unit"] == "Minuten":
-                    duration_str = f"{format_mmss(item['duration_s'])} {item['time_unit']}"
-                else:
-                    duration_str = f"{item['duration_s']} {item['time_unit']}"
-
-                rows.append(
-                    ui.tags.tr(
-                        ui.tags.td("Alle Ventile" if item["zone"] == 0 else f"Ventil {item['zone']}", class_="nowrap"),
-                        ui.tags.td("Jeden Tag" if days_str == ", ".join(WEEKDAY_NAMES[d] for d in range(7)) else days_str),
-                        ui.tags.td(times_str, class_="nowrap"),
-                        ui.tags.td(duration_str, class_="nowrap"),
-                        ui.tags.td(repeat_str, class_="nowrap"),
-                    )
-                )
-
-            return ui.tags.table(
-                ui.tags.thead(
-                    ui.tags.tr(
-                        ui.tags.th("Ventil"),
-                        ui.tags.th("Tage"),
-                        ui.tags.th("Zeiten"),
-                        ui.tags.th("Dauer"),
-                        ui.tags.th("Wiederholung"),
-                    )
+            ok  = _backend_ok.get()
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            return ui.div(
+                ui.span(now, id="nav-clock"),
+                ui.tags.br(),
+                ui.span(
+                    "Backend OK" if ok else "Backend OFFLINE",
+                    class_="nav-backend-ok" if ok else "nav-backend-err",
                 ),
-                ui.tags.tbody(*rows),
-                class_="table table-striped table-hover",
+                style="text-align:right; line-height:1.3;",
             )
 
-        ui.card_footer(
-        ui.input_action_button("btn_schedule_delete", "Zeitpläne löschen", icon=icon("trash"), disabled=True),
-        ui.input_action_button("btn_enable_automation", "Automatik aktivieren", icon=icon("toggle-on")),
-        ui.input_action_button("btn_disable_automation", "Automatik deaktivieren", icon=icon("toggle-off")),
-        )
-       
-        @reactive.Effect
-        @reactive.event(input["btn_enable_automation"])
-        def button_enable_automation():
-            response = api_post("/automation/enable")
-            if response.status_code == 200:
-                ui.notification_show("Automatik aktiviert!", duration=3, close_button=False, type="message")
+    # =========================================================================
+    # TAB 1 - DASHBOARD
+    # =========================================================================
+    with ui.nav_panel("Dashboard", value="dashboard"):
+
+        # Hardware-Fault-Banner (nur sichtbar wenn hw_faulted)
+        @render.ui
+        def _fault_banner():
+            d = _status_data()
+            if not d.get("hw_faulted", False):
+                return ui.div()
+            reason = d.get("hw_fault_reason", "")
+            zone   = d.get("hw_fault_zone", "?")
+            return ui.div(
+                ui.tags.b("Hardware-Fault"),
+                f" - Zone {zone}",
+                (f": {reason}" if reason else ""),
+                class_="fault-banner",
+            )
+
+        # Quittier-Button (nur sichtbar bei Fault)
+        @render.ui
+        def _fault_clear_btn():
+            if not _status_data().get("hw_faulted", False):
+                return ui.div()
+            return ui.div(
+                ui.input_action_button(
+                    "btn_fault_clear", "Hardware-Fault quittieren",
+                    class_="btn btn-warning mb-3",
+                ),
+            )
+
+        with ui.layout_columns(col_widths=[8, 4]):
+
+            with ui.card():
+                ui.card_header("Systemstatus")
+
+                @render.ui
+                def _status_display():
+                    # Nutzt den gemeinsamen Calc - kein eigener HTTP-Call!
+                    d = _status_data()
+                    if not d:
+                        return ui.p("Warte auf Backend ...", class_="text-muted")
+
+                    paused      = d.get("paused", False)
+                    hw_faulted  = d.get("hw_faulted", False)
+                    active_runs = d.get("active_runs", {})
+                    q_state     = d.get("queue_state", "bereit")
+                    q_len       = d.get("queue_length", 0)
+                    auto        = _automation_data().get("automation_enabled", False)
+                    parallel    = _parallel_data().get("parallel_enabled", False)
+
+                    if hw_faulted:
+                        badge = ui.span("Hardware-Fault", class_="badge text-bg-danger")
+                    elif paused:
+                        badge = ui.span("Pausiert", class_="badge text-bg-warning text-dark")
+                    elif active_runs:
+                        n = len(active_runs)
+                        badge = ui.span(
+                            f"Laeuft ({n} Zone{'n' if n > 1 else ''})",
+                            class_="badge text-bg-success",
+                        )
+                    else:
+                        badge = ui.span("Bereit", class_="badge text-bg-secondary")
+
+                    zone_divs = []
+                    for zk, ar in sorted(active_runs.items(), key=lambda x: int(x[0])):
+                        rem = ar.get("remaining_s", 0)
+                        src = ar.get("started_source", "manuell")
+                        zone_divs.append(
+                            ui.div(
+                                ui.tags.b(f"Zone {zk}"),
+                                f"  -  {fmt_mmss(rem)} verbleibend  (Quelle: {src})",
+                                class_="zone-running",
+                            )
+                        )
+                    # Fallback auf Legacy-Felder
+                    if not zone_divs:
+                        rz  = d.get("running_zone")
+                        rem = d.get("remaining_time", 0)
+                        if rz:
+                            zone_divs.append(
+                                ui.div(
+                                    ui.tags.b(f"Zone {rz}"),
+                                    f"  -  {fmt_mmss(rem)} verbleibend",
+                                    class_="zone-running",
+                                )
+                            )
+
+                    return ui.div(
+                        ui.div(badge, style="margin-bottom:0.8rem;"),
+                        *zone_divs,
+                        ui.tags.hr(),
+                        ui.div(
+                            ui.tags.small("Warteschlange: ", class_="text-muted"),
+                            state_badge(q_state),
+                            f" ({q_len} Item{'s' if q_len != 1 else ''})",
+                        ),
+                        ui.div(
+                            ui.tags.small("Automatik: ", class_="text-muted"),
+                            ui.span("EIN", class_="badge text-bg-success") if auto
+                                else ui.span("AUS", class_="badge text-bg-secondary"),
+                            ui.tags.small("   Parallel: ", class_="text-muted"),
+                            ui.span("EIN", class_="badge text-bg-info") if parallel
+                                else ui.span("AUS", class_="badge text-bg-secondary"),
+                            style="margin-top:0.3rem;",
+                        ),
+                    )
+
+            with ui.card():
+                ui.card_header("Schnellaktionen")
+
+                ui.input_task_button(
+                    "btn_stop_all", "Alle Ventile STOP",
+                    class_="btn-danger w-100 mb-2",
+                )
+                ui.input_action_button(
+                    "btn_pause_all", "Pause",
+                    class_="btn btn-warning w-100 mb-2",
+                )
+                ui.input_action_button(
+                    "btn_resume_all", "Fortsetzen",
+                    class_="btn btn-success w-100 mb-3",
+                )
+
+                ui.tags.hr()
+                ui.p("Automatik", class_="form-section-title")
+                ui.input_action_button(
+                    "btn_auto_on",  "EIN",
+                    class_="btn btn-sm btn-success me-1",
+                )
+                ui.input_action_button(
+                    "btn_auto_off", "AUS",
+                    class_="btn btn-sm btn-secondary",
+                )
+
+                ui.p("Parallelmodus", class_="form-section-title")
+                ui.input_action_button(
+                    "btn_para_on",  "EIN",
+                    class_="btn btn-sm btn-info me-1",
+                )
+                ui.input_action_button(
+                    "btn_para_off", "AUS",
+                    class_="btn btn-sm btn-secondary",
+                )
+
+        # Handler
+
+        @reactive.effect
+        @reactive.event(input.btn_fault_clear)
+        def _h_fault_clear():
+            r = _post("/fault/clear")
+            if r and r.ok:
+                ui.notification_show("Hardware-Fault quittiert.", type="message", duration=3)
             else:
-                ui.notification_show("Fehler beim Aktivieren der Automatik.", duration=3, close_button=False, type="error")
+                ui.notification_show("Quittierung fehlgeschlagen.", type="error", duration=4)
+            _bump_status()
 
-        @reactive.Effect
-        @reactive.event(input["btn_disable_automation"])
-        def button_disable_automation():
-            response = api_post("/automation/disable")
-            if response.status_code == 200:
-                ui.notification_show("Automatik deaktiviert!", duration=3, close_button=False, type="message")
+        @reactive.effect
+        @reactive.event(input.btn_stop_all)
+        def _h_stop_all():
+            r = _post("/stop")
+            ui.update_task_button("btn_stop_all", state="ready")
+            if r and r.ok:
+                ui.notification_show("Alle Ventile gestoppt.", type="message", duration=3)
             else:
-                ui.notification_show("Fehler beim Deaktivieren der Automatik.", duration=3, close_button=False, type="error")
+                detail = _json_or_none(r) or {}
+                ui.notification_show(
+                    detail.get("detail", "Fehler beim Stoppen."), type="error", duration=5,
+                )
+            _bump_status()
 
-        @reactive.Effect
-        @reactive.event(input["btn_schedule_delete"])
-        def button_schedule_delete():
-            response = api_get("/schedule")
-            if response.status_code == 200:
-                data = response.json()
-                schedules_count = data["count"]
+        @reactive.effect
+        @reactive.event(input.btn_pause_all)
+        def _h_pause_all():
+            r = _post("/pause")
+            if r and r.ok:
+                ui.notification_show("Ventile pausiert.", type="message", duration=3)
+            elif r and r.status_code == 409:
+                ui.notification_show("Bereits pausiert.", type="warning", duration=3)
+            else:
+                ui.notification_show("Fehler beim Pausieren.", type="error", duration=4)
+            _bump_status()
 
-                if schedules_count == 0:
-                    body = ui.tags.div("Keine Zeitpläne vorhanden.")
+        @reactive.effect
+        @reactive.event(input.btn_resume_all)
+        def _h_resume_all():
+            r = _post("/resume")
+            if r and r.ok:
+                ui.notification_show("Ventile fortgesetzt.", type="message", duration=3)
+            else:
+                detail = _json_or_none(r) or {}
+                ui.notification_show(
+                    detail.get("detail", "Fehler beim Fortsetzen."), type="error", duration=4,
+                )
+            _bump_status()
+
+        @reactive.effect
+        @reactive.event(input.btn_auto_on)
+        def _h_auto_on():
+            r = _post("/automation/enable")
+            if r and r.ok:
+                ui.notification_show("Automatik aktiviert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler.", type="error", duration=4)
+            _bump_status()
+
+        @reactive.effect
+        @reactive.event(input.btn_auto_off)
+        def _h_auto_off():
+            r = _post("/automation/disable")
+            if r and r.ok:
+                ui.notification_show("Automatik deaktiviert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler.", type="error", duration=4)
+            _bump_status()
+
+        @reactive.effect
+        @reactive.event(input.btn_para_on)
+        def _h_para_on():
+            r = _post("/parallel", json={"enabled": True})
+            if r and r.ok:
+                ui.notification_show("Parallelmodus aktiviert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler.", type="error", duration=4)
+            _bump_status()
+
+        @reactive.effect
+        @reactive.event(input.btn_para_off)
+        def _h_para_off():
+            r = _post("/parallel", json={"enabled": False})
+            if r and r.ok:
+                ui.notification_show("Parallelmodus deaktiviert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler.", type="error", duration=4)
+            _bump_status()
+
+    # =========================================================================
+    # TAB 2 - VENTILE
+    #
+    # Korrekte Rate-Limit-Strategie:
+    #   - Jeder Ventil-Render ruft _status_data() auf (gecachter Calc)
+    #   - KEIN direkter _get("/status") Aufruf in Renders!
+    #   - Einen kombinierten Render pro Zone (statt 2x dot + status)
+    #   - Statische Karten mit "with ui.card():" auf Modulebene
+    # =========================================================================
+    with ui.nav_panel("Ventile", value="ventile"):
+
+        with ui.div(class_="valve-grid"):
+            for _vi in range(1, ANZAHL_VENTILE + 1):
+                with ui.card(id=f"valve_card_{_vi}"):
+
+                    with ui.card_header():
+                        with ui.div(
+                            style="display:flex; justify-content:space-between; align-items:center;"
+                        ):
+                            ui.tags.b(f"Zone {_vi}")
+
+                            # Live-Statuspunkt (nutzt gemeinsamen Calc)
+                            @output(id=f"valve_dot_{_vi}")
+                            @render.ui
+                            def _vdot(_z=_vi):
+                                d = _status_data()   # gecachter Calc - kein HTTP!
+                                is_running = str(_z) in d.get("active_runs", {})
+                                color = "#28a745" if is_running else "#ccc"
+                                return ui.span(
+                                    "●",
+                                    style=f"color:{color}; font-size:1.2rem;",
+                                )
+
+                    # Kombinierter Live-Status (Zeit + Quelle, ein Render pro Zone)
+                    with ui.div(class_="valve-status-area px-3 pt-2"):
+                        @output(id=f"valve_status_{_vi}")
+                        @render.ui
+                        def _vstatus(_z=_vi):
+                            d  = _status_data()   # gecachter Calc - kein HTTP!
+                            ar = d.get("active_runs", {}).get(str(_z), {})
+                            if ar:
+                                rem = ar.get("remaining_s", 0)
+                                src = ar.get("started_source", "manuell")
+                                return ui.div(
+                                    ui.tags.b("Laeuft - "),
+                                    fmt_mmss(rem),
+                                    f" verbleibend ({src})",
+                                    class_="text-success small",
+                                )
+                            return ui.span("Bereit", class_="text-muted small")
+
+                    # Steuerelemente (Inputs auf Modulebene - Shiny-Pflicht)
+                    with ui.div(class_="px-3 pb-3"):
+                        ui.input_slider(
+                            f"sld_{_vi}", "Dauer:",
+                            min=1, max=60, value=5, step=1,
+                        )
+                        ui.input_radio_buttons(
+                            f"rb_{_vi}", None,
+                            choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
+                            selected="Minuten", inline=True,
+                        )
+                        with ui.div(
+                            style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.5rem;"
+                        ):
+                            ui.input_task_button(
+                                f"btn_start_{_vi}",
+                                "Start",
+                                label_busy="Laeuft ...",
+                                auto_reset=False,
+                            )
+                            ui.input_action_button(
+                                f"btn_queue_{_vi}",
+                                "Queue",
+                                icon=icon("list"),
+                                class_="btn btn-outline-secondary btn-sm",
+                            )
+
+        # Handler-Factories (Closure-Bug-Vermeidung)
+        def _make_start_handler(zone: int):
+            @reactive.effect
+            @reactive.event(input[f"btn_start_{zone}"])
+            def _h(_z=zone):
+                dur_raw = input[f"sld_{_z}"]()
+                unit    = input[f"rb_{_z}"]()
+                dur_s   = dur_raw * 60 if unit == "Minuten" else dur_raw
+                r = _post("/start", json={"zone": _z, "duration": dur_s, "time_unit": unit})
+                ui.update_task_button(f"btn_start_{_z}", state="ready")
+                if r and r.ok:
+                    ui.notification_show(
+                        f"Zone {_z} gestartet ({dur_raw} {unit}).",
+                        type="message", duration=3,
+                    )
                 else:
+                    detail = _json_or_none(r) or {}
+                    ui.notification_show(
+                        detail.get("detail", f"Fehler beim Starten von Zone {_z}."),
+                        type="error", duration=5,
+                    )
+                _bump_status()
+
+        def _make_queue_handler(zone: int):
+            @reactive.effect
+            @reactive.event(input[f"btn_queue_{zone}"])
+            def _h(_z=zone):
+                dur_raw = input[f"sld_{_z}"]()
+                unit    = input[f"rb_{_z}"]()
+                dur_s   = dur_raw * 60 if unit == "Minuten" else dur_raw
+                r = _post("/queue/add", json={"zone": _z, "duration": dur_s, "time_unit": unit})
+                if r and r.ok:
+                    ui.notification_show(
+                        f"Zone {_z} ({dur_raw} {unit}) zur Warteschlange hinzugefuegt.",
+                        type="message", duration=3,
+                    )
+                else:
+                    detail = _json_or_none(r) or {}
+                    ui.notification_show(
+                        detail.get("detail", f"Fehler bei Zone {_z}."),
+                        type="error", duration=5,
+                    )
+                _bump_queue()
+
+        for _vi in range(1, ANZAHL_VENTILE + 1):
+            _make_start_handler(_vi)
+            _make_queue_handler(_vi)
+
+    # =========================================================================
+    # TAB 3 - WARTESCHLANGE
+    # =========================================================================
+    with ui.nav_panel("Warteschlange", value="queue"):
+
+        with ui.layout_columns(col_widths=[8, 4]):
+
+            with ui.card():
+                ui.card_header("Aktuelle Warteschlange")
+
+                @render.ui
+                def _queue_display():
+                    reactive.invalidate_later(POLL_SLOW_S)
+                    _queue_trigger.get()
+                    d = _json_or_none(_get("/queue"))
+                    if d is None:
+                        return ui.p("Keine Verbindung zum Backend.", class_="text-danger")
+
+                    q_state = d.get("queue_state", "bereit")
+                    items   = d.get("items", [])
+                    q_len   = d.get("queue_length", 0)
+
+                    header = ui.div(
+                        state_badge(q_state),
+                        f"  {q_len} Item{'s' if q_len != 1 else ''} in der Warteschlange",
+                        style="margin-bottom:0.8rem;",
+                    )
+                    if not items:
+                        return ui.div(header, ui.p("Warteschlange ist leer.", class_="text-muted"))
+
+                    rows = [
+                        ui.tags.tr(
+                            ui.tags.td(str(idx), class_="text-muted"),
+                            ui.tags.td(f"Zone {item.get('zone', '?')}"),
+                            ui.tags.td(fmt_duration(
+                                item.get("duration", 0), item.get("time_unit", "Sekunden")
+                            )),
+                            ui.tags.td(item.get("time_unit", "")),
+                        )
+                        for idx, item in enumerate(items, 1)
+                    ]
+                    return ui.div(
+                        header,
+                        ui.tags.table(
+                            ui.tags.thead(
+                                ui.tags.tr(
+                                    ui.tags.th("#"),
+                                    ui.tags.th("Zone"),
+                                    ui.tags.th("Dauer"),
+                                    ui.tags.th("Einheit"),
+                                )
+                            ),
+                            ui.tags.tbody(*rows),
+                            class_="table table-sm table-hover",
+                        ),
+                    )
+
+                with ui.div(style="margin-top:0.8rem; display:flex; gap:0.4rem; flex-wrap:wrap;"):
+                    ui.input_task_button(
+                        "btn_q_start", "Starten",
+                        label_busy="Laeuft ...",
+                        auto_reset=False,
+                    )
+                    ui.input_action_button(
+                        "btn_q_pause", "Pause",
+                        class_="btn btn-warning",
+                    )
+                    ui.input_action_button(
+                        "btn_q_clear", "Leeren",
+                        class_="btn btn-outline-danger",
+                    )
+
+            with ui.card():
+                ui.card_header("Item hinzufuegen")
+
+                ui.input_select(
+                    "q_add_zone", "Zone:",
+                    choices={str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
+                )
+                ui.input_slider("q_add_dur", "Dauer:", min=1, max=60, value=10)
+                ui.input_radio_buttons(
+                    "q_add_unit", None,
+                    choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
+                    selected="Minuten", inline=True,
+                )
+                ui.input_action_button(
+                    "btn_q_add", "Hinzufuegen",
+                    class_="btn btn-primary w-100 mt-2",
+                )
+
+        # Handler
+
+        @reactive.effect
+        @reactive.event(input.btn_q_start)
+        def _h_q_start():
+            r = _post("/queue/start")
+            ui.update_task_button("btn_q_start", state="ready")
+            if r and r.ok:
+                started = r.json().get("started_count", 0)
+                ui.notification_show(
+                    f"Warteschlange gestartet - {started} Zone(n) aktiv.",
+                    type="message", duration=3,
+                )
+            elif r and r.status_code == 400:
+                ui.notification_show(
+                    (_json_or_none(r) or {}).get("detail", "Queue leer."),
+                    type="warning", duration=4,
+                )
+            else:
+                ui.notification_show("Fehler beim Starten.", type="error", duration=4)
+            _bump_queue()
+            _bump_status()
+
+        @reactive.effect
+        @reactive.event(input.btn_q_pause)
+        def _h_q_pause():
+            r = _post("/queue/pause")
+            if r and r.ok:
+                ui.notification_show("Warteschlange pausiert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler beim Pausieren.", type="error", duration=4)
+            _bump_queue()
+
+        @reactive.effect
+        @reactive.event(input.btn_q_clear)
+        def _h_q_clear():
+            r = _post("/queue/clear")
+            if r and r.ok:
+                ui.notification_show("Warteschlange geleert.", type="message", duration=3)
+            else:
+                ui.notification_show("Fehler beim Leeren.", type="error", duration=4)
+            _bump_queue()
+
+        @reactive.effect
+        @reactive.event(input.btn_q_add)
+        def _h_q_add():
+            zone  = int(input.q_add_zone())
+            dur   = input.q_add_dur()
+            unit  = input.q_add_unit()
+            dur_s = dur * 60 if unit == "Minuten" else dur
+            r = _post("/queue/add", json={"zone": zone, "duration": dur_s, "time_unit": unit})
+            if r and r.ok:
+                ui.notification_show(
+                    f"Zone {zone} ({dur} {unit}) hinzugefuegt.",
+                    type="message", duration=3,
+                )
+            else:
+                detail = _json_or_none(r) or {}
+                ui.notification_show(
+                    detail.get("detail", "Fehler beim Hinzufuegen."), type="error", duration=5,
+                )
+            _bump_queue()
+
+    # =========================================================================
+    # TAB 4 - ZEITPLAENE
+    # =========================================================================
+    with ui.nav_panel("Zeitplaene", value="schedule"):
+
+        _schedule_cache = reactive.Value([])
+
+        with ui.layout_columns(col_widths=[8, 4]):
+
+            with ui.card():
+                ui.card_header("Zeitplaene")
+
+                @render.ui
+                def _schedule_table():
+                    reactive.invalidate_later(POLL_SLOW_S)
+                    _schedule_trigger.get()
+                    d = _json_or_none(_get("/schedule"))
+                    if d is None:
+                        return ui.p("Keine Verbindung zum Backend.", class_="text-danger")
+
+                    items = d.get("items", [])
+                    _schedule_cache.set(items)
+
+                    if not items:
+                        return ui.p("Keine Zeitplaene vorhanden.", class_="text-muted")
+
                     rows = []
+                    for idx, item in enumerate(items):
+                        zone     = item.get("zone", 0)
+                        weekdays = item.get("weekdays", [])
+                        times    = item.get("start_times", [])
+                        dur_s    = item.get("duration_s", 0)
+                        unit     = item.get("time_unit", "Sekunden")
+                        repeat   = item.get("repeat", False)
+                        enabled  = item.get("enabled", True)
 
-                    for item in data["items"]:
-                        days_str = ", ".join(WEEKDAY_NAMES[d] for d in item["weekdays"])
-                        times_str = " / ".join(f"{t} Uhr" for t in sorted(item["start_times"]))
-                        repeat_str = "Einmalig" if item["repeat"] == False else "Wöchentlich"
-
-                        if item["time_unit"] == "Minuten":
-                            duration_str = f"{format_mmss(item['duration_s'])} {item['time_unit']}"
-                        else:
-                            duration_str = f"{item['duration_s']} {item['time_unit']}"
-
+                        zone_label = f"Alle ({ANZAHL_VENTILE})" if zone == 0 else f"Zone {zone}"
+                        status_span = (
+                            ui.span("EIN", class_="badge text-bg-success") if enabled
+                            else ui.span("AUS", class_="badge text-bg-secondary")
+                        )
                         rows.append(
                             ui.tags.tr(
                                 ui.tags.td(
-                                    ui.input_checkbox(
-                                        f"cb_del_{item['id']}",
-                                        label=None
-                                    )
+                                    ui.input_checkbox(f"cb_sch_{idx}", None, value=False),
+                                    style="width:1%;",
                                 ),
-                                ui.tags.td(f"Ventil {item['zone']}", class_="nowrap"),
-                                ui.tags.td(days_str),
-                                ui.tags.td(times_str, class_="nowrap"),
-                                ui.tags.td(duration_str, class_="nowrap"),
-                                ui.tags.td(repeat_str, class_="nowrap"),
+                                ui.tags.td(zone_label),
+                                ui.tags.td(fmt_weekdays(weekdays)),
+                                ui.tags.td(", ".join(times)),
+                                ui.tags.td(fmt_duration(dur_s, unit)),
+                                ui.tags.td("woechtl." if repeat else "einmalig"),
+                                ui.tags.td(status_span),
                             )
                         )
 
-                    body = ui.tags.table(
-                        ui.tags.thead(
-                            ui.tags.tr(
-                                ui.tags.th(""),
-                                ui.tags.th("Ventil"),
-                                ui.tags.th("Tage"),
-                                ui.tags.th("Zeiten"),
-                                ui.tags.th("Dauer"),
-                                ui.tags.th("Wiederholung"),
-                            )
+                    return ui.div(
+                        ui.tags.table(
+                            ui.tags.thead(
+                                ui.tags.tr(
+                                    ui.tags.th(""),
+                                    ui.tags.th("Zone"),
+                                    ui.tags.th("Tage"),
+                                    ui.tags.th("Uhrzeit"),
+                                    ui.tags.th("Dauer"),
+                                    ui.tags.th("Typ"),
+                                    ui.tags.th("Status"),
+                                )
+                            ),
+                            ui.tags.tbody(*rows),
+                            class_="table table-sm table-hover",
                         ),
-                        ui.tags.tbody(*rows),
-                        class_="table table-striped table-hover table-with-checkbox"
+                        ui.div(
+                            ui.input_action_button(
+                                "btn_sch_enable_sel",  "Aktivieren",
+                                class_="btn btn-sm btn-success me-1",
+                            ),
+                            ui.input_action_button(
+                                "btn_sch_disable_sel", "Deaktivieren",
+                                class_="btn btn-sm btn-secondary me-1",
+                            ),
+                            ui.input_action_button(
+                                "btn_sch_delete_sel",  "Loeschen",
+                                class_="btn btn-sm btn-outline-danger",
+                            ),
+                            style="margin-top:0.7rem; display:flex; gap:0.3rem; flex-wrap:wrap;",
+                        ),
                     )
 
+                def _selected_ids() -> list[str]:
+                    items = _schedule_cache.get()
+                    selected = []
+                    for idx in range(len(items)):
+                        try:
+                            if input[f"cb_sch_{idx}"]():
+                                selected.append(items[idx]["id"])
+                        except Exception:
+                            pass
+                    return selected
 
-                m = ui.modal(
-                    body,
-                    size="xl",
-                    title="Zeitpläne löschen",
-                    footer=(
-                        ui.input_action_button(
-                            "btn_confirm_delete_schedules",
-                            "Ausgewählte löschen",
-                            class_="btn-danger"
-                        ),
-                        ui.modal_button("Schließen"),
-                    ),
+                @reactive.effect
+                @reactive.event(input.btn_sch_enable_sel)
+                def _h_sch_enable():
+                    ids = _selected_ids()
+                    if not ids:
+                        ui.notification_show("Bitte Zeitplaene auswaehlen.", type="warning", duration=3)
+                        return
+                    ok_count = sum(
+                        1 for sid in ids
+                        if (rv := _post(f"/schedule/enable/{sid}")) and rv.ok
+                    )
+                    ui.notification_show(f"{ok_count}/{len(ids)} aktiviert.", type="message", duration=3)
+                    _bump_schedule()
+
+                @reactive.effect
+                @reactive.event(input.btn_sch_disable_sel)
+                def _h_sch_disable():
+                    ids = _selected_ids()
+                    if not ids:
+                        ui.notification_show("Bitte Zeitplaene auswaehlen.", type="warning", duration=3)
+                        return
+                    ok_count = sum(
+                        1 for sid in ids
+                        if (rv := _post(f"/schedule/disable/{sid}")) and rv.ok
+                    )
+                    ui.notification_show(f"{ok_count}/{len(ids)} deaktiviert.", type="message", duration=3)
+                    _bump_schedule()
+
+                @reactive.effect
+                @reactive.event(input.btn_sch_delete_sel)
+                def _h_sch_delete():
+                    ids = _selected_ids()
+                    if not ids:
+                        ui.notification_show("Bitte Zeitplaene auswaehlen.", type="warning", duration=3)
+                        return
+                    rv = _delete("/schedule", json=ids)
+                    if rv and rv.ok:
+                        ui.notification_show(f"{len(ids)} geloescht.", type="message", duration=3)
+                    else:
+                        ui.notification_show("Fehler beim Loeschen.", type="error", duration=4)
+                    _bump_schedule()
+
+            with ui.card():
+                ui.card_header("Zeitplan hinzufuegen")
+
+                ui.input_select(
+                    "sch_zone", "Zone:",
+                    choices={
+                        "0": f"Alle Zonen ({ANZAHL_VENTILE})",
+                        **{str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
+                    },
+                )
+                ui.input_slider("sch_dur", "Dauer:", min=1, max=120, value=10)
+                ui.input_radio_buttons(
+                    "sch_unit", None,
+                    choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
+                    selected="Minuten", inline=True,
+                )
+
+                ui.p("Wochentage", class_="form-section-title")
+                ui.input_checkbox_group(
+                    "sch_days", None,
+                    choices=WEEKDAY_CHOICES,
+                    inline=True,
+                )
+                ui.input_checkbox("sch_all_days", "Alle Tage", value=False)
+
+                ui.p("Startzeit (HH:MM)", class_="form-section-title")
+                ui.input_text(
+                    "sch_time", None, value="07:00",
+                    placeholder="z.B. 07:00 oder 07:00, 12:00",
+                )
+
+                ui.p("Wiederholung", class_="form-section-title")
+                ui.input_radio_buttons(
+                    "sch_repeat", None,
+                    choices={"true": "Woechentlich", "false": "Einmalig"},
+                    selected="true", inline=True,
+                )
+
+                ui.input_action_button(
+                    "btn_sch_add", "Zeitplan speichern",
+                    class_="btn btn-primary w-100 mt-3",
+                )
+
+        # Handler
+
+        @reactive.effect
+        @reactive.event(input.sch_all_days)
+        def _h_all_days():
+            if input.sch_all_days():
+                ui.update_checkbox_group("sch_days", selected=list(WEEKDAY_CHOICES.keys()))
+            else:
+                ui.update_checkbox_group("sch_days", selected=[])
+
+        @reactive.effect
+        @reactive.event(input.btn_sch_add)
+        def _h_sch_add():
+            zone      = int(input.sch_zone())
+            dur       = input.sch_dur()
+            unit      = input.sch_unit()
+            dur_s     = dur * 60 if unit == "Minuten" else dur
+            days      = [int(d) for d in (input.sch_days() or [])]
+            times_raw = input.sch_time()
+            repeat    = input.sch_repeat() == "true"
+
+            if not days:
+                ui.notification_show("Bitte mindestens einen Tag auswaehlen.", type="warning", duration=4)
+                return
+
+            time_list = [t.strip() for t in times_raw.split(",") if t.strip()]
+            if not time_list:
+                ui.notification_show("Bitte Startzeit angeben.", type="warning", duration=4)
+                return
+            for t in time_list:
+                if not re.match(r"^\d{1,2}:\d{2}$", t):
+                    ui.notification_show(
+                        f"Ungueltiges Format: '{t}' - erwartet HH:MM.", type="error", duration=5,
+                    )
+                    return
+
+            rv = _post("/schedule/add", json={
+                "zone": zone,
+                "duration_s": dur_s,
+                "time_unit": unit,
+                "weekdays": days,
+                "start_times": time_list,
+                "repeat": repeat,
+            })
+            if rv and rv.ok:
+                ui.notification_show("Zeitplan gespeichert.", type="message", duration=3)
+            elif rv and rv.status_code == 400:
+                ui.notification_show(
+                    (_json_or_none(rv) or {}).get("detail", "Fehler."), type="error", duration=5,
                 )
             else:
-                m = ui.modal("Fehler bei der Anfrage an den Server!")
+                ui.notification_show("Fehler beim Speichern.", type="error", duration=5)
+            _bump_schedule()
 
-            ui.modal_show(m)
+    # =========================================================================
+    # TAB 5 - VERLAUF
+    # =========================================================================
+    with ui.nav_panel("Verlauf", value="history"):
 
-        
-        @reactive.Effect
-        @reactive.event(input["btn_confirm_delete_schedules"])
-        def button_confirm_delete_schedules():
-            response = api_get("/schedule")
-            if response.status_code == 200:
-                data = response.json()
-                ids_to_delete = []
+        with ui.card():
+            with ui.card_header():
+                with ui.div(
+                    style="display:flex; justify-content:space-between; align-items:center; width:100%;"
+                ):
+                    ui.span("Bewaesserungsverlauf")
+                    ui.input_action_button(
+                        "btn_history_refresh", "Aktualisieren",
+                        class_="btn btn-sm btn-outline-secondary",
+                    )
 
-                for item in data["items"]:
-                    checkbox_id = f"cb_del_{item['id']}"
+            @render.ui
+            def _history_display():
+                reactive.invalidate_later(POLL_SLOW_S)
+                _history_trigger.get()
+                d = _json_or_none(_get("/history"))
+                if d is None:
+                    return ui.p("Keine Verbindung zum Backend.", class_="text-danger")
 
-                    if checkbox_id in input and input[checkbox_id]():
-                        ids_to_delete.append(item["id"])
+                items = d.get("items", [])
+                count = d.get("count", 0)
 
-                if ids_to_delete:
-                    print("Zu löschende IDs:", ids_to_delete)
-                    delete_response = api_delete("/schedule", json=ids_to_delete)
-                    if delete_response.status_code == 200:
-                        ui.notification_show("Ausgewählte Zeitpläne gelöscht!", duration=3, close_button=False, type="message")
-                    else:
-                        ui.notification_show("Fehler beim Löschen der Zeitpläne.", duration=3, close_button=False, type="error")
-                else:
-                    ui.notification_show("Keine Zeitpläne ausgewählt.", duration=3, close_button=False, type="warning")
+                if not items:
+                    return ui.p("Noch keine Eintraege.", class_="text-muted")
 
-                ui.modal_remove()
-            else:
-                ui.notification_show("Fehler bei der Anfrage an den Server!", duration=3, close_button=False, type="error")
-
-
-    with ui.card(max_height="400px"):
-        ui.card_header("Bewässerungsverlauf:")
-        
-        @render.ui
-        def history_status():
-            reactive.invalidate_later(1)
-            response = api_get("/history")
-            if response.status_code == 200:
-                data = response.json()
-                history_count = data["count"]
-
-                if history_count == 0:
-                    return ui.tags.div("Keine Einträge im Bewässerungsverlauf.")
+                source_labels = {
+                    "manual":   "Manuell",
+                    "schedule": "Zeitplan",
+                    "queue":    "Warteschlange",
+                }
 
                 rows = []
-                for item in data["items"]:
-                    timestamp_str = dt.datetime.fromisoformat(item["ts_end"]).strftime("%d.%m.%Y - %H:%M Uhr")
-                    if item["time_unit"] == "Minuten":
-                        duration_str = f"{format_mmss(item['duration_s'])} {item['time_unit']}"
-                    else:
-                        duration_str = f"{item['duration_s']} {item['time_unit']}"
+                for item in reversed(items):
+                    ts   = item.get("ts_end", "")
+                    zone = item.get("zone", "?")
+                    dur  = item.get("duration_s", 0)
+                    src  = item.get("source", "")
+                    unit = item.get("time_unit", "Sekunden")
+                    try:
+                        ts_fmt = ts[:16].replace("T", " ")
+                    except Exception:
+                        ts_fmt = ts
                     rows.append(
                         ui.tags.tr(
-                            ui.tags.td(timestamp_str, class_="nowrap"),
-                            ui.tags.td(f"Ventil {item['zone']}", class_="nowrap"),
-                            ui.tags.td(duration_str, class_="nowrap"),
-                            ui.tags.td(item['source'], class_="nowrap"),
+                            ui.tags.td(ts_fmt, class_="text-muted small"),
+                            ui.tags.td(f"Zone {zone}"),
+                            ui.tags.td(fmt_duration(dur, unit)),
+                            ui.tags.td(source_labels.get(src, src)),
                         )
                     )
 
-                return ui.tags.table(
-                    ui.tags.thead(
-                        ui.tags.tr(
-                            ui.tags.th("Zeitpunkt"),
-                            ui.tags.th("Ventil"),
-                            ui.tags.th("Dauer"),
-                            ui.tags.th("Quelle"),
-                        )
+                return ui.div(
+                    ui.p(f"{count} Eintraege gesamt.", class_="text-muted small mb-2"),
+                    ui.div(
+                        ui.tags.table(
+                            ui.tags.thead(
+                                ui.tags.tr(
+                                    ui.tags.th("Zeitpunkt"),
+                                    ui.tags.th("Zone"),
+                                    ui.tags.th("Dauer"),
+                                    ui.tags.th("Quelle"),
+                                )
+                            ),
+                            ui.tags.tbody(*rows),
+                            class_="table table-sm table-hover table-striped history-table",
+                        ),
+                        style="overflow-x:auto;",
                     ),
-                    ui.tags.tbody(*rows),
-                    class_="table table-striped table-hover",
                 )
-            else:  
-                return "Fehler bei der Anfrage an den Server!"
+
+        @reactive.effect
+        @reactive.event(input.btn_history_refresh)
+        def _h_history_refresh():
+            _bump_history()
