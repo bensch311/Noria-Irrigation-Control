@@ -372,6 +372,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
             d = _status_data()
             auto = _automation_data().get("automation_enabled", False)
             para = _parallel_data().get("parallel_enabled", False)
+            max_conc = _parallel_data().get("max_concurrent_valves", 1)
 
             if not _auth_ok.get():
                 return ui.div()  # bei locked UI keine Kacheln
@@ -453,7 +454,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 tile(
                     "Parallelmodus",
                     "EIN" if para else "AUS",
-                    "mehrere Ventile" if para else "max. 1 Ventil",
+                    f"{max_conc} Ventile" if para else "1 Ventil",
                     "diagram-project",
                     ui.span("ON" if para else "OFF", class_=("ov-pill ok" if para else "ov-pill")),
                 ),
