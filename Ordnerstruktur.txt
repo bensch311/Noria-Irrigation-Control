@@ -1,63 +1,72 @@
 P:.
-│   app.py
-│   main.py
 │   requirements.txt
 │   Ordnerstruktur.txt
 │   pytest.ini
+│   app_old.py
+│   main.py
+│   app.py
 │
 ├───logs
+│       irrigation.jsonl.1
 │       irrigation.jsonl
 │
 ├───data
-│       schedules.json
 │       device_config.json
 │       user_settings.json
-│       runtime_state.json
+│       api_key.txt
 │       queue.json
+│       runtime_state.json
+│       schedules.json
 │       history.json
 │
-│
 ├───core
-│   │   config.py
 │   │   state.py
 │   │   logging.py
+│   │   __init__.py
 │   │   lifecycle.py
-│   │   __init__.py
-│   │
-│
+│   │   limiter.py
+│   │   config.py
+│   │   security.py
+│   
 ├───models
-│   │   requests.py
 │   │   __init__.py
+│   │   requests.py
 │   │
-│
 ├───services
-│   │   engine.py
-│   │   persistence.py
-│   │   timer.py
-│   │   scheduler.py
 │   │   __init__.py
 │   │   valve_driver.py
-│   │
+│   │   engine.py
+│   │   scheduler.py
+│   │   io_worker.py
+│   │   persistence.py
+│   │   timer.py
 │
 ├───api
-│   │   errors.py
-│   │   routes_health.py
-│   │   routes_queue.py
-│   │   routes_schedule.py
-│   │   routes_control.py
 │   │   __init__.py
 │   │   routes_history.py
-│   │
+│   │   routes_health.py
+│   │   routes_queue.py
+│   │   middleware.py
+│   │   routes_schedule.py
+│   │   errors.py
+│   │   routes_control.py
 │
-└───tests
-    │   test_gpio_validation.py
-    │   test_hw_fault_blocks_start.py
-    │   conftest.py
-    │   test_api_control.py
-    │   test_api_queue.py
-    │   test_api_schedule.py
-    │   test_errors_logging.py
-    │   test_parallel_drain.py
-    │   test_hw_errors.py
-    │
-    
+├───tests
+│   │   test_io_worker.py
+│   │   test_engine.py
+│   │   test_history.py
+│   │   __init__.py
+│   │   test_health.py
+│   │   test_routes_queue.py
+│   │   test_engine_extended.py
+│   │   test_persistence_loop.py
+│   │   test_routes_missing.py
+│   │   test_valve_driver.py
+│   │   test_scheduler.py
+│   │   test_persistence.py
+│   │   conftest.py
+│   │   test_routes_schedule.py
+│   │   test_input_validation.py
+│   │   test_security.py
+│   │   test_timer.py
+│   │   test_routes_control.py

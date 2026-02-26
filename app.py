@@ -1,7 +1,6 @@
-
 # app.py - Bewaesserungscomputer Frontend
 # Shiny Express | FastAPI Backend: http://127.0.0.1:8000
-
+#
 # Rate-Limit-Strategie:
 #   - Alle shared @reactive.calc (status, automation, parallel) werden
 #     auf Seitenebene EINMAL pro Poll-Tick definiert.
@@ -9,7 +8,6 @@
 #     Ticks: Egal wie viele Renders darauf zugreifen, es entsteht nur
 #     EIN HTTP-Request pro Intervall.
 #   - Kein Render darf _get("/status") direkt aufrufen - immer _status_data().
-
 
 from __future__ import annotations
 
@@ -37,32 +35,55 @@ WEEKDAY_CHOICES = {
 }
 
 # --- API-Key -----------------------------------------------------------------
-try:
-    _API_KEY = Path("./data/api_key.txt").read_text(encoding="utf-8").strip()
-except OSError:
-    _API_KEY = ""
-    print("WARNUNG: ./data/api_key.txt nicht lesbar - Requests laufen ohne Key.")
+
+_API_KEY_PATH = Path("./data/api_key.txt")
+
+_api_key = reactive.Value("")          # session-scoped durch Shiny Express
+_auth_ok = reactive.Value(True)
+_auth_modal_open = reactive.Value(False)
+
+
+def _load_api_key_from_disk() -> str:
+    try:
+        key = _API_KEY_PATH.read_text(encoding="utf-8").strip()
+        return key
+    except OSError:
+        return ""
+
+
+def _apply_api_key_to_session(key: str) -> None:
+    # immer explizit setzen (auch wenn leer), damit es keine Altwerte gibt
+    _session.headers["X-API-Key"] = key
+
 
 _session = requests.Session()
-_session.headers.update({"X-API-Key": _API_KEY})
+
+# initial load (fail-closed)
+_initial_key = _load_api_key_from_disk()
+_=_api_key.set(_initial_key)
+_apply_api_key_to_session(_initial_key)
+
+if not _initial_key:
+    # Kein Key -> UI wird "locked" (kein stiller Betrieb ohne Auth)
+    _auth_ok.set(False)
 
 # --- HTTP-Hilfsfunktionen ----------------------------------------------------
 
 def _get(path: str, timeout: float = 2.0) -> requests.Response | None:
     try:
-        return _session.get(BASE_URL + path, timeout=timeout)
+        return _wrap_auth(_session.get(BASE_URL + path, timeout=timeout))
     except Exception:
         return None
 
 def _post(path: str, json: Any = None, timeout: float = 3.0) -> requests.Response | None:
     try:
-        return _session.post(BASE_URL + path, json=json, timeout=timeout)
+        return _wrap_auth(_session.post(BASE_URL + path, json=json, timeout=timeout))
     except Exception:
         return None
 
 def _delete(path: str, json: Any = None, timeout: float = 3.0) -> requests.Response | None:
     try:
-        return _session.delete(BASE_URL + path, json=json, timeout=timeout)
+        return _wrap_auth(_session.delete(BASE_URL + path, json=json, timeout=timeout))
     except Exception:
         return None
 
@@ -73,6 +94,51 @@ def _json_or_none(r: requests.Response | None) -> dict | None:
         return r.json()
     except Exception:
         return None
+
+
+# --- Auth Handling -----------------------------------------------------------
+
+def _show_auth_modal(reason: str):
+    if _auth_modal_open.get():
+        return
+    _auth_modal_open.set(True)
+    ui.modal_show(
+        ui.modal(
+            ui.tags.div(
+                ui.tags.p(ui.tags.strong("API-Key Problem!"), class_="text-danger"),
+                ui.tags.p(reason),
+                ui.tags.p(f"Key-Datei: {_API_KEY_PATH}", class_="font-monospace text-muted small"),
+                ui.tags.p("Aktion: Key neu laden (z.B. falls Backend einen neuen Key erzeugt hat)."),
+            ),
+            title="Authentifizierung",
+            easy_close=False,
+            footer=ui.div(
+                ui.input_action_button("btn_reload_key", "Key neu laden", class_="btn btn-primary me-2"),
+                ui.modal_button("OK", class_="btn btn-secondary"),
+            ),
+        )
+    )
+
+
+def _auth_fail(reason: str):
+    _auth_ok.set(False)
+    _show_auth_modal(reason)
+
+
+def _auth_recover():
+    _auth_ok.set(True)
+    if _auth_modal_open.get():
+        _auth_modal_open.set(False)
+        ui.modal_remove()
+
+
+def _wrap_auth(r: requests.Response | None) -> requests.Response | None:
+    # None => Netzwerk/Timeout; das wird über Backend-offline behandelt
+    if r is None:
+        return None
+    if r.status_code == 401:
+        _auth_fail("Backend antwortet mit 401 Unauthorized (Key fehlt, falsch oder veraltet).")
+    return r
 
 # --- Formatierungshilfsfunktionen --------------------------------------------
 
@@ -95,13 +161,12 @@ def state_badge(state_str: str) -> ui.Tag:
         "bereit":   ("secondary", "Bereit"),
         "fertig":   ("info",      "Fertig"),
     }
-    # Umlaut-tolerant: "laeuft" matcht auch "lauft" falls Backend ohne Umlaut
     key = (state_str
            .replace("\u00e4", "ae")
            .replace("\u00f6", "oe")
            .replace("\u00fc", "ue"))
     color, label = label_map.get(key, ("secondary", state_str))
-    return ui.span(label, class_=f"badge text-bg-{color}")
+    return ui.span(label, class_=f"badge text-bg-{color} app-badge")
 
 # --- Reaktive Werte (modul-global, session-scoped durch Shiny Express) -------
 
@@ -147,119 +212,51 @@ def _show_backend_modal():
         )
     )
 
-# --- CSS ---------------------------------------------------------------------
 
-ACCENT = "#82372a"
+# =============================================================================
+# CSS (DESIGN-ONLY)
+# =============================================================================
 
-ui.tags.style(f"""
-:root {{ --accent: {ACCENT}; }}
+ui.tags.head(
+    ui.tags.link(rel="preconnect", href="https://fonts.googleapis.com"),
+    ui.tags.link(rel="preconnect", href="https://fonts.gstatic.com", crossorigin="anonymous"),
+    ui.tags.link(
+        rel="stylesheet",
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+    ),
+)
 
-button.bslib-task-button {{
-    background-color: var(--accent) !important;
-    border-color: var(--accent) !important;
-    color: #fff !important;
-}}
-button.bslib-task-button:hover {{ filter: brightness(1.15); }}
-
-.btn.btn-primary {{
-    background-color: var(--accent) !important;
-    border-color: var(--accent) !important;
-}}
-.btn.btn-primary:hover {{ filter: brightness(1.15); }}
-
-.irs--shiny .irs-bar,
-.irs--shiny .irs-handle,
-.irs--shiny .irs-handle.state-hover {{ background-color: var(--accent); }}
-.irs--shiny .irs-single          {{ background-color: var(--accent); color: #fff; }}
-.irs--shiny .irs-single:after    {{ border-top-color: var(--accent); }}
-.irs--shiny .irs-min,
-.irs--shiny .irs-max             {{ color: var(--accent); }}
-
-.shiny-input-radiogroup input[type="radio"]:checked,
-.shiny-input-checkboxgroup input[type="checkbox"]:checked {{
-    accent-color: var(--accent) !important;
-}}
-
-.navbar {{ background-color: {ACCENT} !important; }}
-.navbar .navbar-brand, .navbar .nav-link {{ color: #fff !important; }}
-.navbar .nav-link.active,
-.navbar .nav-link:hover {{
-    background-color: rgba(255,255,255,0.15) !important;
-    border-radius: 4px;
-}}
-
-#nav-clock {{
-    color: #fff;
-    font-weight: 600;
-    font-size: 1.05rem;
-    padding: 0.4rem 0.75rem;
-    letter-spacing: 0.05em;
-}}
-.nav-backend-ok  {{color: #a8ffb0 !important; font-size: 0.8rem; padding: 0.4rem 0.75rem;}}
-.nav-backend-err {{color: #ffcccb !important; font-size: 0.8rem; padding: 0.4rem 0.75rem; animation: blink 1s step-end infinite;}}
-@keyframes blink {{ 50% {{ opacity: 0.4; }} }}
-
-.valve-grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
-    gap: 1rem;
-    padding: 1rem;
-}}
-
-.zone-running {{
-    background-color: #d4edda;
-    border-left: 4px solid #28a745;
-    border-radius: 4px;
-    padding: 0.35rem 0.6rem;
-    margin-bottom: 0.5rem;
-    font-size: 0.92rem;
-}}
-
-.form-section-title {{
-    font-weight: 600;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #666;
-    margin: 0.9rem 0 0.3rem;
-}}
-
-.fault-banner {{
-    background: #f8d7da;
-    border: 1px solid #f5c2c7;
-    border-radius: 6px;
-    padding: 0.7rem 1rem;
-    margin-bottom: 1rem;
-}}
-
-table.history-table {{ font-size: 0.88rem; }}
-table.history-table th {{ background-color: #f5f5f5; }}
-
-.valve-status-area {{
-    min-height: 1.8rem;
-    padding: 0.2rem 0;
-}}
-""")
+ACCENT = "#82372a" # Akzentfarbe festlegen
+ui.tags.style(f""":root {{ --accent: {ACCENT}; }}""")
+ui.include_css("www/app.css")
 
 # =============================================================================
 # SEITE
 # =============================================================================
 
-ui.page_opts(title="", window_title="Bewaesserung", lang="de")
+_ = ui.page_opts(title="", window_title="Bewaesserung", lang="de")
 
-# -----------------------------------------------------------------------------
+# ui.div(
+#     ui.div(
+#         ui.div(
+#             ui.div(
+#                 ui.div("Bewaesserungscomputer", class_="app-title"),
+#                 ui.div("Steuerung • Queue • Zeitplaene • Verlauf", class_="app-subtitle"),
+#             ),
+#             style="display:flex; justify-content:space-between; align-items:flex-end; gap:1rem;",
+#         ),
+#         class_="container-fluid app-shell",
+#     ),
+# )
+
+# -------------------------------------------------------------------------
 # GETEILTE REACTIVE CALCS - Seitenebene
-#
-# Diese Calcs werden EINMAL pro Poll-Intervall ausgefuehrt, egal wie viele
-# Renders darauf zugreifen. Shiny cached @reactive.calc innerhalb eines
-# reaktiven Ticks. Kein Render darf _get() direkt aufrufen!
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 @reactive.calc
 def _status_data() -> dict:
-    """Einzige Quelle fuer /status - gecached pro reaktivem Tick."""
     reactive.invalidate_later(POLL_STATUS_S)
-    _status_trigger.get()   # manuelle Invalidierung nach Button-Klicks
+    _status_trigger.get()
     r = _get("/status")
     if r is None or not r.ok:
         return {}
@@ -267,19 +264,16 @@ def _status_data() -> dict:
 
 @reactive.calc
 def _automation_data() -> dict:
-    """Gecachter /automation-Fetch."""
     reactive.invalidate_later(POLL_SLOW_S)
     _status_trigger.get()
     return _json_or_none(_get("/automation")) or {}
 
 @reactive.calc
 def _parallel_data() -> dict:
-    """Gecachter /parallel-Fetch."""
     reactive.invalidate_later(POLL_SLOW_S)
     _status_trigger.get()
     return _json_or_none(_get("/parallel")) or {}
 
-# Globaler Health-Poller (unabhaengig von Status-Calls)
 @reactive.effect
 def _health_poll():
     reactive.invalidate_later(POLL_STATUS_S)
@@ -297,13 +291,34 @@ def _health_poll():
             _backend_ok.set(False)
             _show_backend_modal()
 
+
+@reactive.effect
+@reactive.event(input.btn_reload_key)
+def _h_reload_key():
+    key = _load_api_key_from_disk()
+    _api_key.set(key)
+    _apply_api_key_to_session(key)
+
+    if not key:
+        _auth_fail("Key-Datei ist nicht lesbar/leer. Backend sollte sie erzeugen, bitte prüfen.")
+        return
+
+    r = _get("/status")
+    if r is not None and r.ok:
+        ui.notification_show("API-Key neu geladen. Auth OK.", type="message", duration=3)
+        _auth_recover()
+        _bump_status()
+    elif r is not None and r.status_code == 401:
+        ui.notification_show("API-Key scheint weiterhin falsch.", type="error", duration=4)
+    else:
+        ui.notification_show("Backend nicht erreichbar oder anderer Fehler.", type="warning", duration=4)
+
 # =============================================================================
 # NAVBAR
 # =============================================================================
 
 with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
-    # Uhr + Backend-Status im Navbar
     with ui.nav_control():
 
         @render.ui
@@ -318,7 +333,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     "Backend OK" if ok else "Backend OFFLINE",
                     class_="nav-backend-ok" if ok else "nav-backend-err",
                 ),
-                style="text-align:right; line-height:1.3;",
+                class_="nav-status-box",
             )
 
     # =========================================================================
@@ -326,7 +341,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
     # =========================================================================
     with ui.nav_panel("Dashboard", value="dashboard"):
 
-        # Hardware-Fault-Banner (nur sichtbar wenn hw_faulted)
         @render.ui
         def _fault_banner():
             d = _status_data()
@@ -341,7 +355,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 class_="fault-banner",
             )
 
-        # Quittier-Button (nur sichtbar bei Fault)
         @render.ui
         def _fault_clear_btn():
             if not _status_data().get("hw_faulted", False):
@@ -353,6 +366,107 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 ),
             )
 
+        # ===== Overview Tiles Row (NEU) =====
+        @render.ui
+        def _overview_tiles():
+            d = _status_data()
+            auto = _automation_data().get("automation_enabled", False)
+            para = _parallel_data().get("parallel_enabled", False)
+
+            if not _auth_ok.get():
+                return ui.div()  # bei locked UI keine Kacheln
+
+            active_runs = d.get("active_runs", {}) if d else {}
+            running_cnt = len(active_runs) if isinstance(active_runs, dict) else 0
+
+            q_len = d.get("queue_length", 0) if d else 0
+
+            paused = bool(d.get("paused", False)) if d else False
+            fault  = bool(d.get("hw_faulted", False)) if d else False
+
+            # Overall state pill
+            if fault:
+                st = ui.span("FAULT", class_="ov-pill bad")
+                st_sub = "Hardware-Fault aktiv"
+            elif paused:
+                st = ui.span("PAUSE", class_="ov-pill warn")
+                st_sub = "Bewässerung pausiert"
+            elif running_cnt > 0:
+                st = ui.span("RUN", class_="ov-pill ok")
+                st_sub = "Bewässerung läuft"
+            else:
+                st = ui.span("READY", class_="ov-pill")
+                st_sub = "System bereit"
+
+            # Queue Status Pill
+            q_state = d.get("queue_state", "bereit") if d else "bereit"
+
+            if q_state.lower().startswith("läuf"):
+                q_pill = ui.span("RUNNING", class_="ov-pill ok")
+            elif q_state.lower().startswith("paus"):
+                q_pill = ui.span("PAUSED", class_="ov-pill warn")
+            elif q_state.lower().startswith("fert"):
+                q_pill = ui.span("DONE", class_="ov-pill")
+            else:
+                q_pill = ui.span("READY", class_="ov-pill")
+
+
+            def tile(label: str, value: str, sub: str, ic: str, pill: ui.Tag | None = None):
+                return ui.div(
+                    ui.div(
+                        ui.div(
+                            ui.div(label, class_="ov-label"),
+                            ui.div(value, class_="ov-value"),
+                            ui.div(sub, class_="ov-sub"),
+                        ),
+                        ui.div(
+                            ui.div(icon(ic), class_="ov-icon"),
+                            style="display:flex; align-items:center; gap:0.55rem;",
+                        ),
+                        class_="ov-top",
+                    ),
+                    (ui.div(pill, style="margin-top:0.55rem;") if pill else ui.div()),
+                    class_="ov-tile",
+                )
+
+            return ui.div(
+                tile(
+                    "Aktive Zonen",
+                    str(running_cnt),
+                    "parallel möglich" if para else "einzeln / seriell",
+                    "droplet",
+                ),
+                tile(
+                    "Queue",
+                    str(q_len),
+                    q_state.capitalize(),
+                    "list-check",
+                    q_pill,
+                ),
+                tile(
+                    "Automatik",
+                    "EIN" if auto else "AUS",
+                    "Zeitpläne aktiv" if auto else "manuell",
+                    "clock",
+                    ui.span("ENABLED" if auto else "DISABLED", class_=("ov-pill ok" if auto else "ov-pill")),
+                ),
+                tile(
+                    "Parallelmodus",
+                    "EIN" if para else "AUS",
+                    "mehrere Ventile" if para else "max. 1 Ventil",
+                    "diagram-project",
+                    ui.span("ON" if para else "OFF", class_=("ov-pill ok" if para else "ov-pill")),
+                ),
+                tile(
+                    "System",
+                    "OK" if not fault else "FAULT",
+                    st_sub,
+                    "shield-halved",
+                    st,
+                ),
+                class_="overview-grid",
+            )
+
         with ui.layout_columns(col_widths=[8, 4]):
 
             with ui.card():
@@ -360,8 +474,22 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
                 @render.ui
                 def _status_display():
-                    # Nutzt den gemeinsamen Calc - kein eigener HTTP-Call!
                     d = _status_data()
+                    if not _auth_ok.get():
+                        return ui.div(
+                            ui.p("UI gesperrt: API-Key fehlt oder ist ungueltig.", class_="text-danger"),
+                            ui.div(
+                                ui.input_action_button(
+                                    "btn_reload_key",
+                                    "Key neu laden",
+                                    class_="btn btn-sm btn-primary",
+                                ),
+                                ui.tags.span("Key-Datei:", class_="text-muted ms-3 small"),
+                                ui.tags.span(str(_API_KEY_PATH), class_="kbd-like ms-1"),
+                                style="display:flex; align-items:center; gap:0.35rem; flex-wrap:wrap;",
+                            ),
+                        )
+
                     if not d:
                         return ui.p("Warte auf Backend ...", class_="text-muted")
 
@@ -374,30 +502,49 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     parallel    = _parallel_data().get("parallel_enabled", False)
 
                     if hw_faulted:
-                        badge = ui.span("Hardware-Fault", class_="badge text-bg-danger")
+                        badge = ui.span("Hardware-Fault", class_="badge text-bg-danger app-badge")
                     elif paused:
-                        badge = ui.span("Pausiert", class_="badge text-bg-warning text-dark")
+                        badge = ui.span("Pausiert", class_="badge text-bg-warning text-dark app-badge")
                     elif active_runs:
                         n = len(active_runs)
                         badge = ui.span(
                             f"Laeuft ({n} Zone{'n' if n > 1 else ''})",
-                            class_="badge text-bg-success",
+                            class_="badge text-bg-success app-badge",
                         )
                     else:
-                        badge = ui.span("Bereit", class_="badge text-bg-secondary")
+                        badge = ui.span("Bereit", class_="badge text-bg-secondary app-badge")
 
                     zone_divs = []
                     for zk, ar in sorted(active_runs.items(), key=lambda x: int(x[0])):
-                        rem = ar.get("remaining_s", 0)
+                        rem = int(ar.get("remaining_s", 0) or 0)
                         src = ar.get("started_source", "manuell")
+
+                        planned = (
+                            ar.get("planned_s")
+                            or ar.get("duration_s")
+                            or ar.get("planned")
+                            or ar.get("duration")
+                            or 0
+                        )
+
+                        try:
+                            planned = int(planned)
+                        except Exception:
+                            planned = 0
+
+                        progress_style = ""
+                        if planned and planned > 0:
+                            pct = max(0.0, min(1.0, 1.0 - (rem / planned))) * 100.0
+                            progress_style = f"--progress:{pct:.1f}%;"
+
                         zone_divs.append(
                             ui.div(
                                 ui.tags.b(f"Zone {zk}"),
                                 f"  -  {fmt_mmss(rem)} verbleibend  (Quelle: {src})",
                                 class_="zone-running",
+                                style=progress_style,
                             )
                         )
-                    # Fallback auf Legacy-Felder
                     if not zone_divs:
                         rz  = d.get("running_zone")
                         rem = d.get("remaining_time", 0)
@@ -411,7 +558,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                             )
 
                     return ui.div(
-                        ui.div(badge, style="margin-bottom:0.8rem;"),
+                        ui.div(badge, style="margin-bottom:0.85rem;"),
                         *zone_divs,
                         ui.tags.hr(),
                         ui.div(
@@ -421,12 +568,12 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         ),
                         ui.div(
                             ui.tags.small("Automatik: ", class_="text-muted"),
-                            ui.span("EIN", class_="badge text-bg-success") if auto
-                                else ui.span("AUS", class_="badge text-bg-secondary"),
+                            ui.span("EIN", class_="badge text-bg-success app-badge") if auto
+                                else ui.span("AUS", class_="badge text-bg-secondary app-badge"),
                             ui.tags.small("   Parallel: ", class_="text-muted"),
-                            ui.span("EIN", class_="badge text-bg-info") if parallel
-                                else ui.span("AUS", class_="badge text-bg-secondary"),
-                            style="margin-top:0.3rem;",
+                            ui.span("EIN", class_="badge text-bg-info app-badge") if parallel
+                                else ui.span("AUS", class_="badge text-bg-secondary app-badge"),
+                            style="margin-top:0.35rem;",
                         ),
                     )
 
@@ -468,7 +615,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 )
 
         # Handler
-
         @reactive.effect
         @reactive.event(input.btn_fault_clear)
         def _h_fault_clear():
@@ -560,12 +706,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
     # =========================================================================
     # TAB 2 - VENTILE
-    #
-    # Korrekte Rate-Limit-Strategie:
-    #   - Jeder Ventil-Render ruft _status_data() auf (gecachter Calc)
-    #   - KEIN direkter _get("/status") Aufruf in Renders!
-    #   - Einen kombinierten Render pro Zone (statt 2x dot + status)
-    #   - Statische Karten mit "with ui.card():" auf Modulebene
     # =========================================================================
     with ui.nav_panel("Ventile", value="ventile"):
 
@@ -574,29 +714,25 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 with ui.card(id=f"valve_card_{_vi}"):
 
                     with ui.card_header():
-                        with ui.div(
-                            style="display:flex; justify-content:space-between; align-items:center;"
-                        ):
+                        with ui.div(style="display:flex; justify-content:space-between; align-items:center;"):
                             ui.tags.b(f"Zone {_vi}")
 
-                            # Live-Statuspunkt (nutzt gemeinsamen Calc)
                             @output(id=f"valve_dot_{_vi}")
                             @render.ui
                             def _vdot(_z=_vi):
-                                d = _status_data()   # gecachter Calc - kein HTTP!
+                                d = _status_data()
                                 is_running = str(_z) in d.get("active_runs", {})
-                                color = "#28a745" if is_running else "#ccc"
                                 return ui.span(
-                                    "●",
-                                    style=f"color:{color}; font-size:1.2rem;",
+                                    "",
+                                    class_=f"valve-dot {'on' if is_running else 'off'}",
+                                    title="Laeuft" if is_running else "Bereit",
                                 )
 
-                    # Kombinierter Live-Status (Zeit + Quelle, ein Render pro Zone)
                     with ui.div(class_="valve-status-area px-3 pt-2"):
                         @output(id=f"valve_status_{_vi}")
                         @render.ui
                         def _vstatus(_z=_vi):
-                            d  = _status_data()   # gecachter Calc - kein HTTP!
+                            d  = _status_data()
                             ar = d.get("active_runs", {}).get(str(_z), {})
                             if ar:
                                 rem = ar.get("remaining_s", 0)
@@ -609,7 +745,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                                 )
                             return ui.span("Bereit", class_="text-muted small")
 
-                    # Steuerelemente (Inputs auf Modulebene - Shiny-Pflicht)
                     with ui.div(class_="px-3 pb-3"):
                         ui.input_slider(
                             f"sld_{_vi}", "Dauer:",
@@ -620,9 +755,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                             choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
                             selected="Minuten", inline=True,
                         )
-                        with ui.div(
-                            style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.5rem;"
-                        ):
+                        with ui.div(style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-top:0.6rem;"):
                             ui.input_task_button(
                                 f"btn_start_{_vi}",
                                 "Start",
@@ -636,7 +769,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                                 class_="btn btn-outline-secondary btn-sm",
                             )
 
-        # Handler-Factories (Closure-Bug-Vermeidung)
         def _make_start_handler(zone: int):
             @reactive.effect
             @reactive.event(input[f"btn_start_{zone}"])
@@ -709,7 +841,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     header = ui.div(
                         state_badge(q_state),
                         f"  {q_len} Item{'s' if q_len != 1 else ''} in der Warteschlange",
-                        style="margin-bottom:0.8rem;",
+                        style="margin-bottom:0.85rem;",
                     )
                     if not items:
                         return ui.div(header, ui.p("Warteschlange ist leer.", class_="text-muted"))
@@ -741,7 +873,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         ),
                     )
 
-                with ui.div(style="margin-top:0.8rem; display:flex; gap:0.4rem; flex-wrap:wrap;"):
+                with ui.div(style="margin-top:0.9rem; display:flex; gap:0.5rem; flex-wrap:wrap;"):
                     ui.input_task_button(
                         "btn_q_start", "Starten",
                         label_busy="Laeuft ...",
@@ -759,9 +891,10 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
             with ui.card():
                 ui.card_header("Item hinzufuegen")
 
-                ui.input_select(
+                ui.input_selectize(
                     "q_add_zone", "Zone:",
                     choices={str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
+                    selected="1",
                 )
                 ui.input_slider("q_add_dur", "Dauer:", min=1, max=60, value=10)
                 ui.input_radio_buttons(
@@ -773,8 +906,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     "btn_q_add", "Hinzufuegen",
                     class_="btn btn-primary w-100 mt-2",
                 )
-
-        # Handler
 
         @reactive.effect
         @reactive.event(input.btn_q_start)
@@ -875,8 +1006,8 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
                         zone_label = f"Alle ({ANZAHL_VENTILE})" if zone == 0 else f"Zone {zone}"
                         status_span = (
-                            ui.span("EIN", class_="badge text-bg-success") if enabled
-                            else ui.span("AUS", class_="badge text-bg-secondary")
+                            ui.span("EIN", class_="badge text-bg-success app-badge") if enabled
+                            else ui.span("AUS", class_="badge text-bg-secondary app-badge")
                         )
                         rows.append(
                             ui.tags.tr(
@@ -922,7 +1053,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                                 "btn_sch_delete_sel",  "Loeschen",
                                 class_="btn btn-sm btn-outline-danger",
                             ),
-                            style="margin-top:0.7rem; display:flex; gap:0.3rem; flex-wrap:wrap;",
+                            style="margin-top:0.8rem; display:flex; gap:0.45rem; flex-wrap:wrap;",
                         ),
                     )
 
@@ -982,12 +1113,13 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
             with ui.card():
                 ui.card_header("Zeitplan hinzufuegen")
 
-                ui.input_select(
+                ui.input_selectize(
                     "sch_zone", "Zone:",
                     choices={
                         "0": f"Alle Zonen ({ANZAHL_VENTILE})",
                         **{str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
                     },
+                    selected="0",
                 )
                 ui.input_slider("sch_dur", "Dauer:", min=1, max=120, value=10)
                 ui.input_radio_buttons(
@@ -1021,8 +1153,6 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     "btn_sch_add", "Zeitplan speichern",
                     class_="btn btn-primary w-100 mt-3",
                 )
-
-        # Handler
 
         @reactive.effect
         @reactive.event(input.sch_all_days)
@@ -1083,9 +1213,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
         with ui.card():
             with ui.card_header():
-                with ui.div(
-                    style="display:flex; justify-content:space-between; align-items:center; width:100%;"
-                ):
+                with ui.div(style="display:flex; justify-content:space-between; align-items:center; width:100%;"):
                     ui.span("Bewaesserungsverlauf")
                     ui.input_action_button(
                         "btn_history_refresh", "Aktualisieren",
@@ -1119,10 +1247,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     dur  = item.get("duration_s", 0)
                     src  = item.get("source", "")
                     unit = item.get("time_unit", "Sekunden")
-                    try:
-                        ts_fmt = ts[:16].replace("T", " ")
-                    except Exception:
-                        ts_fmt = ts
+                    ts_fmt = ts[:16].replace("T", " ") if isinstance(ts, str) else str(ts)
                     rows.append(
                         ui.tags.tr(
                             ui.tags.td(ts_fmt, class_="text-muted small"),
