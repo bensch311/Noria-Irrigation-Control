@@ -363,7 +363,8 @@ button.bslib-task-button:active { transform: translateY(1px); }
 }
 .valve-dot.off { background: rgba(15,23,42,0.16); }
 
-/* Running zone banner */
+/* ---------- Running zone banner (FIXED LAYERING) ---------- */
+
 .zone-running {
   position: relative;
   border-radius: 14px;
@@ -372,55 +373,71 @@ button.bslib-task-button:active { transform: translateY(1px); }
   font-size: 0.92rem;
   border: 1px solid rgba(15, 23, 42, 0.08);
   overflow: hidden;
-  background: color-mix(in srgb, var(--accent) 6%, white);
+
+  /* wichtig: eigener stacking context */
+  isolation: isolate;
+
+  /* dezenter Grundton */
+  background: rgba(15, 23, 42, 0.03);
 }
 
+/* Progress Layer – z-index: -1 damit Text-Nodes (nicht nur Elemente)
+   sicher darueber liegen. isolation: isolate auf .zone-running stellt
+   sicher dass -1 innerhalb des Stacking Contexts bleibt. */
 .zone-running::before {
   content: "";
   position: absolute;
   inset: 0;
   width: var(--progress, 0%);
   background: linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--accent) 22%, white),
-      color-mix(in srgb, var(--accent) 10%, white)
+    90deg,
+    color-mix(in srgb, var(--accent) 18%, white),
+    color-mix(in srgb, var(--accent) 10%, white)
   );
   transition: width 450ms ease;
-  z-index: 0;
+
+  z-index: -1;
+  pointer-events: none;
 }
 
+/* Optional: sehr dezentes Shimmer */
 .zone-running::after {
   content: "";
   position: absolute;
   inset: 0;
   width: var(--progress, 0%);
   pointer-events: none;
-  z-index: 0;
+  z-index: -1;
+
   background: linear-gradient(
     110deg,
-    rgba(255,255,255,0.00) 22%,
-    rgba(255,255,255,0.55) 35%,
-    rgba(255,255,255,0.00) 50%
+    rgba(255,255,255,0.00) 30%,
+    rgba(255,255,255,0.35) 45%,
+    rgba(255,255,255,0.00) 60%
   );
-  background-size: 240% 100%;
-  animation: zrShimmer 1.9s ease-in-out infinite;
-  opacity: 0.55;
+  background-size: 220% 100%;
+  animation: zrShimmer 2.4s ease-in-out infinite;
+  opacity: 0.35;
   border-radius: 14px;
 }
 
 @keyframes zrShimmer {
-  0%   { background-position: 150% 0; }
-  100% { background-position: -60% 0; }
+  0%   { background-position: 140% 0; }
+  100% { background-position: -40% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .zone-running::after {
     animation: none;
-    opacity: 0.18;
+    opacity: 0.15;
   }
 }
 
-.zone-running > * { position: relative; z-index: 1; }
+/* Text Layer – z-index nicht mehr noetig da ::before/::after auf -1.
+   position: relative bleibt fuer eventuelle weitere Kinder. */
+.zone-running > * {
+  position: relative;
+}
 
 .fault-banner {
   background: rgba(239, 68, 68, 0.08);
