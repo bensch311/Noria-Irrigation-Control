@@ -208,7 +208,11 @@ def _show_backend_modal():
             ),
             title="Verbindungsfehler",
             easy_close=False,
-            footer=ui.modal_button("OK", class_="btn btn-secondary"),
+            # Kein Footer / kein OK-Button: Das Modal schliesst sich automatisch
+            # sobald _health_poll eine erfolgreiche Verbindung meldet.
+            # Ein OK-Button waere irrefuehrend, weil er das Modal nur client-
+            # seitig schliessen wuerde und _health_poll es sofort wieder oeffnen.
+            footer=None,
         )
     )
 
@@ -324,8 +328,13 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
         @render.ui
         def _nav_clock():
             reactive.invalidate_later(1)
-            ok  = _backend_ok.get()
-            now = datetime.datetime.now().strftime("%H:%M:%S")
+            # WICHTIG: _backend_fail_streak lesen statt _backend_ok!
+            # _backend_ok kann nach Modal-Dismiss kurz seinen Initialwert (True)
+            # zeigen. _backend_fail_streak hingegen akkumuliert monoton und ist
+            # die einzige "Wahrheitsquelle" fuer den aktuellen Verbindungsstatus.
+            streak = _backend_fail_streak.get()
+            ok     = streak < BACKEND_FAIL_THRESHOLD
+            now    = datetime.datetime.now().strftime("%H:%M:%S")
             return ui.div(
                 ui.span(now, id="nav-clock"),
                 ui.tags.br(),
