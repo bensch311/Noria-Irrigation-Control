@@ -270,6 +270,11 @@ ui.tags.head(
         rel="stylesheet",
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
     ),
+    # Bootstrap Icons (für Zahnrad-Icon im Navbar-Tab)
+    ui.tags.link(
+        rel="stylesheet",
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css",
+    ),
 )
 
 # Initiale Defaults – werden nach dem ersten _settings_data()-Poll durch
@@ -1462,82 +1467,91 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
     # =========================================================================
     # TAB 6 - EINSTELLUNGEN
     # =========================================================================
-    with ui.nav_panel("Einstellungen", value="settings"):
+    ui.nav_spacer()
+    with ui.nav_panel(
+        ui.tags.span(
+            ui.tags.i(class_="bi bi-gear-fill"),
+            title="Einstellungen",
+            style="font-size:1.15rem;",
+        ),
+        value="settings",
+    ):
 
-        with ui.layout_columns(col_widths=[6, 6]):
+        with ui.layout_columns(col_widths=[12]):
 
             # ----- Benutzereinstellungen (via Backend-API) -------------------
             with ui.card():
                 ui.card_header("Benutzereinstellungen")
-                ui.p(
-                    "Alle Einstellungen werden im Backend gespeichert (user_settings.json).",
-                    class_="text-muted small",
-                )
+
+                # --- Darstellung ---------------------------------------------
+                with ui.div(class_="settings-section"):
+                    ui.p("Darstellung", class_="settings-section-title")
+
+                    ui.p("Navbar-Titel", class_="fw-semibold mb-1")
+                    ui.input_text(
+                        "txt_navbar_title", None,
+                        value="Bewaesserungscomputer",
+                        placeholder="z.B. Hof Muster – Bewaesserung",
+                    )
+
+                    ui.p("Akzentfarbe", class_="fw-semibold mt-3 mb-1")
+                    with ui.div(class_="d-flex align-items-center gap-3"):
+                        ui.tags.input(
+                            id="clr_accent_color",
+                            type="color",
+                            value="#82372a",
+                            title="Akzentfarbe waehlen",
+                            style=(
+                                "width:52px;height:40px;padding:3px;"
+                                "border-radius:8px;cursor:pointer;"
+                                "border:1px solid var(--bs-border-color);"
+                            ),
+                            oninput=(
+                                "Shiny.setInputValue('clr_accent_color', this.value, "
+                                "{priority: 'event'});"
+                            ),
+                            onchange=(
+                                "Shiny.setInputValue('clr_accent_color', this.value, "
+                                "{priority: 'event'});"
+                            ),
+                        )
+                        @render.ui
+                        def _accent_hex_label():
+                            val = input.clr_accent_color() if hasattr(input, 'clr_accent_color') else None
+                            if not val:
+                                d = _settings_data()
+                                val = d.get("accent_color", ACCENT_COLOR_DEFAULT) if d else ACCENT_COLOR_DEFAULT
+                            return ui.span(val, class_="text-muted small font-monospace")
+
+                        ui.input_action_button(
+                            "btn_reset_accent", "Zurücksetzen",
+                            class_="btn btn-sm btn-outline-secondary",
+                            title=f"Akzentfarbe auf {ACCENT_COLOR_DEFAULT} zurücksetzen",
+                        )
+
+                # --- Ventilsteuerung -----------------------------------------
+                with ui.div(class_="settings-section"):
+                    ui.p("Ventilsteuerung – Standardwerte", class_="settings-section-title")
+
+                    ui.p("Laufzeit-Slider (1–120)", class_="fw-semibold mb-1")
+                    ui.input_slider("sld_default_duration", None, min=1, max=120, value=5, step=1)
+
+                    ui.p("Zeiteinheit", class_="fw-semibold mt-2 mb-1")
+                    ui.input_radio_buttons(
+                        "rb_default_time_unit", None,
+                        choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
+                        selected="Minuten", inline=True,
+                    )
 
                 # --- Verlauf -------------------------------------------------
-                ui.p("Max. Verlaufseintraege (1–500)", class_="fw-semibold mt-3")
-                ui.input_slider("sld_max_history", None, min=1, max=500, value=20, step=1)
-
-                # --- Navbar-Titel --------------------------------------------
-                ui.p("Navbar-Titel", class_="fw-semibold mt-3")
-                ui.input_text(
-                    "txt_navbar_title", None,
-                    value="Bewaesserungscomputer",
-                    placeholder="z.B. Hof Muster – Bewaesserung",
-                )
-
-                # --- Akzentfarbe (Color-Picker) ------------------------------
-                ui.p("Akzentfarbe", class_="fw-semibold mt-3")
-                with ui.div(class_="d-flex align-items-center gap-3 mb-1"):
-                    ui.tags.input(
-                        id="clr_accent_color",
-                        type="color",
-                        value="#82372a",
-                        title="Akzentfarbe waehlen",
-                        style=(
-                            "width:52px;height:40px;padding:3px;"
-                            "border-radius:8px;cursor:pointer;"
-                            "border:1px solid var(--bs-border-color);"
-                        ),
-                        # Shiny.setInputValue: offizieller Weg um nativen
-                        # HTML-Input an Shinys Input-System anzubinden
-                        oninput=(
-                            "Shiny.setInputValue('clr_accent_color', this.value, "
-                            "{priority: 'event'});"
-                        ),
-                        onchange=(
-                            "Shiny.setInputValue('clr_accent_color', this.value, "
-                            "{priority: 'event'});"
-                        ),
-                    )
-                    @render.ui
-                    def _accent_hex_label():
-                        val = input.clr_accent_color() if hasattr(input, 'clr_accent_color') else None
-                        if not val:
-                            d = _settings_data()
-                            val = d.get("accent_color", ACCENT_COLOR_DEFAULT) if d else ACCENT_COLOR_DEFAULT
-                        return ui.span(val, class_="text-muted small font-monospace")
-
-                    ui.input_action_button(
-                        "btn_reset_accent", "Zurücksetzen",
-                        class_="btn btn-sm btn-outline-secondary",
-                        title=f"Akzentfarbe auf {ACCENT_COLOR_DEFAULT} zurücksetzen",
-                    )
-
-                # --- Standard-Laufzeit + Zeiteinheit -------------------------
-                ui.p("Standard-Laufzeit fuer Ventil-Slider (1–120)", class_="fw-semibold mt-3")
-                ui.input_slider("sld_default_duration", None, min=1, max=120, value=5, step=1)
-
-                ui.p("Standard-Zeiteinheit fuer Ventil-Radiobuttons", class_="fw-semibold mt-2")
-                ui.input_radio_buttons(
-                    "rb_default_time_unit", None,
-                    choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
-                    selected="Minuten", inline=True,
-                )
+                with ui.div(class_="settings-section"):
+                    ui.p("Verlauf", class_="settings-section-title")
+                    ui.p("Max. Verlaufseintraege (1–500)", class_="fw-semibold")
+                    ui.input_slider("sld_max_history", None, min=1, max=500, value=20, step=1)
 
                 ui.input_action_button(
                     "btn_save_settings", "Einstellungen speichern",
-                    class_="btn btn-primary w-100 mt-4",
+                    class_="btn btn-primary w-100 mt-3",
                 )
 
                 @render.ui
@@ -1556,33 +1570,33 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
                         )
                     return ui.div()
 
-            # ----- Systeminfo (readonly) -------------------------------------
-            with ui.card():
-                ui.card_header("Systeminfo")
+        # ----- Systeminfo (ausserhalb layout_columns, volle Breite) -----------
+        with ui.card(class_="mt-3"):
+            ui.card_header("Systeminfo")
 
-                @render.ui
-                def _settings_sysinfo():
-                    d = _settings_data()
-                    backend_max = d.get("max_valves", "?") if d else "?"
-                    rows = [
-                        ("Backend-URL",          BASE_URL),
-                        ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
-                        ("Ventile (Backend)",     str(backend_max)),
-                        ("Status-Poll",           f"{POLL_STATUS_S} s"),
-                        ("Slow-Poll",             f"{POLL_SLOW_S} s"),
-                        ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
-                    ]
-                    return ui.tags.table(
-                        ui.tags.tbody(*[
-                            ui.tags.tr(
-                                ui.tags.td(label, class_="text-muted small pe-3",
-                                           style="white-space:nowrap;width:1%;"),
-                                ui.tags.td(value, class_="small fw-semibold"),
-                            )
-                            for label, value in rows
-                        ]),
-                        class_="table table-sm",
-                    )
+            @render.ui
+            def _settings_sysinfo():
+                d = _settings_data()
+                backend_max = d.get("max_valves", "?") if d else "?"
+                rows = [
+                    ("Backend-URL",          BASE_URL),
+                    ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
+                    ("Ventile (Backend)",     str(backend_max)),
+                    ("Status-Poll",           f"{POLL_STATUS_S} s"),
+                    ("Slow-Poll",             f"{POLL_SLOW_S} s"),
+                    ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
+                ]
+                return ui.tags.table(
+                    ui.tags.tbody(*[
+                        ui.tags.tr(
+                            ui.tags.td(label, class_="text-muted small pe-3",
+                                       style="white-space:nowrap;width:1%;"),
+                            ui.tags.td(value, class_="small fw-semibold"),
+                        )
+                        for label, value in rows
+                    ]),
+                    class_="table table-sm",
+                )
 
         # ----- Speichern -----------------------------------------------------
         @reactive.effect
@@ -1629,31 +1643,27 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
         def _sync_settings_to_ui():
             """Synct Settings-Inputs aus dem Backend.
 
-            Drei Kategorien mit unterschiedlichem Sync-Verhalten:
+            Zwei Kategorien mit unterschiedlichem Sync-Verhalten:
 
-            A) Immer sync (kein freier User-Input):
-               sld_max_history, sld_default_duration, rb_default_time_unit
-
-            B) Nur einmalig beim ersten Load + nach erfolgreichem Save:
-               txt_navbar_title, clr_accent_color
+            A) Nur einmalig beim ersten Load + nach erfolgreichem Save:
+               txt_navbar_title, clr_accent_color, sld_max_history, sld_default_duration, rb_default_time_unit
                → _settings_initialized verhindert, dass der User-Input
                  bei jedem 5s-Poll überschrieben wird.
 
-            C) Andere Tabs (Ventile/Queue/Schedule-Slider+Radio):
+            B) Andere Tabs (Ventile/Queue/Schedule-Slider+Radio):
                Nur bei tatsächlicher Wertänderung (_last_applied_dur_unit).
             """
             d = _settings_data()
             if not d:
                 return
 
-            # A) Immer sync ──────────────────────────────────────────────────
-            hist = d.get("max_history_items")
-            if hist is not None:
-                ui.update_slider("sld_max_history", value=int(hist))
-
-            # B) Nur beim ersten Load ────────────────────────────────────────
+            # A) Nur beim ersten Load ────────────────────────────────────────
             if not _settings_initialized.get():
                 _settings_initialized.set(True)
+
+                hist = d.get("max_history_items")
+                if hist is not None:
+                    ui.update_slider("sld_max_history", value=int(hist))
 
                 title = d.get("navbar_title", NAVBAR_TITLE_DEFAULT)
                 ui.update_text("txt_navbar_title", value=title)
@@ -1661,7 +1671,7 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
                 color = d.get("accent_color", ACCENT_COLOR_DEFAULT)
                 _apply_color_picker(color)
 
-            # C) Slider/Radios in allen Tabs: nur bei Wertänderung ───────────
+            # B) Slider/Radios in allen Tabs: nur bei Wertänderung ───────────
             dur  = int(d.get("default_duration", 5))
             unit = d.get("default_time_unit", "Minuten")
             last = _last_applied_dur_unit.get()

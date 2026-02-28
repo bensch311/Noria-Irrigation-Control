@@ -277,6 +277,33 @@ button.bslib-task-button:active { transform: translateY(1px); }
   border-color: var(--accent) !important;
 }
 
+/* Zeitplan-Checkboxen: native <input type="checkbox" data-sch-id="..."> */
+input[data-sch-id] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  border: 1.5px solid rgba(15, 23, 42, 0.25);
+  border-radius: 5px;
+  background: #fff;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 120ms ease, border-color 120ms ease;
+  position: relative;
+}
+input[data-sch-id]:checked {
+  background-color: var(--accent) !important;
+  border-color: var(--accent) !important;
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='m6 10 3 3 6-6'/%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 0.8rem;
+}
+input[data-sch-id]:focus {
+  outline: none;
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 .form-check-input[type="radio"]:checked {
   background-image: radial-gradient(circle, #fff 0 38%, transparent 40%) !important;
 }
@@ -542,3 +569,39 @@ button.bslib-task-button:active { transform: translateY(1px); }
 .ov-pill.ok   { border-color: rgba(34,197,94,0.25); background: rgba(34,197,94,0.10); }
 .ov-pill.warn { border-color: rgba(245,158,11,0.30); background: rgba(245,158,11,0.11); }
 .ov-pill.bad  { border-color: rgba(239,68,68,0.26); background: rgba(239,68,68,0.10); }
+/* ---------- Tab-Content Spacing ---------- */
+/* Shiny setzt .tab-content top-padding. Wir normalisieren auf 0 damit
+   Dashboard und alle anderen Tabs gleich viel Abstand zur Navbar haben.
+   Der visuelle Abstand kommt ausschliesslich vom Card-Body-Padding. */
+.tab-content {
+  padding-top: 0.85rem !important;
+}
+
+/* Shiny fuegt manchmal leere Wrapper-Divs vor dem ersten echten Inhalt
+   ein (z.B. bei @render.ui die initial einen leeren div zurueckgeben).
+   Das erzeugt am Dashboard-Tab visuell mehr Abstand als bei anderen Tabs
+   die direkt mit einer Card beginnen. */
+.tab-pane > .shiny-html-output:empty,
+.tab-pane > .shiny-html-output > div:empty {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* ---------- Settings-Sections ---------- */
+/* Subtile Trenner zwischen Einstellungsgruppen im Settings-Tab */
+.settings-section {
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.018);
+  padding: 0.85rem 1rem 0.9rem;
+  margin-top: 0.85rem;
+}
+
+.settings-section-title {
+  font-size: 0.7rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(17, 24, 39, 0.42);
+  margin: 0 0 0.65rem;
+}
