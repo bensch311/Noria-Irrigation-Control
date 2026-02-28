@@ -83,3 +83,14 @@ class ScheduleAddRequest(BaseModel):
 
 class ParallelModeRequest(BaseModel):
     enabled: bool
+
+
+class SettingsUpdateRequest(BaseModel):
+    """Request-Modell für POST /settings.
+
+    max_history_items:
+      Anzahl der Verlaufseintraege die das Backend speichert.
+      ge=1: mindestens ein Eintrag sinnvoll.
+      le=500: Hard-Cap – verhindert unbegrenztes Wachstum der history.json.
+    """
+    max_history_items: int = Field(..., ge=1, le=500)

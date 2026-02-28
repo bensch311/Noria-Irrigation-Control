@@ -31,6 +31,7 @@ from api.routes_queue import router as queue_router
 from api.routes_schedule import router as schedule_router
 from api.routes_control import router as control_router
 from api.routes_history import router as history_router
+from api.routes_settings import router as settings_router
 
 app = FastAPI(lifespan=lifespan)
 
@@ -86,3 +87,4 @@ app.include_router(queue_router)
 app.include_router(schedule_router)
 app.include_router(control_router)
 app.include_router(history_router)
+app.include_router(settings_router)

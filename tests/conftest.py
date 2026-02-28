@@ -200,6 +200,7 @@ def app():
     from api.routes_schedule import router as schedule_router
     from api.routes_control import router as control_router
     from api.routes_history import router as history_router
+    from api.routes_settings import router as settings_router
 
     # Frische Limiter-Instanz pro Test – identische Konfiguration wie Produktion.
     test_limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
@@ -226,6 +227,7 @@ def app():
     _app.include_router(schedule_router)
     _app.include_router(control_router)
     _app.include_router(history_router)
+    _app.include_router(settings_router)
     return _app
 
 

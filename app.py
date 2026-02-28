@@ -22,12 +22,53 @@ from shiny.express import input, output, render, ui
 from faicons import icon_svg as icon
 
 # --- Konfiguration -----------------------------------------------------------
-BASE_URL               = "http://127.0.0.1:8000"
-ANZAHL_VENTILE         = 6
-POLL_STATUS_S          = 1      # Status-Polling: 1s -> max 60 Req/min (weit unter Limit)
-POLL_SLOW_S            = 5      # Queue / Zeitplaene / Verlauf
-BACKEND_FAIL_THRESHOLD = 3
-HEALTH_TIMEOUT_S       = 0.8
+# Wird einmalig beim Start aus data/frontend_config.json geladen.
+# Faellt die Datei weg: sichere Fallback-Werte greifen, kein Crash.
+# ANZAHL_VENTILE liest MAX_VALVES aus data/device_config.json –
+# Single Source of Truth, kein manuelles Doppelpflegen.
+
+import json as _json
+
+def _load_frontend_config() -> dict:
+    """Laedt frontend_config.json; bei Fehler: Fallback-Dict."""
+    _defaults = {
+        "base_url":                "http://127.0.0.1:8000",
+        "poll_status_s":           1,
+        "poll_slow_s":             5,
+        "backend_fail_threshold":  3,
+        "health_timeout_s":        0.8,
+        "anzahl_ventile_fallback": 6,
+    }
+    try:
+        raw = Path("data/frontend_config.json").read_text(encoding="utf-8")
+        data = _json.loads(raw)
+        return {**_defaults, **{k: v for k, v in data.items() if not k.startswith("_")}}
+    except Exception:
+        return _defaults
+
+def _read_max_valves_from_device_config(fallback: int) -> int:
+    """Liest MAX_VALVES aus data/device_config.json (gleicher Pi).
+    Frontend und Backend laufen auf derselben Maschine – direkter Dateizugriff
+    ist die sauberste Loesung: kein API-Call beim Start, keine Race-Condition.
+    """
+    try:
+        raw = Path("data/device_config.json").read_text(encoding="utf-8")
+        cfg = _json.loads(raw)
+        return max(1, int(cfg.get("device", {}).get("MAX_VALVES", fallback)))
+    except Exception:
+        return fallback
+
+_cfg = _load_frontend_config()
+
+BASE_URL               = str(_cfg["base_url"])
+POLL_STATUS_S          = int(_cfg["poll_status_s"])
+POLL_SLOW_S            = int(_cfg["poll_slow_s"])
+BACKEND_FAIL_THRESHOLD = int(_cfg["backend_fail_threshold"])
+HEALTH_TIMEOUT_S       = float(_cfg["health_timeout_s"])
+
+# Single Source of Truth: device_config.json → MAX_VALVES.
+# Aenderungen erfordern Neustart des Frontends (MAX_VALVES ist Hardware-Konfig).
+ANZAHL_VENTILE = _read_max_valves_from_device_config(_cfg["anzahl_ventile_fallback"])
 
 WEEKDAY_CHOICES = {
     "0": "Mo", "1": "Di", "2": "Mi",
@@ -277,6 +318,13 @@ def _parallel_data() -> dict:
     reactive.invalidate_later(POLL_SLOW_S)
     _status_trigger.get()
     return _json_or_none(_get("/parallel")) or {}
+
+@reactive.calc
+def _settings_data() -> dict:
+    """Gecachter /settings-Fetch. Langsamer Poll genuegt."""
+    reactive.invalidate_later(POLL_SLOW_S)
+    _status_trigger.get()
+    return _json_or_none(_get("/settings")) or {}
 
 @reactive.effect
 def _health_poll():
@@ -1290,3 +1338,106 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
         @reactive.event(input.btn_history_refresh)
         def _h_history_refresh():
             _bump_history()
+
+    # =========================================================================
+    # TAB 6 - EINSTELLUNGEN
+    # =========================================================================
+    with ui.nav_panel("Einstellungen", value="settings"):
+
+        with ui.layout_columns(col_widths=[6, 6]):
+
+            # ----- User-Einstellungen (via Backend-API) ----------------------
+            with ui.card():
+                ui.card_header("Benutzereinstellungen")
+                ui.p(
+                    "Einstellungen werden ueber das Backend gespeichert (user_settings.json).",
+                    class_="text-muted small",
+                )
+
+                ui.p("Max. Verlaufseintraege (1–500)", class_="fw-semibold mt-2")
+                ui.input_slider(
+                    "sld_max_history", None,
+                    min=1, max=500, value=20, step=1,
+                )
+
+                @render.ui
+                def _settings_current():
+                    """Zeigt den aktuell gespeicherten Wert."""
+                    d = _settings_data()
+                    if not d:
+                        return ui.p("Nicht verbunden.", class_="text-muted small")
+                    val = d.get("max_history_items", "?")
+                    return ui.p(f"Gespeichert: {val} Eintraege", class_="text-muted small")
+
+                ui.input_action_button(
+                    "btn_save_settings", "Einstellungen speichern",
+                    class_="btn btn-primary w-100 mt-3",
+                )
+
+                @render.ui
+                def _settings_mismatch_warn():
+                    """Warnung wenn ANZAHL_VENTILE != Backend-max_valves."""
+                    d = _settings_data()
+                    backend_max = d.get("max_valves") if d else None
+                    if backend_max is not None and backend_max != ANZAHL_VENTILE:
+                        return ui.div(
+                            ui.tags.b("Hinweis: "),
+                            f"Backend max_valves={backend_max}, "
+                            f"Frontend zeigt {ANZAHL_VENTILE} Ventile. "
+                            "Bitte device_config.json und frontend_config.json pruefen "
+                            "und das Frontend neu starten.",
+                            class_="fault-banner mt-3",
+                        )
+                    return ui.div()
+
+            # ----- Systeminfo (readonly) -------------------------------------
+            with ui.card():
+                ui.card_header("Systeminfo")
+
+                @render.ui
+                def _settings_sysinfo():
+                    d = _settings_data()
+                    backend_max = d.get("max_valves", "?") if d else "?"
+                    rows = [
+                        ("Backend-URL",              BASE_URL),
+                        ("Ventile (Frontend)",        str(ANZAHL_VENTILE)),
+                        ("Ventile (Backend)",         str(backend_max)),
+                        ("Status-Poll",               f"{POLL_STATUS_S} s"),
+                        ("Slow-Poll",                 f"{POLL_SLOW_S} s"),
+                        ("Backend-Fail-Schwelle",     f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
+                    ]
+                    return ui.tags.table(
+                        ui.tags.tbody(*[
+                            ui.tags.tr(
+                                ui.tags.td(label, class_="text-muted small pe-3",
+                                           style="white-space:nowrap;width:1%;"),
+                                ui.tags.td(value, class_="small fw-semibold"),
+                            )
+                            for label, value in rows
+                        ]),
+                        class_="table table-sm",
+                    )
+
+        @reactive.effect
+        @reactive.event(input.btn_save_settings)
+        def _h_save_settings():
+            val = input.sld_max_history()
+            rv = _post("/settings", json={"max_history_items": val})
+            if rv and rv.ok:
+                ui.notification_show(
+                    f"Einstellungen gespeichert ({val} Eintraege).",
+                    type="message", duration=3,
+                )
+                _bump_status()
+            else:
+                ui.notification_show("Fehler beim Speichern.", type="error", duration=4)
+
+        @reactive.effect
+        def _sync_settings_slider():
+            """Slider beim Poll mit Backend-Wert synchronisieren."""
+            d = _settings_data()
+            if not d:
+                return
+            val = d.get("max_history_items")
+            if val is not None:
+                ui.update_slider("sld_max_history", value=int(val))
