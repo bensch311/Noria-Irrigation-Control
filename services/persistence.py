@@ -6,7 +6,8 @@ from core.state import state, state_lock, QueueItem, ScheduleRule, HistoryItem
 from core.config import (
     DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE,
     DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
-    TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED
+    TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
+    NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT,
 )
 from core.logging import log_event, logger
 
@@ -60,6 +61,10 @@ def _default_user_settings_payload() -> dict:
         "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "user": {
             "MAX_HISTORY_ITEMS": int(MAX_HISTORY_ITEMS),
+            "NAVBAR_TITLE": NAVBAR_TITLE,
+            "ACCENT_COLOR": ACCENT_COLOR,
+            "DEFAULT_DURATION": int(DEFAULT_DURATION),
+            "DEFAULT_TIME_UNIT": DEFAULT_TIME_UNIT,
         },
     }
 
@@ -178,16 +183,46 @@ def load_user_settings_from_disk():
         max_hist = MAX_HISTORY_ITEMS
     max_hist = max(1, max_hist)
 
+    navbar_title = str(user.get("NAVBAR_TITLE", NAVBAR_TITLE) or NAVBAR_TITLE).strip()
+    if not navbar_title:
+        navbar_title = NAVBAR_TITLE
+
+    accent_color = str(user.get("ACCENT_COLOR", ACCENT_COLOR) or ACCENT_COLOR).strip()
+    import re as _re
+    if not _re.match(r'^#[0-9a-fA-F]{6}$', accent_color):
+        accent_color = ACCENT_COLOR
+
+    try:
+        default_duration = max(1, min(120, int(user.get("DEFAULT_DURATION", DEFAULT_DURATION))))
+    except Exception:
+        default_duration = DEFAULT_DURATION
+
+    default_time_unit = str(user.get("DEFAULT_TIME_UNIT", DEFAULT_TIME_UNIT))
+    if default_time_unit not in ("Sekunden", "Minuten"):
+        default_time_unit = DEFAULT_TIME_UNIT
+
     with state_lock:
         state.max_history_items = max_hist
+        state.navbar_title = navbar_title
+        state.accent_color = accent_color
+        state.default_duration = default_duration
+        state.default_time_unit = default_time_unit
 
 
 def save_user_settings_to_disk():
     with state_lock:
         max_hist = int(getattr(state, "max_history_items", MAX_HISTORY_ITEMS))
+        navbar_title = str(getattr(state, "navbar_title", NAVBAR_TITLE))
+        accent_color = str(getattr(state, "accent_color", ACCENT_COLOR))
+        default_duration = int(getattr(state, "default_duration", DEFAULT_DURATION))
+        default_time_unit = str(getattr(state, "default_time_unit", DEFAULT_TIME_UNIT))
 
     payload = _default_user_settings_payload()
     payload["user"]["MAX_HISTORY_ITEMS"] = max_hist
+    payload["user"]["NAVBAR_TITLE"] = navbar_title
+    payload["user"]["ACCENT_COLOR"] = accent_color
+    payload["user"]["DEFAULT_DURATION"] = default_duration
+    payload["user"]["DEFAULT_TIME_UNIT"] = default_time_unit
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(USER_SETTINGS_FILE, payload)
 

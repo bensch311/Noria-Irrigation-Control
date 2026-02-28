@@ -33,13 +33,17 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 def get_settings():
     """Gibt aktuelle User-Settings zurueck.
 
-    max_valves wird als readonly-Info mitgeliefert, damit das Frontend
-    bei ANZAHL_VENTILE != max_valves warnen kann.
+    max_valves: readonly, kommt aus device_config.json. Damit kann das
+    Frontend bei ANZAHL_VENTILE != max_valves warnen.
     """
     with state_lock:
         return {
             "max_history_items": int(getattr(state, "max_history_items", 20)),
-            "max_valves": int(getattr(state, "max_valves", 6)),  # readonly
+            "navbar_title":       str(getattr(state, "navbar_title", "Bewaesserungscomputer")),
+            "accent_color":       str(getattr(state, "accent_color", "#82372a")),
+            "default_duration":   int(getattr(state, "default_duration", 5)),
+            "default_time_unit":  str(getattr(state, "default_time_unit", "Minuten")),
+            "max_valves":         int(getattr(state, "max_valves", 6)),  # readonly
         }
 
 
@@ -54,6 +58,10 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
     """
     with state_lock:
         state.max_history_items = req.max_history_items
+        state.navbar_title      = req.navbar_title
+        state.accent_color      = req.accent_color
+        state.default_duration  = req.default_duration
+        state.default_time_unit = req.default_time_unit
 
     save_user_settings_to_disk()
 
@@ -61,9 +69,17 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         "settings_updated",
         source="manual",
         max_history_items=req.max_history_items,
+        navbar_title=req.navbar_title,
+        accent_color=req.accent_color,
+        default_duration=req.default_duration,
+        default_time_unit=req.default_time_unit,
     )
 
     return {
-        "ok": True,
+        "ok":               True,
         "max_history_items": req.max_history_items,
+        "navbar_title":      req.navbar_title,
+        "accent_color":      req.accent_color,
+        "default_duration":  req.default_duration,
+        "default_time_unit": req.default_time_unit,
     }

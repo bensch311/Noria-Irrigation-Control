@@ -4,7 +4,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
-from core.config import MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED
+from core.config import MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED, NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT
 
 shutdown_event = threading.Event()
 threads: list[threading.Thread] = []
@@ -103,6 +103,12 @@ class RunState:
 
     # user settings (user_settings.json)
     max_history_items: int = 20
+
+    # user settings – display & defaults (user_settings.json)
+    navbar_title: str = NAVBAR_TITLE
+    accent_color: str = ACCENT_COLOR
+    default_duration: int = DEFAULT_DURATION
+    default_time_unit: str = DEFAULT_TIME_UNIT
 
     # hard limits (device_config.json)
     hard_max_runtime_s: int = 60 * 60

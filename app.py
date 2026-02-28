@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import datetime
+import json as _json_mod
 import re
 from pathlib import Path
 from typing import Any
@@ -271,8 +272,13 @@ ui.tags.head(
     ),
 )
 
-ACCENT = "#82372a" # Akzentfarbe festlegen
-ui.tags.style(f""":root {{ --accent: {ACCENT}; }}""")
+# Initiale Defaults – werden nach dem ersten _settings_data()-Poll durch
+# die reaktiven Renderer überschrieben.
+ACCENT_COLOR_DEFAULT = "#82372a"
+NAVBAR_TITLE_DEFAULT = "Bewaesserungscomputer"
+
+# Initiales CSS mit Fallback-Farbe (sofort beim Laden aktiv)
+ui.tags.style(f":root {{ --accent: {ACCENT_COLOR_DEFAULT}; }}")
 ui.include_css("www/app.css")
 
 # =============================================================================
@@ -326,6 +332,13 @@ def _settings_data() -> dict:
     _status_trigger.get()
     return _json_or_none(_get("/settings")) or {}
 
+# Letzter angewendeter dur/unit-Wert – verhindert Reset der Slider bei jedem Poll
+_last_applied_dur_unit: reactive.Value = reactive.Value({})
+# Wird auf True gesetzt sobald Settings einmalig aus dem Backend geladen wurden.
+# Verhindert dass txt_navbar_title und clr_accent_color bei jedem Poll
+# den User-Input ueberschreiben.
+_settings_initialized: reactive.Value = reactive.Value(False)
+
 @reactive.effect
 def _health_poll():
     reactive.invalidate_later(POLL_STATUS_S)
@@ -369,7 +382,30 @@ def _h_reload_key():
 # NAVBAR
 # =============================================================================
 
-with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
+# Dynamischer Accent-Style: überschreibt den statischen Block sobald
+# _settings_data() den Backend-Wert liefert.
+@render.ui
+def _dynamic_accent_style():
+    d = _settings_data()
+    color = d.get("accent_color", ACCENT_COLOR_DEFAULT) if d else ACCENT_COLOR_DEFAULT
+    return ui.tags.style(f":root {{ --accent: {color}; }}")
+
+# Dynamischer Navbar-Titel: injiziert ein kleines Script das den
+# .navbar-brand-Text im DOM aktualisiert sobald settings geladen sind.
+@render.ui
+def _dynamic_navbar_title_js():
+    d = _settings_data()
+    title = d.get("navbar_title", NAVBAR_TITLE_DEFAULT) if d else NAVBAR_TITLE_DEFAULT
+    title_js = _json_mod.dumps(title)
+    return ui.tags.script(f"""
+        (function() {{
+            var els = document.querySelectorAll('.navbar-brand');
+            if (els.length) els[0].childNodes[0] && (els[0].childNodes[0].textContent = {title_js});
+            document.title = {title_js};
+        }})();
+    """)
+
+with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
 
     with ui.nav_control():
 
@@ -1032,6 +1068,67 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
     with ui.nav_panel("Zeitplaene", value="schedule"):
 
         _schedule_cache = reactive.Value([])
+        # Selektionszustand wird NICHT über Shiny-Reaktivität verwaltet,
+        # sondern über window.schSelectedIds im Browser (JS-Set).
+        # Grund: @render.ui re-initialisiert alle enthaltenen Inputs bei
+        # jedem Poll – Shiny-basiertes State-Tracking ist zirkulär und
+        # nicht zuverlässig. window.schSelectedIds überlebt Re-Renders.
+
+        # Statischer JS-Block: wird einmalig beim Laden der Seite initialisiert.
+        #
+        # Warum MutationObserver statt Inline-Script in @render.ui?
+        # @render.ui führt Inline-Scripts WÄHREND Shinys bindAll()-Durchlauf aus.
+        # Shinys Input-Initialisierung kann danach Checkbox-Zustände überschreiben.
+        # Der MutationObserver feuert NACH abgeschlossenem DOM-Update, unabhängig
+        # vom Shiny-Render-Zyklus – keine Race Conditions möglich.
+        ui.tags.script("""
+            window.schSelectedIds = window.schSelectedIds || new Set();
+
+            window.schCbChange = function(el) {
+                var id = el.getAttribute('data-sch-id');
+                if (el.checked) {
+                    window.schSelectedIds.add(id);
+                } else {
+                    window.schSelectedIds.delete(id);
+                }
+                Shiny.setInputValue(
+                    'sch_checked_ids',
+                    Array.from(window.schSelectedIds),
+                    {priority: 'event'}
+                );
+            };
+
+            window.schClearSelection = function() {
+                window.schSelectedIds.clear();
+                Shiny.setInputValue('sch_checked_ids', [], {priority: 'event'});
+            };
+
+            // MutationObserver: überwacht den _schedule_table-Output-Container.
+            // Sobald Shiny die Tabelle neu rendert (childList-Änderung), werden
+            // alle Checkboxen sofort auf den Zustand aus window.schSelectedIds gesetzt.
+            // Startet sobald das Element im DOM vorhanden ist.
+            function schSetupObserver() {
+                var target = document.getElementById('_schedule_table');
+                if (!target) {
+                    setTimeout(schSetupObserver, 150);
+                    return;
+                }
+                var observer = new MutationObserver(function() {
+                    document.querySelectorAll('[data-sch-id]').forEach(function(el) {
+                        el.checked = window.schSelectedIds.has(
+                            el.getAttribute('data-sch-id')
+                        );
+                    });
+                });
+                observer.observe(target, { childList: true, subtree: true });
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', schSetupObserver);
+            } else {
+                schSetupObserver();
+            }
+        """)
 
         with ui.layout_columns(col_widths=[8, 4]):
 
@@ -1070,8 +1167,19 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         rows.append(
                             ui.tags.tr(
                                 ui.tags.td(
-                                    ui.input_checkbox(f"cb_sch_{idx}", None, value=False),
-                                    style="width:1%;",
+                                    # Natives HTML-Checkbox statt ui.input_checkbox:
+                                    # Shiny würde dynamische Inputs bei jedem Re-Render
+                                    # zurücksetzen. Der checked-Zustand wird via
+                                    # window.schSelectedIds in JS gehalten und durch
+                                    # den restore-Script nach jedem Re-Render gesetzt.
+                                    ui.tags.input(
+                                        type="checkbox",
+                                        id=f"cb_sch_{idx}",
+                                        **{"data-sch-id": item.get("id", "")},
+                                        onchange="window.schCbChange(this)",
+                                        style="cursor:pointer;width:1.1rem;height:1.1rem;",
+                                    ),
+                                    style="width:1%;text-align:center;vertical-align:middle;",
                                 ),
                                 ui.tags.td(zone_label),
                                 ui.tags.td(fmt_weekdays(weekdays)),
@@ -1116,15 +1224,24 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     )
 
                 def _selected_ids() -> list[str]:
-                    items = _schedule_cache.get()
-                    selected = []
-                    for idx in range(len(items)):
-                        try:
-                            if input[f"cb_sch_{idx}"]():
-                                selected.append(items[idx]["id"])
-                        except Exception:
-                            pass
-                    return selected
+                    """Liest selektierte IDs aus dem Shiny-Input sch_checked_ids.
+
+                    Wird von window.schCbChange via Shiny.setInputValue befüllt.
+                    """
+                    try:
+                        val = input.sch_checked_ids()
+                        return list(val) if val else []
+                    except Exception:
+                        return []
+
+                def _clear_selection():
+                    """Leert window.schSelectedIds im Browser und den Shiny-Input."""
+                    ui.insert_ui(
+                        selector="body",
+                        where="beforeEnd",
+                        ui=ui.tags.script("window.schClearSelection();"),
+                        immediate=True,
+                    )
 
                 @reactive.effect
                 @reactive.event(input.btn_sch_enable_sel)
@@ -1137,6 +1254,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         1 for sid in ids
                         if (rv := _post(f"/schedule/enable/{sid}")) and rv.ok
                     )
+                    _clear_selection()
                     ui.notification_show(f"{ok_count}/{len(ids)} aktiviert.", type="message", duration=3)
                     _bump_schedule()
 
@@ -1151,6 +1269,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         1 for sid in ids
                         if (rv := _post(f"/schedule/disable/{sid}")) and rv.ok
                     )
+                    _clear_selection()
                     ui.notification_show(f"{ok_count}/{len(ids)} deaktiviert.", type="message", duration=3)
                     _bump_schedule()
 
@@ -1163,6 +1282,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         return
                     rv = _delete("/schedule", json=ids)
                     if rv and rv.ok:
+                        _clear_selection()
                         ui.notification_show(f"{len(ids)} geloescht.", type="message", duration=3)
                     else:
                         ui.notification_show("Fehler beim Loeschen.", type="error", duration=4)
@@ -1299,7 +1419,7 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                 }
 
                 rows = []
-                for item in reversed(items):
+                for item in (items):
                     ts   = item.get("ts_end", "")
                     zone = item.get("zone", "?")
                     dur  = item.get("duration_s", 0)
@@ -1346,32 +1466,78 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
 
         with ui.layout_columns(col_widths=[6, 6]):
 
-            # ----- User-Einstellungen (via Backend-API) ----------------------
+            # ----- Benutzereinstellungen (via Backend-API) -------------------
             with ui.card():
                 ui.card_header("Benutzereinstellungen")
                 ui.p(
-                    "Einstellungen werden ueber das Backend gespeichert (user_settings.json).",
+                    "Alle Einstellungen werden im Backend gespeichert (user_settings.json).",
                     class_="text-muted small",
                 )
 
-                ui.p("Max. Verlaufseintraege (1–500)", class_="fw-semibold mt-2")
-                ui.input_slider(
-                    "sld_max_history", None,
-                    min=1, max=500, value=20, step=1,
+                # --- Verlauf -------------------------------------------------
+                ui.p("Max. Verlaufseintraege (1–500)", class_="fw-semibold mt-3")
+                ui.input_slider("sld_max_history", None, min=1, max=500, value=20, step=1)
+
+                # --- Navbar-Titel --------------------------------------------
+                ui.p("Navbar-Titel", class_="fw-semibold mt-3")
+                ui.input_text(
+                    "txt_navbar_title", None,
+                    value="Bewaesserungscomputer",
+                    placeholder="z.B. Hof Muster – Bewaesserung",
                 )
 
-                @render.ui
-                def _settings_current():
-                    """Zeigt den aktuell gespeicherten Wert."""
-                    d = _settings_data()
-                    if not d:
-                        return ui.p("Nicht verbunden.", class_="text-muted small")
-                    val = d.get("max_history_items", "?")
-                    return ui.p(f"Gespeichert: {val} Eintraege", class_="text-muted small")
+                # --- Akzentfarbe (Color-Picker) ------------------------------
+                ui.p("Akzentfarbe", class_="fw-semibold mt-3")
+                with ui.div(class_="d-flex align-items-center gap-3 mb-1"):
+                    ui.tags.input(
+                        id="clr_accent_color",
+                        type="color",
+                        value="#82372a",
+                        title="Akzentfarbe waehlen",
+                        style=(
+                            "width:52px;height:40px;padding:3px;"
+                            "border-radius:8px;cursor:pointer;"
+                            "border:1px solid var(--bs-border-color);"
+                        ),
+                        # Shiny.setInputValue: offizieller Weg um nativen
+                        # HTML-Input an Shinys Input-System anzubinden
+                        oninput=(
+                            "Shiny.setInputValue('clr_accent_color', this.value, "
+                            "{priority: 'event'});"
+                        ),
+                        onchange=(
+                            "Shiny.setInputValue('clr_accent_color', this.value, "
+                            "{priority: 'event'});"
+                        ),
+                    )
+                    @render.ui
+                    def _accent_hex_label():
+                        val = input.clr_accent_color() if hasattr(input, 'clr_accent_color') else None
+                        if not val:
+                            d = _settings_data()
+                            val = d.get("accent_color", ACCENT_COLOR_DEFAULT) if d else ACCENT_COLOR_DEFAULT
+                        return ui.span(val, class_="text-muted small font-monospace")
+
+                    ui.input_action_button(
+                        "btn_reset_accent", "Zurücksetzen",
+                        class_="btn btn-sm btn-outline-secondary",
+                        title=f"Akzentfarbe auf {ACCENT_COLOR_DEFAULT} zurücksetzen",
+                    )
+
+                # --- Standard-Laufzeit + Zeiteinheit -------------------------
+                ui.p("Standard-Laufzeit fuer Ventil-Slider (1–120)", class_="fw-semibold mt-3")
+                ui.input_slider("sld_default_duration", None, min=1, max=120, value=5, step=1)
+
+                ui.p("Standard-Zeiteinheit fuer Ventil-Radiobuttons", class_="fw-semibold mt-2")
+                ui.input_radio_buttons(
+                    "rb_default_time_unit", None,
+                    choices={"Minuten": "Minuten", "Sekunden": "Sekunden"},
+                    selected="Minuten", inline=True,
+                )
 
                 ui.input_action_button(
                     "btn_save_settings", "Einstellungen speichern",
-                    class_="btn btn-primary w-100 mt-3",
+                    class_="btn btn-primary w-100 mt-4",
                 )
 
                 @render.ui
@@ -1399,12 +1565,12 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                     d = _settings_data()
                     backend_max = d.get("max_valves", "?") if d else "?"
                     rows = [
-                        ("Backend-URL",              BASE_URL),
-                        ("Ventile (Frontend)",        str(ANZAHL_VENTILE)),
-                        ("Ventile (Backend)",         str(backend_max)),
-                        ("Status-Poll",               f"{POLL_STATUS_S} s"),
-                        ("Slow-Poll",                 f"{POLL_SLOW_S} s"),
-                        ("Backend-Fail-Schwelle",     f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
+                        ("Backend-URL",          BASE_URL),
+                        ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
+                        ("Ventile (Backend)",     str(backend_max)),
+                        ("Status-Poll",           f"{POLL_STATUS_S} s"),
+                        ("Slow-Poll",             f"{POLL_SLOW_S} s"),
+                        ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
                     ]
                     return ui.tags.table(
                         ui.tags.tbody(*[
@@ -1418,26 +1584,136 @@ with ui.navset_bar(title="Bewaesserungscomputer", id="main_nav"):
                         class_="table table-sm",
                     )
 
+        # ----- Speichern -----------------------------------------------------
         @reactive.effect
         @reactive.event(input.btn_save_settings)
         def _h_save_settings():
-            val = input.sld_max_history()
-            rv = _post("/settings", json={"max_history_items": val})
+            hist_val  = input.sld_max_history()
+            title_val = input.txt_navbar_title() or NAVBAR_TITLE_DEFAULT
+            # clr_accent_color kommt via Shiny.setInputValue; Fallback auf Default
+            try:
+                color_val = input.clr_accent_color()
+            except Exception:
+                color_val = None
+            if not color_val or not re.match(r'^#[0-9a-fA-F]{6}$', color_val):
+                d = _settings_data()
+                color_val = d.get("accent_color", ACCENT_COLOR_DEFAULT) if d else ACCENT_COLOR_DEFAULT
+
+            dur_val  = input.sld_default_duration()
+            unit_val = input.rb_default_time_unit()
+
+            rv = _post("/settings", json={
+                "max_history_items": hist_val,
+                "navbar_title":      title_val.strip(),
+                "accent_color":      color_val.lower(),
+                "default_duration":  dur_val,
+                "default_time_unit": unit_val,
+            })
             if rv and rv.ok:
                 ui.notification_show(
-                    f"Einstellungen gespeichert ({val} Eintraege).",
-                    type="message", duration=3,
+                    "Einstellungen gespeichert.", type="message", duration=3,
                 )
+                # Flag zurücksetzen → nächster Poll lädt txt + color neu aus Backend
+                # (stellt sicher dass gespeicherter Wert korrekt angezeigt wird)
+                _settings_initialized.set(False)
                 _bump_status()
+            elif rv and rv.status_code == 422:
+                ui.notification_show(
+                    "Ungueltige Eingabe – bitte Werte pruefen.", type="error", duration=4,
+                )
             else:
                 ui.notification_show("Fehler beim Speichern.", type="error", duration=4)
 
+        # ----- Sync: Settings → UI-Elemente ----------------------------------
         @reactive.effect
-        def _sync_settings_slider():
-            """Slider beim Poll mit Backend-Wert synchronisieren."""
+        def _sync_settings_to_ui():
+            """Synct Settings-Inputs aus dem Backend.
+
+            Drei Kategorien mit unterschiedlichem Sync-Verhalten:
+
+            A) Immer sync (kein freier User-Input):
+               sld_max_history, sld_default_duration, rb_default_time_unit
+
+            B) Nur einmalig beim ersten Load + nach erfolgreichem Save:
+               txt_navbar_title, clr_accent_color
+               → _settings_initialized verhindert, dass der User-Input
+                 bei jedem 5s-Poll überschrieben wird.
+
+            C) Andere Tabs (Ventile/Queue/Schedule-Slider+Radio):
+               Nur bei tatsächlicher Wertänderung (_last_applied_dur_unit).
+            """
             d = _settings_data()
             if not d:
                 return
-            val = d.get("max_history_items")
-            if val is not None:
-                ui.update_slider("sld_max_history", value=int(val))
+
+            # A) Immer sync ──────────────────────────────────────────────────
+            hist = d.get("max_history_items")
+            if hist is not None:
+                ui.update_slider("sld_max_history", value=int(hist))
+
+            # B) Nur beim ersten Load ────────────────────────────────────────
+            if not _settings_initialized.get():
+                _settings_initialized.set(True)
+
+                title = d.get("navbar_title", NAVBAR_TITLE_DEFAULT)
+                ui.update_text("txt_navbar_title", value=title)
+
+                color = d.get("accent_color", ACCENT_COLOR_DEFAULT)
+                _apply_color_picker(color)
+
+            # C) Slider/Radios in allen Tabs: nur bei Wertänderung ───────────
+            dur  = int(d.get("default_duration", 5))
+            unit = d.get("default_time_unit", "Minuten")
+            last = _last_applied_dur_unit.get()
+            if last.get("dur") == dur and last.get("unit") == unit:
+                return
+            _last_applied_dur_unit.set({"dur": dur, "unit": unit})
+
+            ui.update_slider("sld_default_duration", value=dur)
+            ui.update_radio_buttons("rb_default_time_unit", selected=unit)
+
+            # Ventile-Tab: alle Zone-Slider + Radiobuttons
+            for i in range(1, ANZAHL_VENTILE + 1):
+                ui.update_slider(f"sld_{i}", value=dur)
+                ui.update_radio_buttons(f"rb_{i}", selected=unit)
+
+            # Warteschlange-Tab
+            ui.update_slider("q_add_dur", value=dur)
+            ui.update_radio_buttons("q_add_unit", selected=unit)
+
+            # Zeitplaene-Tab
+            ui.update_slider("sch_dur", value=dur)
+            ui.update_radio_buttons("sch_unit", selected=unit)
+
+        # Helper: Color-Picker DOM-Wert via JS setzen
+        def _apply_color_picker(color: str):
+            """Setzt Color-Picker DOM-Wert UND Shinys internen Input-State.
+
+            Nur den DOM-Wert per JS zu setzen reicht nicht: input.clr_accent_color()
+            liest den Shiny-State, nicht den DOM-Wert. Shiny.setInputValue synct beide.
+            """
+            color_js = _json_mod.dumps(color)
+            ui.insert_ui(
+                selector="body",
+                where="beforeEnd",
+                ui=ui.tags.script(
+                    f"(function(){{"
+                    f"  var el=document.getElementById('clr_accent_color');"
+                    f"  if(el) el.value={color_js};"
+                    f"  Shiny.setInputValue('clr_accent_color', {color_js}, {{priority: 'event'}});"
+                    f"}})();"
+                ),
+                immediate=True,
+            )
+
+        # Reset-Button: Farbe auf Code-Default zurücksetzen
+        @reactive.effect
+        @reactive.event(input.btn_reset_accent)
+        def _h_reset_accent():
+            _apply_color_picker(ACCENT_COLOR_DEFAULT)
+
+        # Nach erfolgreichem Save: txt + color neu laden (einmalige Ausnahme)
+        # Wird durch _bump_status() ausgelöst den _h_save_settings aufruft.
+        # Da _settings_initialized True ist, würde B) nicht mehr greifen.
+        # Lösung: Save setzt Flag zurück → nächster Poll lädt Werte neu.
+        # (Implementierung: _h_save_settings setzt _settings_initialized.set(False))

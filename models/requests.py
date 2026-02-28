@@ -88,9 +88,37 @@ class ParallelModeRequest(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     """Request-Modell für POST /settings.
 
-    max_history_items:
-      Anzahl der Verlaufseintraege die das Backend speichert.
-      ge=1: mindestens ein Eintrag sinnvoll.
-      le=500: Hard-Cap – verhindert unbegrenztes Wachstum der history.json.
+    max_history_items   : Anzahl Verlaufseintraege (1–500).
+    navbar_title        : Angezeigter Titel in der Navigationsleiste (1–50 Zeichen).
+    accent_color        : Akzentfarbe als Hex-String, z.B. "#82372a".
+    default_duration    : Standardwert der Dauer-Slider (1–120).
+    default_time_unit   : Standard-Zeiteinheit fuer Dauer-Radiobuttons.
+
+    max_history_items ist required (bestehende API-Kompatibilitaet).
+    Alle anderen Felder haben Defaults und sind optional.
     """
     max_history_items: int = Field(..., ge=1, le=500)
+    navbar_title: str = Field("Bewaesserungscomputer", min_length=1, max_length=50)
+    accent_color: str = Field("#82372a")
+    default_duration: int = Field(5, ge=1, le=120)
+    default_time_unit: Literal["Sekunden", "Minuten"] = "Minuten"
+
+    @field_validator("navbar_title")
+    @classmethod
+    def validate_navbar_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Navbar-Titel darf nicht leer sein.")
+        return v
+
+    @field_validator("accent_color")
+    @classmethod
+    def validate_accent_color(cls, v: str) -> str:
+        import re
+        v = v.strip().lower()
+        if not re.match(r'^#[0-9a-f]{6}$', v):
+            raise ValueError(
+                f"Ungueltige Akzentfarbe {v!r}: muss ein 6-stelliger Hex-Farbwert sein "
+                "(z.B. '#82372a')."
+            )
+        return v
