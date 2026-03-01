@@ -292,19 +292,6 @@ ui.include_css("www/app.css")
 
 _ = ui.page_opts(title="", window_title="Bewaesserung", lang="de")
 
-# ui.div(
-#     ui.div(
-#         ui.div(
-#             ui.div(
-#                 ui.div("Bewaesserungscomputer", class_="app-title"),
-#                 ui.div("Steuerung • Queue • Zeitplaene • Verlauf", class_="app-subtitle"),
-#             ),
-#             style="display:flex; justify-content:space-between; align-items:flex-end; gap:1rem;",
-#         ),
-#         class_="container-fluid app-shell",
-#     ),
-# )
-
 # -------------------------------------------------------------------------
 # GETEILTE REACTIVE CALCS - Seitenebene
 # -------------------------------------------------------------------------
@@ -417,20 +404,9 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
         @render.ui
         def _nav_clock():
             reactive.invalidate_later(1)
-            # WICHTIG: _backend_fail_streak lesen statt _backend_ok!
-            # _backend_ok kann nach Modal-Dismiss kurz seinen Initialwert (True)
-            # zeigen. _backend_fail_streak hingegen akkumuliert monoton und ist
-            # die einzige "Wahrheitsquelle" fuer den aktuellen Verbindungsstatus.
-            streak = _backend_fail_streak.get()
-            ok     = streak < BACKEND_FAIL_THRESHOLD
             now    = datetime.datetime.now().strftime("%H:%M:%S")
             return ui.div(
                 ui.span(now, id="nav-clock"),
-                ui.tags.br(),
-                ui.span(
-                    "Backend OK" if ok else "Backend OFFLINE",
-                    class_="nav-backend-ok" if ok else "nav-backend-err",
-                ),
                 class_="nav-status-box",
             )
 
