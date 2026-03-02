@@ -37,24 +37,7 @@ body {
   color: var(--text);
 }
 
-/* Content-Bereich begrenzt auf 1280px */
-.container { max-width: 1280px; }
-
-/* Navbar: alle Bootstrap Container-Varianten explizit auf volle Breite.
-   Deckt ab ob Shiny .container oder .container-fluid oder eine
-   responsive Variante (.container-lg etc.) verwendet. */
-.navbar .container,
-.navbar .container-fluid,
-.navbar .container-sm,
-.navbar .container-md,
-.navbar .container-lg,
-.navbar .container-xl,
-.navbar .container-xxl {
-  max-width: none !important;
-  width: 100% !important;
-  padding-left: 1.25rem !important;
-  padding-right: 1.25rem !important;
-}
+.container, .container-fluid { max-width: 1280px; }
 
 .app-shell { padding: 0.9rem 0.9rem 1.4rem; }
 
@@ -110,12 +93,11 @@ body {
 /* ---------- CARDS ---------- */
 .card, .bslib-card {
   background: #ffffff !important;
-  border: 1px solid rgba(15, 23, 42, 0.07) !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
   border-radius: var(--radius2) !important;
   box-shadow:
-    0 2px 4px rgba(15, 23, 42, 0.04),
-    0 6px 16px rgba(15, 23, 42, 0.07),
-    0 16px 32px rgba(15, 23, 42, 0.05) !important;
+    0 220px 550px rgba(15, 23, 42, 0.14),
+    0 40px 100px rgba(15, 23, 42, 0.06) !important;
   overflow: hidden;
 }
 
@@ -402,15 +384,6 @@ input[data-sch-id]:focus {
   display: inline-block;
   box-shadow: 0 0 0 3px rgba(15,23,42,0.03);
 }
-
-/* shiny-html-output-Wrapper des valve-dot als Flex-Item: margin-left:auto
-   auf dem span wirkt nur wenn der Wrapper selbst display:contents ist,
-   sonst nimmt der block-Wrapper keinen auto-margin an.
-   Wir setzen den Wrapper auf display:contents damit das span direkt
-   im Flex-Container landet. */
-.card-header .shiny-html-output:has(.valve-dot) {
-  display: contents;
-}
 .valve-dot.on {
   background: rgba(34, 197, 94, 0.92);
   box-shadow: 0 0 0 3px rgba(34,197,94,0.10), 0 0 18px rgba(34,197,94,0.14);
@@ -631,29 +604,4 @@ input[data-sch-id]:focus {
   letter-spacing: 0.12em;
   color: rgba(17, 24, 39, 0.42);
   margin: 0 0 0.65rem;
-}
-
-/* ---------- Hardware-Fault Modal ---------- */
-.fault-modal-body p {
-  font-size: 0.95rem;
-}
-
-.modal-title {
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-/* Modal bekommt leichten roten Rand als visuellen Hinweis */
-.modal-content {
-  border: 1.5px solid rgba(239, 68, 68, 0.18) !important;
-  border-radius: var(--radius2) !important;
-  box-shadow: 0 8px 40px rgba(239, 68, 68, 0.10), 0 2px 8px rgba(15,23,42,0.10) !important;
-}
-
-.modal-header {
-  border-bottom: 1px solid rgba(239, 68, 68, 0.12) !important;
-}
-
-.modal-footer {
-  border-top: 1px solid rgba(15, 23, 42, 0.07) !important;
 }

@@ -326,10 +326,6 @@ def _settings_data() -> dict:
 
 # Letzter angewendeter dur/unit-Wert – verhindert Reset der Slider bei jedem Poll
 _last_applied_dur_unit: reactive.Value = reactive.Value({})
-# Zustandsvariable für das Hardware-Fault-Modal.
-# Verhindert dass modal_show() bei jedem Poll-Zyklus erneut aufgerufen
-# wird und das Modal flackert. Übergang False→True öffnet, True→False schließt.
-_fault_modal_open: reactive.Value = reactive.Value(False)
 # Wird auf True gesetzt sobald Settings einmalig aus dem Backend geladen wurden.
 # Verhindert dass txt_navbar_title und clr_accent_color bei jedem Poll
 # den User-Input ueberschreiben.
@@ -401,7 +397,7 @@ def _dynamic_navbar_title_js():
         }})();
     """)
 
-with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
+with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav"):
 
     with ui.nav_control():
 
@@ -419,72 +415,30 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
     # =========================================================================
     with ui.nav_panel("Dashboard", value="dashboard"):
 
-        # Hardware-Fault Modal – Zustandsmaschine:
-        # _fault_modal_open merkt sich ob das Modal gerade offen ist.
-        # modal_show() wird NUR bei Übergang False→True aufgerufen,
-        # modal_remove() NUR bei Übergang True→False.
-        # Dadurch kein Flackern bei jedem Poll-Zyklus.
-        @reactive.effect
-        def _fault_modal_controller():
+        @render.ui
+        def _fault_banner():
             d = _status_data()
-            faulted = bool(d.get("hw_faulted", False)) if d else False
-            currently_open = _fault_modal_open.get()
+            if not d.get("hw_faulted", False):
+                return ui.div()
+            reason = d.get("hw_fault_reason", "")
+            zone   = d.get("hw_fault_zone", "?")
+            return ui.div(
+                ui.tags.b("Hardware-Fault"),
+                f" - Zone {zone}",
+                (f": {reason}" if reason else ""),
+                class_="fault-banner",
+            )
 
-            if faulted and not currently_open:
-                # Fault neu aufgetreten → Modal öffnen
-                reason = d.get("hw_fault_reason", "") if d else ""
-                zone   = d.get("hw_fault_zone", "?") if d else "?"
-                since  = d.get("hw_fault_since", "") if d else ""
-                _fault_modal_open.set(True)
-                ui.modal_show(
-                    ui.modal(
-                        ui.div(
-                            ui.tags.p(
-                                ui.tags.b("Zone: "), str(zone),
-                                style="margin-bottom:0.35rem;",
-                            ),
-                            ui.tags.p(
-                                ui.tags.b("Ursache: "), reason or "Unbekannt",
-                                style="margin-bottom:0.35rem;",
-                            ),
-                            *(
-                                [ui.tags.p(
-                                    ui.tags.b("Seit: "), since,
-                                    class_="text-muted small",
-                                )]
-                                if since else []
-                            ),
-                            ui.tags.hr(),
-                            ui.tags.p(
-                                "Bitte Ventil und Hardware prüfen, bevor Sie den Fehler quittieren.",
-                                class_="text-muted small",
-                            ),
-                            class_="fault-modal-body",
-                        ),
-                        title=ui.div(
-                            ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
-                                      style="color:#dc2626;"),
-                            "Hardware-Fehler erkannt",
-                        ),
-                        footer=ui.div(
-                            ui.input_action_button(
-                                "btn_fault_clear",
-                                ui.div(
-                                    ui.tags.i(class_="bi bi-check2-circle me-1"),
-                                    "Fehler quittieren",
-                                ),
-                                class_="btn btn-warning",
-                            ),
-                        ),
-                        easy_close=False,
-                        size="m",
-                    )
-                )
-            elif not faulted and currently_open:
-                # Fault behoben (z.B. extern) → Modal schliessen
-                _fault_modal_open.set(False)
-                ui.modal_remove()
-            # faulted + currently_open → nichts tun, Modal bleibt offen
+        @render.ui
+        def _fault_clear_btn():
+            if not _status_data().get("hw_faulted", False):
+                return ui.div()
+            return ui.div(
+                ui.input_action_button(
+                    "btn_fault_clear", "Hardware-Fault quittieren",
+                    class_="btn btn-warning mb-3",
+                ),
+            )
 
         # ===== Overview Tiles Row (NEU) =====
         @render.ui
@@ -741,10 +695,6 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
         def _h_fault_clear():
             r = _post("/fault/clear")
             if r and r.ok:
-                # Flag vor modal_remove() zurücksetzen damit der Controller
-                # beim nächsten Poll nicht erneut öffnet
-                _fault_modal_open.set(False)
-                ui.modal_remove()
                 ui.notification_show("Hardware-Fault quittiert.", type="message", duration=3)
             else:
                 ui.notification_show("Quittierung fehlgeschlagen.", type="error", duration=4)
@@ -839,7 +789,7 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
                 with ui.card(id=f"valve_card_{_vi}"):
 
                     with ui.card_header():
-                        with ui.div(style="display:flex; align-items:center; width:100%;"):
+                        with ui.div(style="display:flex; justify-content:space-between; align-items:center;"):
                             ui.tags.b(f"Zone {_vi}")
 
                             @output(id=f"valve_dot_{_vi}")
@@ -847,13 +797,10 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
                             def _vdot(_z=_vi):
                                 d = _status_data()
                                 is_running = str(_z) in d.get("active_runs", {})
-                                # margin-left:auto am span selbst schiebt es
-                                # im Flex-Container zuverlässig nach rechts.
                                 return ui.span(
                                     "",
                                     class_=f"valve-dot {'on' if is_running else 'off'}",
                                     title="Laeuft" if is_running else "Bereit",
-                                    style="margin-left:auto; display:block; flex-shrink:0;",
                                 )
 
                     with ui.div(class_="valve-status-area px-3 pt-2"):
