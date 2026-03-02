@@ -155,8 +155,20 @@ class TestQueueAddRequestTimeUnit:
         resp = client.post("/queue/add", json=_queue_payload(duration=0))
         assert resp.status_code == 422
 
-    def test_zone_zero_rejected(self, client):
+    def test_zone_zero_adds_all_valves(self, client):
+        """zone=0 (Alle Zonen) ist gültig und fügt max_valves Items ein.
+
+        QueueAddRequest erlaubt zone=0 seit der 'Alle Zonen'-Erweiterung.
+        StartRequest (andere Klasse) lehnt zone=0 weiterhin mit 422 ab.
+        """
         resp = client.post("/queue/add", json=_queue_payload(zone=0))
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["zones_added"] >= 1
+
+    def test_zone_negative_rejected(self, client):
+        """Negative zone-Werte verletzen ge=0 → 422."""
+        resp = client.post("/queue/add", json=_queue_payload(zone=-1))
         assert resp.status_code == 422
 
 

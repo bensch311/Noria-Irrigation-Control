@@ -73,10 +73,37 @@ def test_queue_add_multiple_items(client):
         assert [i.zone for i in state.queue] == [1, 2, 3]
 
 
-def test_queue_add_invalid_zone_zero(client):
-    # zone=0 verletzt das Pydantic-Constraint ge=1 -> 422 (Pydantic validiert vor dem Handler).
-    # 422 ist korrekt: Strukturell ungueltige Eingabe wird von Pydantic abgelehnt.
+def test_queue_add_zone_zero_adds_all_valves(client):
+    """zone=0 (Alle Zonen) fügt max_valves Items in die Queue ein."""
+    with state_lock:
+        state.max_valves = 3
     resp = client.post("/queue/add", json={"zone": 0, "duration": 60, "time_unit": "Sekunden"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["queue_length"] == 3
+    assert data["zones_added"] == 3
+
+    with state_lock:
+        zones = [item.zone for item in state.queue]
+    assert zones == [1, 2, 3]
+
+
+def test_queue_add_zone_zero_correct_duration(client):
+    """Alle Items von zone=0 haben dieselbe Dauer und Zeiteinheit."""
+    with state_lock:
+        state.max_valves = 2
+    client.post("/queue/add", json={"zone": 0, "duration": 120, "time_unit": "Sekunden"})
+
+    with state_lock:
+        for item in state.queue:
+            assert item.duration == 120
+            assert item.time_unit == "Sekunden"
+
+
+def test_queue_add_zone_minus1_rejected(client):
+    """Negative zone-Werte werden von Pydantic (ge=0) mit 422 abgelehnt."""
+    resp = client.post("/queue/add", json={"zone": -1, "duration": 60, "time_unit": "Sekunden"})
     assert resp.status_code == 422
 
 

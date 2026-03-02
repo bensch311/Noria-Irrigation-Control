@@ -26,10 +26,18 @@ def get_queue():
 @router.post("/queue/add")
 @limiter.limit(MUTATION_LIMIT)
 def queue_add(request: Request, req: QueueAddRequest):
+    """Fügt ein oder mehrere Items zur Warteschlange hinzu.
+
+    zone=0  → Alle Ventile (1..max_valves) werden als einzelne Items
+              sequenziell in die Queue eingereiht. Entspricht dem
+              Verhalten von ScheduleAddRequest mit zone=0.
+    zone>=1 → Einzelnes Ventil wie bisher.
+    """
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
-    if req.zone < 1 or req.zone > max_v:
-        raise HTTPException(status_code=400, detail=f"zone muss 1..{max_v} sein.")
+
+    if req.zone > max_v:
+        raise HTTPException(status_code=400, detail=f"zone muss 0 (alle) oder 1..{max_v} sein.")
 
     if req.duration <= 0:
         raise HTTPException(status_code=400, detail="Die Laufzeit muss > 0 sein!")
@@ -39,24 +47,29 @@ def queue_add(request: Request, req: QueueAddRequest):
     if req.duration > max_runtime_s:
         raise HTTPException(status_code=400, detail=f"Die Maximale Laufzeit ist {max_runtime_s // 60} Minuten!")
 
+    # zone=0: alle Ventile sequenziell einreihen
+    zones_to_add = list(range(1, max_v + 1)) if req.zone == 0 else [req.zone]
+
     with state_lock:
         if state.queue_state == "fertig":
             state.queue_state = "bereit"
         state.queue = state.queue or []
-        state.queue.append(QueueItem(zone=req.zone, duration=req.duration, time_unit=req.time_unit, source="queue"))
+        for z in zones_to_add:
+            state.queue.append(QueueItem(zone=z, duration=req.duration, time_unit=req.time_unit, source="queue"))
         state.queue_dirty = True
 
         log_event(
             "queue_add",
             source="manual",
-            zone=req.zone,
+            zone=req.zone,          # 0 = alle, sonst konkrete Zone
+            zones_added=zones_to_add,
             duration_s=req.duration,
             time_unit=req.time_unit,
             queue_state=state.queue_state,
-            queue_length=len(state.queue or []),
+            queue_length=len(state.queue),
         )
 
-        return {"ok": True, "queue_length": len(state.queue)}
+        return {"ok": True, "queue_length": len(state.queue), "zones_added": len(zones_to_add)}
 
 
 @router.post("/queue/start")

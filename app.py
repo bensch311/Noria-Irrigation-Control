@@ -1021,7 +1021,10 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
 
                 ui.input_selectize(
                     "q_add_zone", "Zone:",
-                    choices={str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
+                    choices={
+                        "0": f"Alle Zonen ({ANZAHL_VENTILE})",
+                        **{str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)},
+                    },
                     selected="1",
                 )
                 ui.input_slider("q_add_dur", "Dauer:", min=1, max=60, value=10)
@@ -1085,10 +1088,13 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
             dur_s = dur * 60 if unit == "Minuten" else dur
             r = _post("/queue/add", json={"zone": zone, "duration": dur_s, "time_unit": unit})
             if r and r.ok:
-                ui.notification_show(
-                    f"Zone {zone} ({dur} {unit}) hinzugefuegt.",
-                    type="message", duration=3,
-                )
+                data = _json_or_none(r) or {}
+                if zone == 0:
+                    n = data.get("zones_added", ANZAHL_VENTILE)
+                    msg = f"Alle {n} Zonen ({dur} {unit}) zur Warteschlange hinzugefuegt."
+                else:
+                    msg = f"Zone {zone} ({dur} {unit}) hinzugefuegt."
+                ui.notification_show(msg, type="message", duration=3)
             else:
                 detail = _json_or_none(r) or {}
                 ui.notification_show(

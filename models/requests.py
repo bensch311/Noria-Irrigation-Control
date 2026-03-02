@@ -30,7 +30,7 @@ class StartRequest(BaseModel):
 
 
 class QueueAddRequest(BaseModel):
-    zone: int = Field(..., ge=1)
+    zone: int = Field(..., ge=0)  # 0 = alle Ventile (wie ScheduleAddRequest)
     duration: int = Field(..., ge=1)
     time_unit: Literal["Sekunden", "Minuten"] = "Minuten"
 
