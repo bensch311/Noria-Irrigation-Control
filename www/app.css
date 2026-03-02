@@ -84,33 +84,25 @@ body {
   background: var(--accent) !important;
 }
 
-#nav-clock {
-  color: var(--text_white) !important;
-  font-weight: 650;
-  font-size: 1.02rem;
-  padding: 0.35rem 0.65rem;
-  letter-spacing: 0.03em;
-
-  /* Fix: Uhr springt nicht mehr (gleich breite Ziffern + feste Breite) */
-  font-variant-numeric: tabular-nums;
-  width: 8ch;           /* 00:00:00 */
-  display: inline-block;
-  text-align: right;
-}
-
 .navbar .navbar-nav { align-items: center; }
 
-.nav-status-box {
-  width: 152px;
-  min-width: 152px;
-  text-align: right;
-  line-height: 1.25;
-  white-space: nowrap;
-}
+/* Uhr-Badge in der Navbar */
+.nav-clock-badge {
+  background:    rgba(255, 255, 255, 0.18) !important;
+  border:        1px solid rgba(255, 255, 255, 0.28) !important;
+  color:         var(--text_white) !important;
+  border-radius: 999px !important;
+  padding:       0.34rem 0.75rem !important;
+  font-size:     0.92rem !important;
+  font-weight:   650 !important;
+  letter-spacing:0.04em !important;
 
-.nav-backend-ok  { color: rgba(34, 197, 94, 0.95) !important; font-size: 0.78rem; }
-.nav-backend-err { color: rgba(239, 68, 68, 0.95) !important; font-size: 0.78rem; animation: blink 1.1s step-end infinite; }
-@keyframes blink { 50% { opacity: 0.35; } }
+  /* Ziffernbreite fixieren → kein Springen */
+  font-variant-numeric: tabular-nums;
+  min-width: 7.2ch;
+  display: inline-block;
+  text-align: center;
+}
 
 /* ---------- CARDS ---------- */
 .card, .bslib-card {

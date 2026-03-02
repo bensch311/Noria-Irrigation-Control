@@ -403,17 +403,7 @@ def _dynamic_navbar_title_js():
 
 with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
 
-    with ui.nav_control():
-
-        @render.ui
-        def _nav_clock():
-            reactive.invalidate_later(1)
-            now    = datetime.datetime.now().strftime("%H:%M:%S")
-            return ui.div(
-                ui.span(now, id="nav-clock"),
-                class_="nav-status-box",
-            )
-
+    ui.nav_spacer()
     # =========================================================================
     # TAB 1 - DASHBOARD
     # =========================================================================
@@ -1503,6 +1493,15 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
     # TAB 6 - EINSTELLUNGEN
     # =========================================================================
     ui.nav_spacer()
+
+    with ui.nav_control():
+
+        @render.ui
+        def _nav_clock2():
+            reactive.invalidate_later(1)
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            return ui.span(now, class_="badge nav-clock-badge")
+
     with ui.nav_panel(
         ui.tags.span(
             ui.tags.i(class_="bi bi-gear-fill"),
