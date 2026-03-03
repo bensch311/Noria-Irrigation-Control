@@ -666,3 +666,22 @@ input[data-sch-id]:focus {
 }
 
 
+
+/* ---------- Navbar Brand: Logo + Titel ---------- */
+.navbar-brand-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.55rem;
+}
+
+/* Logo: Höhe an Navbar-Schrift angepasst, Breite proportional.
+   object-fit:contain verhindert Verzerrung bei nicht-quadratischen SVGs. */
+.navbar-brand-logo {
+  height: 1.75rem;
+  width: auto;
+  object-fit: contain;
+  /* Weißes Bild auf Accent-Hintergrund braucht kein Filter.
+     Falls das Logo auf anderen Hintergründen dunkel wirkt, kann man
+     hier filter: brightness(0) invert(1) ergänzen. */
+  flex-shrink: 0;
+}

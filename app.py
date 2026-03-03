@@ -39,6 +39,7 @@ def _load_frontend_config() -> dict:
         "backend_fail_threshold":  3,
         "health_timeout_s":        0.8,
         "anzahl_ventile_fallback": 6,
+        "navbar_logo":             "",   # Dateiname im www/-Ordner, z.B. "logo.svg". Leer = kein Logo.
     }
     try:
         raw = Path("data/frontend_config.json").read_text(encoding="utf-8")
@@ -66,6 +67,16 @@ POLL_STATUS_S          = int(_cfg["poll_status_s"])
 POLL_SLOW_S            = int(_cfg["poll_slow_s"])
 BACKEND_FAIL_THRESHOLD = int(_cfg["backend_fail_threshold"])
 HEALTH_TIMEOUT_S       = float(_cfg["health_timeout_s"])
+
+# Navbar-Logo: nur setzen wenn Dateiname konfiguriert UND Datei im www/-Ordner
+# vorhanden ist. Shiny serviert www/ als statischen Root → src="logo.svg" reicht.
+# Leerer String oder fehlende Datei → kein Logo, kein Crash.
+_logo_filename = str(_cfg.get("navbar_logo", "")).strip()
+NAVBAR_LOGO_PATH: str = (
+    _logo_filename
+    if _logo_filename and Path(f"www/{_logo_filename}").is_file()
+    else ""
+)
 
 # Single Source of Truth: device_config.json → MAX_VALVES.
 # Aenderungen erfordern Neustart des Frontends (MAX_VALVES ist Hardware-Konfig).
@@ -395,13 +406,36 @@ def _dynamic_navbar_title_js():
     title_js = _json_mod.dumps(title)
     return ui.tags.script(f"""
         (function() {{
-            var els = document.querySelectorAll('.navbar-brand');
-            if (els.length) els[0].childNodes[0] && (els[0].childNodes[0].textContent = {title_js});
+            // Zielt auf den Text-Span, nicht auf das Root-Element – so wird ein
+            // eventuell vorhandenes Logo-<img> nicht als childNodes[0] überschrieben.
+            var titleEl = document.getElementById('navbar-title-text');
+            if (titleEl) titleEl.textContent = {title_js};
             document.title = {title_js};
         }})();
     """)
 
-with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
+def _build_navbar_brand() -> ui.Tag:
+    """Erzeugt den Navbar-Brand-Inhalt: optional Logo + Titel-Span.
+
+    Das <span id='navbar-title-text'> wird von _dynamic_navbar_title_js()
+    nach dem ersten Settings-Poll per getElementById aktualisiert.
+    Das Logo-<img> bleibt davon unberührt.
+    """
+    children = []
+    if NAVBAR_LOGO_PATH:
+        children.append(
+            ui.tags.img(
+                src=NAVBAR_LOGO_PATH,
+                class_="navbar-brand-logo",
+                alt="Logo",
+            )
+        )
+    children.append(
+        ui.tags.span(NAVBAR_TITLE_DEFAULT, id="navbar-title-text")
+    )
+    return ui.div(*children, class_="navbar-brand-inner")
+
+with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
     ui.nav_spacer()
     # =========================================================================
