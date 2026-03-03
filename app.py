@@ -987,7 +987,7 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
                                 )
                             ),
                             ui.tags.tbody(*rows),
-                            class_="table table-sm table-hover",
+                            class_="table table-sm table-hover table-striped",
                         ),
                     )
 
@@ -1217,6 +1217,17 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
                                 ui.tags.td(fmt_duration(dur_s, unit)),
                                 ui.tags.td("woechtl." if repeat else "einmalig"),
                                 ui.tags.td(status_span),
+                                # Klick auf die gesamte Zeile togglet die Checkbox.
+                                # Guard: event.target.type === 'checkbox' verhindert
+                                # Doppel-Fire wenn die Checkbox direkt angeklickt wird
+                                # (dann feuert der native onchange bereits).
+                                onclick=(
+                                    "if(event.target.type!=='checkbox'){"
+                                    f"var cb=document.getElementById('cb_sch_{idx}');"
+                                    "cb.checked=!cb.checked;"
+                                    "window.schCbChange(cb);"
+                                    "}"
+                                ),
                             )
                         )
 
@@ -1234,7 +1245,7 @@ with ui.navset_bar(title=NAVBAR_TITLE_DEFAULT, id="main_nav", fluid=True):
                                 )
                             ),
                             ui.tags.tbody(*rows),
-                            class_="table table-sm table-hover",
+                            class_="table sch-table table-hover table-striped",
                         ),
                         ui.div(
                             ui.input_action_button(
