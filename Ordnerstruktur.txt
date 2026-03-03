@@ -2,7 +2,6 @@ P:.
 │   requirements.txt
 │   Ordnerstruktur.txt
 │   pytest.ini
-│   app_old.py
 │   main.py
 │   app.py
 │
@@ -12,44 +11,46 @@ P:.
 │
 ├───data
 │       device_config.json
-│       user_settings.json
 │       api_key.txt
-│       queue.json
+│       frontend_config.json
 │       runtime_state.json
-│       schedules.json
+│       user_settings.json
+│       queue.json
 │       history.json
+│       schedules.json
 │
 ├───core
-│   │   state.py
 │   │   logging.py
 │   │   __init__.py
 │   │   lifecycle.py
 │   │   limiter.py
-│   │   config.py
 │   │   security.py
-│   
+│   │   state.py
+│   │   config.py
+│
 ├───models
 │   │   __init__.py
 │   │   requests.py
-│   │
+│
 ├───services
 │   │   __init__.py
 │   │   valve_driver.py
-│   │   engine.py
 │   │   scheduler.py
 │   │   io_worker.py
-│   │   persistence.py
 │   │   timer.py
+│   │   engine.py
+│   │   persistence.py
 │
 ├───api
 │   │   __init__.py
 │   │   routes_history.py
 │   │   routes_health.py
-│   │   routes_queue.py
 │   │   middleware.py
 │   │   routes_schedule.py
 │   │   errors.py
 │   │   routes_control.py
+│   │   routes_settings.py
+│   │   routes_queue.py
 │
 ├───tests
 │   │   test_io_worker.py
@@ -57,16 +58,22 @@ P:.
 │   │   test_history.py
 │   │   __init__.py
 │   │   test_health.py
-│   │   test_routes_queue.py
 │   │   test_engine_extended.py
 │   │   test_persistence_loop.py
 │   │   test_routes_missing.py
 │   │   test_valve_driver.py
 │   │   test_scheduler.py
 │   │   test_persistence.py
-│   │   conftest.py
 │   │   test_routes_schedule.py
-│   │   test_input_validation.py
 │   │   test_security.py
 │   │   test_timer.py
 │   │   test_routes_control.py
+│   │   conftest.py
+│   │   test_routes_settings.py
+│   │   test_routes_queue.py
+│   │   test_input_validation.py
+│   │
+│
+└───www
+        logo.svg
+        app.css

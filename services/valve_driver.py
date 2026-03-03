@@ -131,13 +131,31 @@ class RpiGpioValveDriver(BaseValveDriver):
         log_event("valve_hw_close", source="driver", driver=self.name, zone=int(zone), pin=pin)
 
     def close_all(self) -> None:
+        # Best-effort: jede Zone wird einzeln versucht, auch wenn vorherige
+        # fehlschlagen. Fehler werden geloggt, aber nicht nach außen geworfen –
+        # close_all() ist immer ein Sicherheits-Versuch, kein atomarer Op.
+        failed_zones: list[dict] = []
         for zone, pin in sorted(self._pins_by_zone.items()):
             try:
                 self._write_closed(int(pin))
-            except Exception:
-                # best effort
-                pass
-        log_event("valve_hw_close_all", source="driver", driver=self.name)
+            except Exception as e:
+                failed_zones.append({"zone": zone, "pin": pin, "error": repr(e)})
+                log_event(
+                    "valve_hw_close_all_zone_error",
+                    level="error",
+                    source="driver",
+                    driver=self.name,
+                    zone=zone,
+                    pin=pin,
+                    error=repr(e),
+                )
+        log_event(
+            "valve_hw_close_all",
+            source="driver",
+            driver=self.name,
+            failed_zones=failed_zones,
+            failed_count=len(failed_zones),
+        )
 
 
 # --- Singleton / Accessor ---

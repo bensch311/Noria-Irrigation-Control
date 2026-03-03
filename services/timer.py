@@ -164,11 +164,18 @@ def timer_loop() -> None:
             # konsistent (entspricht dem Verhalten vor dem Refactor).
             # ──────────────────────────────────────────────────────────────
             need_emergency_close_all = False
+            # driver_name VOR dem Lock berechnen: get_valve_driver() kann intern
+            # _read_driver_settings_from_state() aufrufen, welche state_lock
+            # anfordert. Da threading.Lock() nicht re-entrant ist, würde der
+            # Aufruf innerhalb des Locks zum Deadlock führen, sobald der Driver
+            # noch nicht gecacht ist. In der Praxis ist er nach IO-Worker-Start
+            # gecacht – wir dürfen diese Annahme aber nicht im Sicherheitspfad
+            # voraussetzen.
+            driver_name = getattr(get_valve_driver(), "name", "unknown")
 
             with state_lock:
                 if not paused_snapshot and finished_zones:
                     now_m = time.monotonic()
-                    driver_name = getattr(get_valve_driver(), "name", "unknown")
 
                     for zone in finished_zones:
                         ar = state.active_runs.get(zone)

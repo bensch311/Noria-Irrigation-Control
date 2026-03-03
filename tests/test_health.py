@@ -24,6 +24,11 @@ def test_health_basic_structure(client):
     assert "valves" in data
     assert "parallel_enabled" in data
     assert "max_concurrent_valves" in data
+    # hw_fault-Felder müssen immer vorhanden sein (auch im Normalbetrieb)
+    assert "hw_faulted" in data
+    assert "hw_fault_reason" in data
+    assert "hw_fault_zone" in data
+    assert "hw_fault_since" in data
 
 
 def test_health_idle_running_zones_empty(client):
@@ -78,3 +83,68 @@ def test_health_valves_section_content(client):
     assert "configured_zones" in valves
     assert "invalid_pins" in valves
     assert "duplicate_pins" in valves
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# hw_fault-Felder und ok-Semantik
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_health_no_fault_ok_true_and_defaults(client):
+    """Im Normalbetrieb (kein Fault): ok=True, hw_fault-Felder mit sicheren Defaults."""
+    resp = client.get("/health")
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["hw_faulted"] is False
+    assert data["hw_fault_reason"] == ""
+    assert data["hw_fault_zone"] is None
+    assert data["hw_fault_since"] == ""
+
+
+def test_health_hw_faulted_sets_ok_false(client):
+    """
+    Bei aktivem HW-Fault muss ok=False zurückgegeben werden.
+
+    HTTP 200 bleibt erhalten – der ok-Wert im Body ist das eigentliche
+    Monitoring-Signal. ok=False signalisiert: System hat ein Problem,
+    das Operator-Aktion erfordert.
+    """
+    with state_lock:
+        state.hw_faulted = True
+        state.hw_fault_reason = "close_failed_max_retries"
+        state.hw_fault_zone = 3
+        state.hw_fault_since = "2024-06-01T08:00:00+02:00"
+
+    resp = client.get("/health")
+    assert resp.status_code == 200  # HTTP 200 immer – Endpoint selbst ist erreichbar
+    assert resp.json()["ok"] is False
+
+
+def test_health_hw_fault_fields_populated(client):
+    """hw_fault_*-Felder müssen den gesetzten State korrekt widerspiegeln."""
+    with state_lock:
+        state.hw_faulted = True
+        state.hw_fault_reason = "close_failed_max_retries"
+        state.hw_fault_zone = 2
+        state.hw_fault_since = "2024-06-01T08:00:00+02:00"
+
+    data = client.get("/health").json()
+    assert data["hw_faulted"] is True
+    assert data["hw_fault_reason"] == "close_failed_max_retries"
+    assert data["hw_fault_zone"] == 2
+    assert data["hw_fault_since"] == "2024-06-01T08:00:00+02:00"
+
+
+def test_health_ok_recovers_after_fault_cleared(client):
+    """Nach /fault/clear muss ok wieder True sein."""
+    with state_lock:
+        state.hw_faulted = True
+
+    assert client.get("/health").json()["ok"] is False
+
+    with state_lock:
+        state.hw_faulted = False
+        state.hw_fault_reason = ""
+        state.hw_fault_zone = None
+        state.hw_fault_since = ""
+
+    assert client.get("/health").json()["ok"] is True

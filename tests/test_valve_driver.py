@@ -422,6 +422,66 @@ class TestRpiGpioValveDriverCloseAll:
 
         gpio.output.assert_not_called()
 
+    def test_close_all_zone_failure_is_logged(self):
+        """
+        Wenn _write_closed für eine Zone fehlschlägt, muss ein
+        valve_hw_close_all_zone_error-Event mit zone und pin geloggt werden.
+
+        Best-effort bleibt gewahrt: close_all() darf trotzdem nicht werfen.
+        """
+        driver, gpio = _make_rpi_driver({1: 17, 2: 22, 3: 27}, active_low=True)
+        gpio.output.reset_mock()
+
+        def _output_with_failure(pin, val):
+            if pin == 22:
+                raise RuntimeError("GPIO Schreibfehler")
+
+        gpio.output.side_effect = _output_with_failure
+
+        with patch("services.valve_driver.log_event") as mock_log:
+            driver.close_all()  # Darf nicht werfen
+
+        # Genau ein valve_hw_close_all_zone_error-Event für zone=2 / pin=22
+        error_events = [
+            c for c in mock_log.call_args_list
+            if c.args and c.args[0] == "valve_hw_close_all_zone_error"
+        ]
+        assert len(error_events) == 1, (
+            f"Erwartet 1 valve_hw_close_all_zone_error, gefunden: {len(error_events)}"
+        )
+        kw = error_events[0].kwargs
+        assert kw["zone"] == 2
+        assert kw["pin"] == 22
+        assert "error" in kw
+        assert kw["level"] == "error"
+
+    def test_close_all_summary_log_contains_failed_count(self):
+        """
+        Das abschließende valve_hw_close_all-Event muss failed_count und
+        failed_zones enthalten, damit Logs auswertbar sind.
+        """
+        driver, gpio = _make_rpi_driver({1: 17, 2: 22}, active_low=True)
+        gpio.output.reset_mock()
+
+        def _output_with_failure(pin, val):
+            if pin == 22:
+                raise RuntimeError("GPIO Schreibfehler")
+
+        gpio.output.side_effect = _output_with_failure
+
+        with patch("services.valve_driver.log_event") as mock_log:
+            driver.close_all()
+
+        summary_events = [
+            c for c in mock_log.call_args_list
+            if c.args and c.args[0] == "valve_hw_close_all"
+        ]
+        assert len(summary_events) == 1
+        kw = summary_events[0].kwargs
+        assert kw["failed_count"] == 1
+        assert len(kw["failed_zones"]) == 1
+        assert kw["failed_zones"][0]["zone"] == 2
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # get_valve_driver

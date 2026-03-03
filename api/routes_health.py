@@ -10,11 +10,14 @@ router = APIRouter()
 def health():
     from services.valve_driver import get_valve_driver, validate_gpio_pins
 
+    # driver_name VOR dem Lock berechnen – get_valve_driver() kann intern
+    # state_lock anfordern (_read_driver_settings_from_state), was innerhalb
+    # eines nicht-re-entranten Locks zum Deadlock führen würde.
+    driver_name = get_valve_driver().name
+
     with state_lock:
         running = sorted(list((state.active_runs or {}).keys()))
         qlen = len(state.queue or [])
-
-        driver_name = get_valve_driver().name
 
         # Config snapshot for diagnostics
         max_valves = int(getattr(state, "max_valves", 1))
@@ -25,6 +28,12 @@ def health():
         parallel_enabled = bool(getattr(state, "parallel_enabled", False))
         max_concurrent_valves = int(getattr(state, "max_concurrent_valves", 1))
 
+        # Hardware-Fault-Status: bestimmt den ok-Wert
+        hw_faulted = bool(getattr(state, "hw_faulted", False))
+        hw_fault_reason = str(getattr(state, "hw_fault_reason", ""))
+        hw_fault_zone = getattr(state, "hw_fault_zone", None)
+        hw_fault_since = str(getattr(state, "hw_fault_since", ""))
+
     configured_zones = sorted([int(z) for z in pins_by_zone.keys() if int(z) >= 1])
     required_zones = list(range(1, max_valves + 1))
     missing_zones = [z for z in required_zones if z not in set(configured_zones)]
@@ -34,9 +43,11 @@ def health():
     if mode == "rpi":
         gpio_config_valid = (len(missing_zones) == 0) and bool(gpio_validation.get("ok"))
 
-
     return {
-        "ok": True,
+        # ok=False signalisiert Monitoring-Systemen einen nicht-quittiertem HW-Fault.
+        # HTTP 200 bleibt immer erhalten – der ok-Wert im Body ist das
+        # eigentliche Gesundheitssignal (kompatibel mit allen gängigen Health-Checks).
+        "ok": not hw_faulted,
         "service": "irrigation",
         "version": 1,
         "ts": datetime.now(TZ).isoformat(timespec="seconds"),
@@ -44,6 +55,10 @@ def health():
         "queue_length": qlen,
         "parallel_enabled": parallel_enabled,
         "max_concurrent_valves": max_concurrent_valves,
+        "hw_faulted": hw_faulted,
+        "hw_fault_reason": hw_fault_reason,
+        "hw_fault_zone": hw_fault_zone,
+        "hw_fault_since": hw_fault_since,
         "valves": {
             "valve_driver": driver_name,
             "configured_driver_mode": mode,
