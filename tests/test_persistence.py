@@ -814,3 +814,112 @@ def test_backup_corrupt_file_os_error_does_not_raise(tmp_path):
 
     with patch("services.persistence.os.replace", side_effect=OSError("read-only fs")):
         _backup_corrupt_file(str(target))  # Darf NICHT werfen
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _cleanup_old_corrupt_files
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cleanup_old_corrupt_files_removes_oldest(tmp_path):
+    """
+    Wenn mehr als max_keep .corrupt-*-Dateien existieren, werden die ältesten
+    (lexikografisch kleinsten Timestamps) gelöscht.
+    """
+    from services.persistence import _cleanup_old_corrupt_files
+
+    base = tmp_path / "schedules.json"
+    # Erstelle 5 Backups mit aufsteigenden Timestamps
+    for i in range(1, 6):
+        (tmp_path / f"schedules.json.corrupt-20240101-00000{i}").write_text("x")
+
+    _cleanup_old_corrupt_files(str(base), max_keep=3)
+
+    remaining = sorted(tmp_path.glob("schedules.json.corrupt-*"))
+    assert len(remaining) == 3
+    # Die 3 neuesten müssen erhalten sein
+    names = [f.name for f in remaining]
+    assert "schedules.json.corrupt-20240101-000003" in names
+    assert "schedules.json.corrupt-20240101-000004" in names
+    assert "schedules.json.corrupt-20240101-000005" in names
+    # Die 2 ältesten müssen weg sein
+    assert not (tmp_path / "schedules.json.corrupt-20240101-000001").exists()
+    assert not (tmp_path / "schedules.json.corrupt-20240101-000002").exists()
+
+
+def test_cleanup_old_corrupt_files_below_limit_does_nothing(tmp_path):
+    """Weniger als max_keep Dateien → nichts löschen."""
+    from services.persistence import _cleanup_old_corrupt_files
+
+    base = tmp_path / "queue.json"
+    for i in range(1, 3):
+        (tmp_path / f"queue.json.corrupt-20240101-00000{i}").write_text("x")
+
+    _cleanup_old_corrupt_files(str(base), max_keep=3)
+
+    remaining = list(tmp_path.glob("queue.json.corrupt-*"))
+    assert len(remaining) == 2
+
+
+def test_cleanup_old_corrupt_files_exact_limit_does_nothing(tmp_path):
+    """Genau max_keep Dateien → nichts löschen."""
+    from services.persistence import _cleanup_old_corrupt_files
+
+    base = tmp_path / "history.json"
+    for i in range(1, 4):
+        (tmp_path / f"history.json.corrupt-20240101-00000{i}").write_text("x")
+
+    _cleanup_old_corrupt_files(str(base), max_keep=3)
+
+    remaining = list(tmp_path.glob("history.json.corrupt-*"))
+    assert len(remaining) == 3
+
+
+def test_cleanup_old_corrupt_files_empty_dir_does_not_raise(tmp_path):
+    """Leeres Verzeichnis (keine .corrupt-*-Dateien) darf nicht crashen."""
+    from services.persistence import _cleanup_old_corrupt_files
+
+    _cleanup_old_corrupt_files(str(tmp_path / "noop.json"), max_keep=3)
+
+
+def test_cleanup_old_corrupt_files_only_matches_own_prefix(tmp_path):
+    """Cleanup darf Dateien anderer Basis-Dateien nicht anfassen."""
+    from services.persistence import _cleanup_old_corrupt_files
+
+    base = tmp_path / "schedules.json"
+    # 4 Backups für schedules.json
+    for i in range(1, 5):
+        (tmp_path / f"schedules.json.corrupt-20240101-00000{i}").write_text("x")
+    # 1 Backup für queue.json – darf nicht gelöscht werden
+    queue_backup = tmp_path / "queue.json.corrupt-20240101-000001"
+    queue_backup.write_text("x")
+
+    _cleanup_old_corrupt_files(str(base), max_keep=3)
+
+    assert queue_backup.exists(), "Backup einer anderen Datei darf nicht gelöscht werden"
+
+
+def test_backup_corrupt_file_triggers_cleanup(tmp_path, monkeypatch):
+    """
+    _backup_corrupt_file legt ein neues Backup an und bereinigt automatisch
+    ältere, sodass maximal CORRUPT_FILE_MAX_KEEP Dateien übrig bleiben.
+    """
+    from services.persistence import _backup_corrupt_file
+    from core.config import CORRUPT_FILE_MAX_KEEP
+
+    monkeypatch.setattr("services.persistence.SCHEDULES_FILE", str(tmp_path / "schedules.json"))
+
+    base = tmp_path / "schedules.json"
+
+    # Lege CORRUPT_FILE_MAX_KEEP bereits vorhandene Backups an
+    for i in range(1, CORRUPT_FILE_MAX_KEEP + 1):
+        (tmp_path / f"schedules.json.corrupt-20240101-00000{i}").write_text("old")
+
+    # Jetzt ein neues korruptes File anlegen und sichern
+    base.write_text("kaputt", encoding="utf-8")
+    _backup_corrupt_file(str(base))
+
+    remaining = sorted(tmp_path.glob("schedules.json.corrupt-*"))
+    # Nach Backup + Cleanup: genau CORRUPT_FILE_MAX_KEEP Dateien
+    assert len(remaining) == CORRUPT_FILE_MAX_KEEP, (
+        f"Erwartet {CORRUPT_FILE_MAX_KEEP}, vorhanden: {[f.name for f in remaining]}"
+    )

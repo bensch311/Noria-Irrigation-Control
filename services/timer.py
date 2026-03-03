@@ -31,7 +31,7 @@ from core.config import (
 from core.logging import log_event, logger
 from core.state import state, state_lock
 from services.engine import (
-    _calc_actual_run_s_primary,
+    _calc_actual_run_s_ar,
     _history_add_locked,
     _sync_legacy_single_fields_locked,
     start_queue_item,
@@ -239,14 +239,11 @@ def timer_loop() -> None:
                             continue
 
                         # ── Erfolg: History + active_runs bereinigen ────────
-                        if zone == state.running_zone:
-                            actual_s = _calc_actual_run_s_primary(now_m)
-                        else:
-                            paused_total = ar.paused_total_s + (
-                                (now_m - ar.paused_at) if ar.paused_at else 0.0
-                            )
-                            active = (now_m - ar.started_at) - paused_total
-                            actual_s = max(0, int(active + 1e-6))
+                        # _calc_actual_run_s_ar liest aus dem AR-Objekt (korrekt
+                        # für alle Zonen). _calc_actual_run_s_primary las aus
+                        # Legacy-Feldern auf RunState, die zur Laufzeit nie
+                        # geschrieben werden – Pausen würden dort ignoriert.
+                        actual_s = _calc_actual_run_s_ar(ar, now_m)
 
                         _history_add_locked(
                             zone=zone,

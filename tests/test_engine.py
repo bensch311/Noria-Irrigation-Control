@@ -3,7 +3,7 @@ Tests für services/engine.py
 
 Getestet werden:
   - _can_start_new_valve_locked
-  - _start_valve_locked
+  - start_valve
   - _history_add_locked
   - _sync_legacy_single_fields_locked
   - _active_runs_snapshot_locked
@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from core.state import state, state_lock, ActiveRun, QueueItem, HistoryItem
 from services.engine import (
     _can_start_new_valve_locked,
-    _start_valve_locked,
+    start_valve,
     _history_add_locked,
     _sync_legacy_single_fields_locked,
     _active_runs_snapshot_locked,
@@ -82,13 +82,13 @@ class TestCanStartNewValve:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _start_valve_locked
+# start_valve
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestStartValveLocked:
+class TestStartValve:
     def test_success_updates_active_runs(self, mock_io):
-        _start_valve_locked(zone=1, duration_s=60, time_unit="Sekunden", source="manual")
+        start_valve(zone=1, duration_s=60, time_unit="Sekunden", source="manual")
 
         with state_lock:
             assert 1 in state.active_runs
@@ -99,14 +99,14 @@ class TestStartValveLocked:
         assert ar.time_unit == "Sekunden"
 
     def test_success_syncs_legacy_fields(self, mock_io):
-        _start_valve_locked(zone=1, duration_s=120, time_unit="Sekunden", source="schedule")
+        start_valve(zone=1, duration_s=120, time_unit="Sekunden", source="schedule")
 
         with state_lock:
             assert state.running_zone == 1
             assert state.started_planned_s == 120
 
     def test_success_calls_io_open(self, mock_io):
-        _start_valve_locked(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
+        start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
 
         call_args = mock_io.send_command.call_args
         cmd = call_args[0][0]
@@ -119,7 +119,7 @@ class TestStartValveLocked:
             _sync_legacy_single_fields_locked()
 
         with pytest.raises(HTTPException) as exc_info:
-            _start_valve_locked(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
+            start_valve(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
         assert exc_info.value.status_code == 409
 
     def test_serial_mode_busy_raises_409(self, mock_io, make_active_run):
@@ -129,7 +129,7 @@ class TestStartValveLocked:
             _sync_legacy_single_fields_locked()
 
         with pytest.raises(HTTPException) as exc_info:
-            _start_valve_locked(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
+            start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
         assert exc_info.value.status_code == 409
 
     def test_hw_faulted_raises_423(self, mock_io):
@@ -137,12 +137,12 @@ class TestStartValveLocked:
             state.hw_faulted = True
 
         with pytest.raises(HTTPException) as exc_info:
-            _start_valve_locked(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
+            start_valve(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
         assert exc_info.value.status_code == 423
 
     def test_hw_error_raises_503_and_no_state_change(self, failing_io):
         with pytest.raises(HTTPException) as exc_info:
-            _start_valve_locked(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
+            start_valve(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
 
         assert exc_info.value.status_code == 503
         with state_lock:
@@ -156,7 +156,7 @@ class TestStartValveLocked:
             state.active_runs = {1: make_active_run(zone=1)}
             _sync_legacy_single_fields_locked()
 
-        _start_valve_locked(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
+        start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
 
         with state_lock:
             assert 2 in state.active_runs

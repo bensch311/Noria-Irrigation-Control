@@ -11,7 +11,7 @@ from core.limiter import limiter, MUTATION_LIMIT
 from models.requests import StartRequest, ParallelModeRequest
 
 from services.engine import (
-    _start_valve_locked,
+    start_valve,
     _sync_legacy_single_fields_locked,
     engine_status_payload_locked,
     _history_add_locked,
@@ -52,7 +52,7 @@ def start(request: Request, req: StartRequest):
         raise HTTPException(status_code=400, detail=f"Die Maximale Laufzeit ist {max_runtime_s // 60} Minuten!")
 
     # Start Ventil OHNE state_lock (Funktion holt Lock intern via Prepare-Execute-Commit)
-    _start_valve_locked(
+    start_valve(
         zone=req.zone,
         duration_s=req.duration,
         time_unit=req.time_unit,

@@ -52,6 +52,10 @@ HW_RETRY_BACKOFF_BASE_S = 1.0     # 1,2,4,8,... Sekunden
 HW_RETRY_BACKOFF_MAX_S = 30.0     # Cap
 HW_FAULT_COOLDOWN_S = 60.0        # nach Fault: frühestens nach X Sekunden wieder freigeben (operator ack)
 
+# Corrupt-Datei-Aufräumen: wie viele .corrupt-<ts>-Backups pro Datei maximal
+# behalten werden. Ältere werden nach jedem _backup_corrupt_file()-Aufruf gelöscht.
+CORRUPT_FILE_MAX_KEEP = 3
+
 
 TZ = ZoneInfo("Europe/Berlin")
 

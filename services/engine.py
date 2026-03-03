@@ -95,15 +95,45 @@ def _calc_actual_run_s_primary(now_m: float) -> int:
     return int(math.ceil(active - eps)) if had_pause else int(math.floor(active + eps))
 
 
+def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
+    """
+    Berechnet die tatsächliche Laufzeit (Sekunden) direkt aus einem ActiveRun.
+
+    Liest ausschließlich aus dem AR-Objekt – nicht aus den Legacy-Feldern auf
+    RunState. Damit ist diese Funktion für alle Zonen korrekt, inklusive der
+    primären (state.paused_total_s / state.paused_at sind Legacy und werden
+    zur Laufzeit nie geschrieben).
+
+    Rundungslogik (identisch zu _calc_actual_run_s_primary):
+      - Ohne Pause : floor(active + eps)  → konservative Unterschätzung
+      - Mit Pause  : ceil(active - eps)   → macht abgerundete Pause-Sekunden
+                                            wieder sichtbar
+    """
+    if not ar.started_at:
+        return 0
+
+    paused_total = ar.paused_total_s
+    if ar.paused_at:
+        paused_total += (now_m - ar.paused_at)
+
+    active = (now_m - ar.started_at) - paused_total
+    if active <= 0:
+        return 0
+
+    had_pause = (ar.paused_total_s > 0.0) or (ar.paused_at > 0.0)
+    eps = 1e-6
+    return int(math.ceil(active - eps)) if had_pause else int(math.floor(active + eps))
+
+
 # ==================== REFACTORED: PREPARE-EXECUTE-COMMIT ====================
 
-def _start_valve_locked(zone: int, duration_s: int, time_unit: str, source: str):
+def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
     """
     Startet ein Ventil via IO-Worker mit Prepare-Execute-Commit Pattern.
-    
+
     WICHTIG: Diese Funktion muss OHNE state_lock aufgerufen werden!
     Sie holt sich den Lock intern für Prepare und Commit.
-    
+
     Ablauf:
     1. PREPARE (unter Lock): Validierung, Context erstellen
     2. EXECUTE (ohne Lock): Hardware-Operation via IO-Worker
@@ -229,7 +259,7 @@ def start_queue_item(item: QueueItem):
     
     WICHTIG: Muss OHNE state_lock aufgerufen werden!
     """
-    _start_valve_locked(
+    start_valve(
         zone=item.zone,
         duration_s=item.duration,
         time_unit=item.time_unit,
@@ -300,9 +330,10 @@ def engine_status_payload_locked() -> dict:
 __all__ = [
     "_sync_legacy_single_fields_locked",
     "_can_start_new_valve_locked",
-    "_start_valve_locked",
+    "start_valve",
     "_history_add_locked",
     "_calc_actual_run_s_primary",
+    "_calc_actual_run_s_ar",
     "start_queue_item",
     "engine_status_payload_locked",
     "_active_runs_snapshot_locked",

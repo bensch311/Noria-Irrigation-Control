@@ -15,6 +15,7 @@ from core.state import state, state_lock, ActiveRun
 from services.engine import (
     _active_runs_snapshot_locked,
     _calc_actual_run_s_primary,
+    _calc_actual_run_s_ar,
     engine_status_payload_locked,
     _sync_legacy_single_fields_locked,
 )
@@ -178,3 +179,98 @@ class TestCalcActualRunS:
             state.paused_at = now - 15.0
             result = _calc_actual_run_s_primary(now)
         assert 73 <= result <= 77
+
+
+class TestCalcActualRunSAr:
+    """
+    Tests für _calc_actual_run_s_ar – liest aus ActiveRun, nicht aus
+    Legacy-State-Feldern. Muss identisches Verhalten zu _calc_actual_run_s_primary
+    haben, ist aber für alle Zonen (inkl. primärer) korrekt.
+    """
+
+    def _make_ar(
+        self,
+        started_at: float,
+        paused_total_s: float = 0.0,
+        paused_at: float = 0.0,
+    ) -> ActiveRun:
+        return ActiveRun(
+            zone=1,
+            end_time=0.0,
+            time_unit="Sekunden",
+            started_at=started_at,
+            started_source="manual",
+            started_planned_s=60,
+            paused_total_s=paused_total_s,
+            paused_at=paused_at,
+        )
+
+    def test_no_started_at_returns_zero(self):
+        ar = self._make_ar(started_at=0.0)
+        result = _calc_actual_run_s_ar(ar, time.monotonic())
+        assert result == 0
+
+    def test_simple_run_without_pause(self):
+        now = time.monotonic()
+        ar = self._make_ar(started_at=now - 30.0)
+        result = _calc_actual_run_s_ar(ar, now)
+        assert 29 <= result <= 31
+
+    def test_run_with_completed_pause(self):
+        """20 s Pause von 60 s Laufzeit → ~40 s aktiv."""
+        now = time.monotonic()
+        ar = self._make_ar(started_at=now - 60.0, paused_total_s=20.0)
+        result = _calc_actual_run_s_ar(ar, now)
+        assert 38 <= result <= 42
+
+    def test_run_currently_paused_includes_ongoing_pause(self):
+        """60 s laufen, seit 10 s pausiert → ~50 s aktiv."""
+        now = time.monotonic()
+        ar = self._make_ar(started_at=now - 60.0, paused_at=now - 10.0)
+        result = _calc_actual_run_s_ar(ar, now)
+        assert 48 <= result <= 52
+
+    def test_run_with_both_past_and_current_pause(self):
+        """120 s laufen, 30 s vergangene Pause + 15 s aktuelle Pause → ~75 s aktiv."""
+        now = time.monotonic()
+        ar = self._make_ar(
+            started_at=now - 120.0,
+            paused_total_s=30.0,
+            paused_at=now - 15.0,
+        )
+        result = _calc_actual_run_s_ar(ar, now)
+        assert 73 <= result <= 77
+
+    def test_active_longer_than_planned_still_returns_positive(self):
+        """Läuft länger als geplant (Timer-Verzögerung): Wert muss positiv sein."""
+        now = time.monotonic()
+        ar = self._make_ar(started_at=now - 90.0)
+        result = _calc_actual_run_s_ar(ar, now)
+        assert result > 0
+
+    def test_pause_exceeds_runtime_returns_zero(self):
+        """Pause-Summe > Laufzeit darf keine negative Laufzeit produzieren."""
+        now = time.monotonic()
+        # 10 s Laufzeit, aber 20 s Pause → active <= 0
+        ar = self._make_ar(started_at=now - 10.0, paused_total_s=20.0)
+        result = _calc_actual_run_s_ar(ar, now)
+        assert result == 0
+
+    def test_matches_primary_for_no_pause(self):
+        """
+        Ohne Pausen müssen _calc_actual_run_s_ar und _calc_actual_run_s_primary
+        denselben Wert liefern (primary liest Legacy-State, der im Normalfall 0 ist).
+        """
+        now = time.monotonic()
+        elapsed = 45.0
+        ar = self._make_ar(started_at=now - elapsed)
+
+        result_ar = _calc_actual_run_s_ar(ar, now)
+
+        with state_lock:
+            state.started_at = now - elapsed
+            state.paused_total_s = 0.0
+            state.paused_at = 0.0
+            result_primary = _calc_actual_run_s_primary(now)
+
+        assert result_ar == result_primary

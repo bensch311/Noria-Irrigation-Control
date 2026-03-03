@@ -8,6 +8,7 @@ from core.config import (
     DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
     NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT,
+    CORRUPT_FILE_MAX_KEEP,
 )
 from core.logging import log_event, logger
 
@@ -28,14 +29,46 @@ def _atomic_write_json(path: str, data: dict):
     os.replace(tmp_path, path)
 
 
+def _cleanup_old_corrupt_files(path: str, max_keep: int) -> None:
+    """
+    Löscht ältere .corrupt-<ts>-Dateien für einen gegebenen Basispfad.
+
+    Behält die max_keep neuesten Backups (Sortierung nach Dateiname, da das
+    Timestamp-Format %Y%m%d-%H%M%S lexikografisch chronologisch ist).
+    Best-effort: Fehler beim Löschen werden ignoriert.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    prefix = os.path.basename(path) + ".corrupt-"
+    try:
+        candidates = sorted([
+            f for f in os.listdir(directory)
+            if f.startswith(prefix)
+        ])
+        # Älteste zuerst (aufsteigend), die letzten max_keep behalten
+        to_delete = candidates[:-max_keep] if len(candidates) > max_keep else []
+        for fname in to_delete:
+            try:
+                os.remove(os.path.join(directory, fname))
+                log_event("corrupt_file_cleaned", source="system", file=fname)
+            except Exception:
+                pass  # best effort
+    except Exception:
+        pass  # best effort
+
+
 def _backup_corrupt_file(path: str):
-    """Benennt eine korrupte Datei in <name>.corrupt-<ts> um (best effort)."""
+    """
+    Benennt eine korrupte Datei in <n>.corrupt-<ts> um (best effort) und
+    bereinigt anschließend ältere Backups (behält maximal CORRUPT_FILE_MAX_KEEP).
+    """
     try:
         ts = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
         os.replace(path, f"{path}.corrupt-{ts}")
     except Exception:
         # best effort – falls Umbenennung nicht möglich ist, ignorieren
         pass
+    # Cleanup läuft immer (auch wenn Umbenennung scheiterte), best effort
+    _cleanup_old_corrupt_files(path, max_keep=CORRUPT_FILE_MAX_KEEP)
 
 
 def _default_device_config_payload() -> dict:
