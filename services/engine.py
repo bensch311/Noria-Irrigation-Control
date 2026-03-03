@@ -9,28 +9,6 @@ from core.logging import log_event
 from core.config import TZ
 from datetime import datetime
 
-def _sync_legacy_single_fields_locked():
-    if not state.active_runs:
-        state.running_zone = None
-        state.end_time = 0.0
-        state.time_unit = "Minuten"
-        state.remaining_s = 0
-        state.started_at = 0.0
-        state.started_source = "manual"
-        state.started_planned_s = 0
-        return
-
-    primary_zone = sorted(state.active_runs.keys())[0]
-    ar = state.active_runs[primary_zone]
-
-    state.running_zone = ar.zone
-    state.end_time = ar.end_time
-    state.time_unit = ar.time_unit
-    state.remaining_s = ar.remaining_s
-    state.started_at = ar.started_at
-    state.started_source = ar.started_source
-    state.started_planned_s = ar.started_planned_s
-
 def _can_start_new_valve_locked() -> bool:
     # If hardware is faulted, block any new starts (manual/queue/schedule)
     if getattr(state, "hw_faulted", False):
@@ -78,33 +56,13 @@ def _history_add_locked(zone: int, duration_s: int, source: str, time_unit: str)
 
     state.history_dirty = True
 
-def _calc_actual_run_s_primary(now_m: float) -> int:
-    if not state.started_at:
-        return 0
-
-    paused_total = state.paused_total_s
-    if state.paused_at:
-        paused_total += (now_m - state.paused_at)
-
-    active = (now_m - state.started_at) - paused_total
-    if active <= 0:
-        return 0
-
-    had_pause = (state.paused_total_s > 0.0) or (state.paused_at > 0.0)
-    eps = 1e-6
-    return int(math.ceil(active - eps)) if had_pause else int(math.floor(active + eps))
-
-
 def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
     """
     Berechnet die tatsächliche Laufzeit (Sekunden) direkt aus einem ActiveRun.
 
-    Liest ausschließlich aus dem AR-Objekt – nicht aus den Legacy-Feldern auf
-    RunState. Damit ist diese Funktion für alle Zonen korrekt, inklusive der
-    primären (state.paused_total_s / state.paused_at sind Legacy und werden
-    zur Laufzeit nie geschrieben).
+    Liest ausschließlich aus dem AR-Objekt – korrekt für alle Zonen.
 
-    Rundungslogik (identisch zu _calc_actual_run_s_primary):
+    Rundungslogik:
       - Ohne Pause : floor(active + eps)  → konservative Unterschätzung
       - Mit Pause  : ceil(active - eps)   → macht abgerundete Pause-Sekunden
                                             wieder sichtbar
@@ -160,9 +118,10 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
                     status_code=409, 
                     detail=f"Max. parallele Ventile erreicht ({state.max_concurrent_valves})."
                 )
+            already = sorted(state.active_runs.keys())[0] if state.active_runs else "?"
             raise HTTPException(
-                status_code=409, 
-                detail=f"Es läuft bereits Ventil {state.running_zone}!"
+                status_code=409,
+                detail=f"Es läuft bereits Ventil {already}!"
             )
 
         # Context für Hardware-Op + späteren Commit erstellen
@@ -236,8 +195,6 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
             started_planned_s=int(duration_s),
         )
 
-        _sync_legacy_single_fields_locked()
-
         log_event(
             "valve_start",
             source=source,
@@ -275,7 +232,14 @@ def engine_status_payload_locked() -> dict:
     schedules_count = len(state.schedules or [])
     automation_enabled = getattr(state, "automation_enabled", True)
 
-    if state.running_zone is None:
+    active_runs = state.active_runs or {}
+    running_zones = sorted(active_runs.keys())
+
+    # primary zone: lowest zone number (convention for legacy single-zone compat)
+    primary_zone = running_zones[0] if running_zones else None
+    primary_ar = active_runs.get(primary_zone) if primary_zone is not None else None
+
+    if not active_runs:
         return {
             "state": "bereit",
             "running_zone": None,
@@ -287,8 +251,8 @@ def engine_status_payload_locked() -> dict:
             "automation_enabled": automation_enabled,
             "parallel_enabled": state.parallel_enabled,
             "max_concurrent_valves": state.max_concurrent_valves,
-            "running_zones": sorted(list((state.active_runs or {}).keys())),
-            "active_runs": _active_runs_snapshot_locked(),
+            "running_zones": [],
+            "active_runs": {},
             "valve_driver": driver_name,
             "max_valves": int(getattr(state, "max_valves", 6)),
             "hw_faulted": bool(getattr(state, "hw_faulted", False)),
@@ -298,17 +262,17 @@ def engine_status_payload_locked() -> dict:
         }
 
     if state.paused:
-        remaining = state.remaining_s
+        remaining = int(primary_ar.remaining_s or 0) if primary_ar else 0
         valve_state = "pausiert"
     else:
-        remaining = max(0, int(state.end_time - time.monotonic()))
+        remaining = max(0, int(primary_ar.end_time - time.monotonic())) if primary_ar else 0
         valve_state = "läuft"
 
     return {
         "state": valve_state,
-        "running_zone": state.running_zone,
+        "running_zone": primary_zone,
         "remaining_time": remaining,
-        "time_unit": state.time_unit,
+        "time_unit": primary_ar.time_unit if primary_ar else "Sekunden",
         "paused": state.paused,
         "queue_state": state.queue_state,
         "queue_length": len(q),
@@ -316,7 +280,7 @@ def engine_status_payload_locked() -> dict:
         "automation_enabled": automation_enabled,
         "parallel_enabled": state.parallel_enabled,
         "max_concurrent_valves": state.max_concurrent_valves,
-        "running_zones": sorted(list((state.active_runs or {}).keys())),
+        "running_zones": running_zones,
         "active_runs": _active_runs_snapshot_locked(),
         "valve_driver": driver_name,
         "max_valves": int(getattr(state, "max_valves", 6)),
@@ -328,11 +292,9 @@ def engine_status_payload_locked() -> dict:
 
 # Exports (für andere services/api)
 __all__ = [
-    "_sync_legacy_single_fields_locked",
     "_can_start_new_valve_locked",
     "start_valve",
     "_history_add_locked",
-    "_calc_actual_run_s_primary",
     "_calc_actual_run_s_ar",
     "start_queue_item",
     "engine_status_payload_locked",

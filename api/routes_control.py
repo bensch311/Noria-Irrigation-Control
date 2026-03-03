@@ -12,7 +12,6 @@ from models.requests import StartRequest, ParallelModeRequest
 
 from services.engine import (
     start_valve,
-    _sync_legacy_single_fields_locked,
     engine_status_payload_locked,
     _history_add_locked,
 )
@@ -89,13 +88,8 @@ def stop(request: Request):
     # Phase 1: Prepare (unter Lock) - sammle alle Infos für Historie
     with state_lock:
         if not state.active_runs:
-            # Invariant: active_runs is the source of truth
-            z = state.running_zone
-            if z is not None:
-                log_event("legacy_state_inconsistent", level="error", source="system", running_zone=z)
-            state.running_zone = None
-            _sync_legacy_single_fields_locked()
-            return {"ok": True, "stopped_zone": z}
+            # Invariant: active_runs is the source of truth; nothing to stop.
+            return {"ok": True, "stopped_zones": []}
 
         now_m = time.monotonic()
         zones_to_close = sorted(list(state.active_runs.keys()))
@@ -189,7 +183,6 @@ def stop(request: Request):
         if not state.active_runs:
             state.queue_state_before_valve_pause = "bereit"
 
-        _sync_legacy_single_fields_locked()
 
         log_event(
             "valve_stop",
@@ -225,7 +218,7 @@ def stop(request: Request):
 def pause_current(request: Request):
     # Phase 1: Prepare (unter Lock) - sammle Zonen die geschlossen werden müssen
     with state_lock:
-        if state.running_zone is None or not state.active_runs:
+        if not state.active_runs:
             raise HTTPException(status_code=409, detail="Kein Ventil läuft gerade.")
 
         if state.paused:
@@ -286,7 +279,6 @@ def pause_current(request: Request):
                 ar.paused_at = info["paused_at"]
                 ar.end_time = 0.0  # logisch "stoppen" (Timer zählt nicht weiter)
 
-        _sync_legacy_single_fields_locked()
 
         log_event(
             "valve_pause",
@@ -373,7 +365,6 @@ def resume_current(request: Request):
         state.queue_state = state.queue_state_before_valve_pause
         state.queue_state_before_valve_pause = "bereit"
 
-        _sync_legacy_single_fields_locked()
 
         log_event(
             "valve_resume",
@@ -482,7 +473,6 @@ def set_parallel_mode(request: Request, req: ParallelModeRequest):
     with state_lock:
         prev = bool(state.parallel_enabled)
         state.parallel_enabled = bool(req.enabled)
-        _sync_legacy_single_fields_locked()
 
         log_event(
             "parallel_mode_set",

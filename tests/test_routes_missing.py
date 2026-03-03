@@ -19,7 +19,6 @@ import time
 import pytest
 
 from core.state import state, state_lock, ActiveRun
-from services.engine import _sync_legacy_single_fields_locked
 from tests.conftest import set_running_zone
 
 
@@ -35,7 +34,6 @@ def test_status_paused_via_client(client, mock_io):
         ar.paused_at = time.monotonic()
         ar.end_time = 0.0
         state.paused = True
-        _sync_legacy_single_fields_locked()
 
     resp = client.get("/status")
     assert resp.status_code == 200
@@ -114,7 +112,6 @@ def test_parallel_disable_with_multiple_zones_sets_drain_flag(client, mock_io):
             1: ActiveRun(1, now + 60, "s", now, "manual", 60),
             2: ActiveRun(2, now + 60, "s", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     resp = client.post("/parallel", json={"enabled": False})
     assert resp.status_code == 200

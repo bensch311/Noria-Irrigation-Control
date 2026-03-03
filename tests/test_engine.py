@@ -5,7 +5,6 @@ Getestet werden:
   - _can_start_new_valve_locked
   - start_valve
   - _history_add_locked
-  - _sync_legacy_single_fields_locked
   - _active_runs_snapshot_locked
   - start_queue_item
 """
@@ -19,7 +18,6 @@ from services.engine import (
     _can_start_new_valve_locked,
     start_valve,
     _history_add_locked,
-    _sync_legacy_single_fields_locked,
     _active_runs_snapshot_locked,
     start_queue_item,
 )
@@ -98,12 +96,15 @@ class TestStartValve:
         assert ar.started_source == "manual"
         assert ar.time_unit == "Sekunden"
 
-    def test_success_syncs_legacy_fields(self, mock_io):
+    def test_success_updates_active_runs_fields(self, mock_io):
         start_valve(zone=1, duration_s=120, time_unit="Sekunden", source="schedule")
 
         with state_lock:
-            assert state.running_zone == 1
-            assert state.started_planned_s == 120
+            assert 1 in state.active_runs
+            ar = state.active_runs[1]
+            assert ar.zone == 1
+            assert ar.started_planned_s == 120
+            assert ar.started_source == "schedule"
 
     def test_success_calls_io_open(self, mock_io):
         start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
@@ -116,7 +117,6 @@ class TestStartValve:
     def test_zone_already_running_raises_409(self, mock_io, make_active_run):
         with state_lock:
             state.active_runs = {1: make_active_run(zone=1)}
-            _sync_legacy_single_fields_locked()
 
         with pytest.raises(HTTPException) as exc_info:
             start_valve(zone=1, duration_s=30, time_unit="Sekunden", source="manual")
@@ -126,7 +126,6 @@ class TestStartValve:
         with state_lock:
             state.parallel_enabled = False
             state.active_runs = {1: make_active_run(zone=1)}
-            _sync_legacy_single_fields_locked()
 
         with pytest.raises(HTTPException) as exc_info:
             start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
@@ -147,14 +146,12 @@ class TestStartValve:
         assert exc_info.value.status_code == 503
         with state_lock:
             assert state.active_runs == {}
-            assert state.running_zone is None
 
     def test_parallel_mode_allows_second_zone(self, mock_io, make_active_run):
         with state_lock:
             state.parallel_enabled = True
             state.max_concurrent_valves = 2
             state.active_runs = {1: make_active_run(zone=1)}
-            _sync_legacy_single_fields_locked()
 
         start_valve(zone=2, duration_s=30, time_unit="Sekunden", source="manual")
 
@@ -200,38 +197,6 @@ class TestHistoryAddLocked:
         with state_lock:
             _history_add_locked(zone=1, duration_s=-5, source="manual", time_unit="Sekunden")
             assert state.run_history[0].duration_s == 0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _sync_legacy_single_fields_locked
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestSyncLegacyFields:
-    def test_no_active_runs_resets_fields(self):
-        with state_lock:
-            state.running_zone = 3
-            state.end_time = 999.0
-            state.active_runs = {}
-            _sync_legacy_single_fields_locked()
-            assert state.running_zone is None
-            assert state.end_time == 0.0
-
-    def test_single_run_sets_primary_zone(self, make_active_run):
-        with state_lock:
-            state.active_runs = {3: make_active_run(zone=3, duration_s=90)}
-            _sync_legacy_single_fields_locked()
-            assert state.running_zone == 3
-            assert state.started_planned_s == 90
-
-    def test_multiple_runs_uses_lowest_zone(self, make_active_run):
-        with state_lock:
-            state.active_runs = {
-                5: make_active_run(zone=5),
-                2: make_active_run(zone=2),
-            }
-            _sync_legacy_single_fields_locked()
-            assert state.running_zone == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────

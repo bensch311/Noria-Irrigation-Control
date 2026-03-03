@@ -321,11 +321,9 @@ def make_schedule():
 
 def set_running_zone(zone: int, duration_s: int = 60, source: str = "manual"):
     """
-    Setzt state.active_runs + Sync-Felder auf einen laufenden Zustand.
+    Setzt state.active_runs auf einen laufenden Zustand.
     Muss OHNE state_lock aufgerufen werden (holt Lock intern).
     """
-    from services.engine import _sync_legacy_single_fields_locked
-
     now = time.monotonic()
     ar = ActiveRun(
         zone=zone,
@@ -337,4 +335,3 @@ def set_running_zone(zone: int, duration_s: int = 60, source: str = "manual"):
     )
     with state_lock:
         state.active_runs = {zone: ar}
-        _sync_legacy_single_fields_locked()

@@ -40,10 +40,7 @@ async def lifespan(app: FastAPI):
         from core.config import MAX_VALVES
         state.max_valves = int(MAX_VALVES)
 
-        state.running_zone = None
-        state.end_time = 0.0
         state.paused = False
-        state.remaining_s = 0
 
     load_device_config_from_disk()   # Admin hardware config (read-only)
     load_user_settings_from_disk()   # user editable settings
@@ -88,15 +85,7 @@ async def lifespan(app: FastAPI):
     # Reset runtime-only state (safety-first). Persisted queue/schedules/history remain.
     with state_lock:
         state.active_runs = {}
-        state.running_zone = None
-        state.end_time = 0.0
         state.paused = False
-        state.remaining_s = 0
-        state.started_at = 0.0
-        state.started_source = "manual"
-        state.started_planned_s = 0
-        state.paused_at = 0.0
-        state.paused_total_s = 0.0
         state.queue_state = "bereit"
         state.queue_state_before_valve_pause = "bereit"
         state.parallel_drain_logged = False

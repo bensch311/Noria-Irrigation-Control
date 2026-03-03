@@ -57,16 +57,14 @@ class HistoryItem:
 
 @dataclass
 class RunState:
-    running_zone: Optional[int] = None
-    end_time: float = 0.0
-    time_unit: str = "Minuten"
+    # Runtime state – active_runs is the single source of truth for valve state.
+    # The only top-level valve flag that is NOT in ActiveRun is the global pause
+    # boolean, because pause applies to all zones simultaneously.
+    paused: bool = False
 
     queue: List[QueueItem] | None = None
     queue_state: str = "bereit"
     queue_state_before_valve_pause: str = "bereit"
-
-    paused: bool = False
-    remaining_s: int = 0
 
     schedules: List[ScheduleRule] | None = None
     automation_enabled: bool = True
@@ -76,19 +74,12 @@ class RunState:
     queue_dirty: bool = False
     history_dirty: bool = False
 
-        # hardware fault latch (prevents starting new valves until cleared)
+    # hardware fault latch (prevents starting new valves until cleared)
     hw_faulted: bool = False
     hw_fault_reason: str = ""
     hw_fault_zone: Optional[int] = None
     hw_fault_since: str = ""
     hw_fault_close_all_attempted: bool = False
-
-    # legacy runtime accounting (primary)
-    started_at: float = 0.0
-    started_source: str = "manual"
-    started_planned_s: int = 0
-    paused_at: float = 0.0
-    paused_total_s: float = 0.0
 
     # parallel
     parallel_enabled: bool = DEFAULT_PARALLEL_ENABLED

@@ -33,7 +33,6 @@ from core.state import state, state_lock
 from services.engine import (
     _calc_actual_run_s_ar,
     _history_add_locked,
-    _sync_legacy_single_fields_locked,
     start_queue_item,
 )
 from services.io_worker import IOCommand, get_io_worker
@@ -264,9 +263,6 @@ def timer_loop() -> None:
                             automation_enabled=state.automation_enabled,
                             parallel_enabled=state.parallel_enabled,
                         )
-
-                # Legacy-Felder immer synchronisieren (auch ohne Timeouts)
-                _sync_legacy_single_fields_locked()
 
                 # Queue "fertig" prüfen – erst NACH dem Entfernen abgelaufener Zonen,
                 # damit active_runs den aktuellen (korrekten) Zustand widerspiegelt.

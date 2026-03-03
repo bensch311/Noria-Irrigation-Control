@@ -13,7 +13,6 @@ import time
 import pytest
 
 from core.state import state, state_lock, ActiveRun, QueueItem
-from services.engine import _sync_legacy_single_fields_locked
 from tests.conftest import set_running_zone
 
 

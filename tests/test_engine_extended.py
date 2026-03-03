@@ -5,7 +5,6 @@ Abgedeckt werden:
   - engine_status_payload_locked: pausierter Zustand
   - engine_status_payload_locked: hw_fault-Felder
   - _active_runs_snapshot_locked: end_time == 0.0
-  - _calc_actual_run_s_primary mit Pause-Unterbrechungen
 """
 
 import time
@@ -14,10 +13,8 @@ import pytest
 from core.state import state, state_lock, ActiveRun
 from services.engine import (
     _active_runs_snapshot_locked,
-    _calc_actual_run_s_primary,
     _calc_actual_run_s_ar,
     engine_status_payload_locked,
-    _sync_legacy_single_fields_locked,
 )
 from tests.conftest import set_running_zone
 
@@ -31,7 +28,6 @@ class TestStatusPayloadPaused:
             ar.paused_at = time.monotonic()
             ar.end_time = 0.0
             state.paused = True
-            _sync_legacy_single_fields_locked()
             payload = engine_status_payload_locked()
         assert payload["state"] == "pausiert"
         assert payload["paused"] is True
@@ -134,58 +130,10 @@ class TestActiveRunsSnapshotEdgeCases:
         assert snap == {}
 
 
-class TestCalcActualRunS:
-    def test_no_started_at_returns_zero(self):
-        with state_lock:
-            state.started_at = 0.0
-            state.paused_total_s = 0.0
-            state.paused_at = 0.0
-            result = _calc_actual_run_s_primary(time.monotonic())
-        assert result == 0
-
-    def test_simple_run_without_pause(self):
-        now = time.monotonic()
-        elapsed = 30.0
-        with state_lock:
-            state.started_at = now - elapsed
-            state.paused_total_s = 0.0
-            state.paused_at = 0.0
-            result = _calc_actual_run_s_primary(now)
-        assert 29 <= result <= 31
-
-    def test_run_with_completed_pause(self):
-        now = time.monotonic()
-        with state_lock:
-            state.started_at = now - 60.0
-            state.paused_total_s = 20.0
-            state.paused_at = 0.0
-            result = _calc_actual_run_s_primary(now)
-        assert 38 <= result <= 42
-
-    def test_run_currently_paused_includes_ongoing_pause(self):
-        now = time.monotonic()
-        with state_lock:
-            state.started_at = now - 60.0
-            state.paused_total_s = 0.0
-            state.paused_at = now - 10.0
-            result = _calc_actual_run_s_primary(now)
-        assert 48 <= result <= 52
-
-    def test_run_with_both_past_and_current_pause(self):
-        now = time.monotonic()
-        with state_lock:
-            state.started_at = now - 120.0
-            state.paused_total_s = 30.0
-            state.paused_at = now - 15.0
-            result = _calc_actual_run_s_primary(now)
-        assert 73 <= result <= 77
-
-
 class TestCalcActualRunSAr:
     """
     Tests für _calc_actual_run_s_ar – liest aus ActiveRun, nicht aus
-    Legacy-State-Feldern. Muss identisches Verhalten zu _calc_actual_run_s_primary
-    haben, ist aber für alle Zonen (inkl. primärer) korrekt.
+    Liest ausschließlich aus ActiveRun-Feldern – korrekt für alle Zonen.
     """
 
     def _make_ar(
@@ -256,21 +204,3 @@ class TestCalcActualRunSAr:
         result = _calc_actual_run_s_ar(ar, now)
         assert result == 0
 
-    def test_matches_primary_for_no_pause(self):
-        """
-        Ohne Pausen müssen _calc_actual_run_s_ar und _calc_actual_run_s_primary
-        denselben Wert liefern (primary liest Legacy-State, der im Normalfall 0 ist).
-        """
-        now = time.monotonic()
-        elapsed = 45.0
-        ar = self._make_ar(started_at=now - elapsed)
-
-        result_ar = _calc_actual_run_s_ar(ar, now)
-
-        with state_lock:
-            state.started_at = now - elapsed
-            state.paused_total_s = 0.0
-            state.paused_at = 0.0
-            result_primary = _calc_actual_run_s_primary(now)
-
-        assert result_ar == result_primary

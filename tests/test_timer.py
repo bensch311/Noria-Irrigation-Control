@@ -33,7 +33,6 @@ import pytest
 
 from core.config import HW_CLOSE_MAX_RETRIES
 from core.state import state, state_lock, ActiveRun, QueueItem
-from services.engine import _sync_legacy_single_fields_locked
 from services.io_worker import IOResult, IOCommand
 
 
@@ -128,24 +127,22 @@ class TestTimerValveTimeout:
     def test_elapsed_valve_removed_from_active_runs(self, mock_io):
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert 1 not in state.active_runs
 
-    def test_elapsed_valve_syncs_legacy_fields(self, mock_io):
+    def test_elapsed_valve_removed_from_active_runs(self, mock_io):
+        """Abgelaufene Zone wird aus active_runs entfernt (active_runs ist Source of Truth)."""
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
-            assert state.running_zone is None
-            assert state.end_time == 0.0
+            assert 1 not in state.active_runs
+            assert state.active_runs == {}
 
     def test_elapsed_valve_adds_history_entry(self, mock_io):
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, duration_s=45, source="schedule")}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert len(state.run_history) == 1
@@ -157,7 +154,6 @@ class TestTimerValveTimeout:
     def test_not_elapsed_valve_stays_active(self, mock_io):
         with state_lock:
             state.active_runs = {1: _make_active_run(1, duration_s=300)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert 1 in state.active_runs
@@ -166,7 +162,6 @@ class TestTimerValveTimeout:
         """Timer muss io_worker.send_command('close', zone) aufrufen – KEIN direkter Driver-Zugriff."""
         with state_lock:
             state.active_runs = {2: _make_elapsed_run(2)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
 
         # Prüfe ob close-Command gesendet wurde
@@ -182,7 +177,6 @@ class TestTimerValveTimeout:
                 2: _make_elapsed_run(2),
                 3: _make_elapsed_run(3),
             }
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.active_runs == {}
@@ -194,7 +188,6 @@ class TestTimerValveTimeout:
                 1: _make_elapsed_run(1, source="manual"),
                 2: _make_elapsed_run(2, source="schedule"),
             }
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert len(state.run_history) == 2
@@ -206,7 +199,6 @@ class TestTimerValveTimeout:
         with state_lock:
             state.paused = True
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             # Zone darf nicht entfernt worden sein
@@ -231,7 +223,6 @@ class TestTimerRaceConditionProtection:
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
             state.run_history = []
-            _sync_legacy_single_fields_locked()
 
         # Simuliere: io_worker.send_command "close" löscht Zone aus active_runs
         # (entspricht dem Verhalten, wenn die API /stop während Phase B aufgerufen wird)
@@ -266,7 +257,6 @@ class TestTimerHardwareErrors:
         _make_close_fail(mock_io)
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert 1 in state.active_runs
@@ -276,7 +266,6 @@ class TestTimerHardwareErrors:
         _make_close_fail(mock_io)
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=0)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.active_runs[1].hw_close_failures == 1
@@ -287,7 +276,6 @@ class TestTimerHardwareErrors:
         now_before = time.monotonic()
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.active_runs[1].end_time > now_before
@@ -298,7 +286,6 @@ class TestTimerHardwareErrors:
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1)}
             state.run_history = []
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert len(state.run_history) == 0
@@ -309,7 +296,6 @@ class TestTimerHardwareErrors:
         failures_before_last = HW_CLOSE_MAX_RETRIES - 1
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=failures_before_last)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.hw_faulted is True
@@ -321,7 +307,6 @@ class TestTimerHardwareErrors:
         _make_close_fail(mock_io)
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=0)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.hw_faulted is False
@@ -334,7 +319,6 @@ class TestTimerHardwareErrors:
         failures_before_last = HW_CLOSE_MAX_RETRIES - 1
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=failures_before_last)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
 
         close_all_cmds = [c for c in mock_io.send_command.call_args_list
@@ -350,7 +334,6 @@ class TestTimerHardwareErrors:
         failures_before_last = HW_CLOSE_MAX_RETRIES - 1
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=failures_before_last)}
-            _sync_legacy_single_fields_locked()
 
         # Erster Durchlauf: Fault wird gelatcht, close_all wird einmalig gesendet
         _run_timer_once()
@@ -379,7 +362,6 @@ class TestTimerHardwareErrors:
         now_before = time.monotonic()
         with state_lock:
             state.active_runs = {1: _make_elapsed_run(1, hw_close_failures=0)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             if 1 in state.active_runs:
@@ -531,7 +513,6 @@ class TestTimerQueueFinished:
             state.queue_state = "läuft"
             state.queue = []
             state.active_runs = {1: _make_elapsed_run(1)}
-            _sync_legacy_single_fields_locked()
         _run_timer_once()
         with state_lock:
             assert state.queue_state == "fertig"

@@ -17,7 +17,6 @@ import time
 import pytest
 
 from core.state import state, state_lock, ActiveRun
-from services.engine import _sync_legacy_single_fields_locked
 from services.io_worker import IOResult, IOCommand
 from tests.conftest import set_running_zone
 
@@ -61,7 +60,7 @@ def test_start_success(client, mock_io):
 
     with state_lock:
         assert 1 in state.active_runs
-        assert state.running_zone == 1
+        assert 1 in state.active_runs
 
 
 def test_start_calls_io_open(client, mock_io):
@@ -116,7 +115,7 @@ def test_stop_success(client, mock_io):
 
     with state_lock:
         assert state.active_runs == {}
-        assert state.running_zone is None
+        assert state.active_runs == {}
 
 
 def test_stop_adds_history_entry(client, mock_io):
@@ -163,7 +162,6 @@ def test_stop_multiple_zones(client, mock_io):
             1: ActiveRun(1, now + 60, "s", now, "manual", 60),
             2: ActiveRun(2, now + 60, "s", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     resp = client.post("/stop")
     assert resp.status_code == 200
@@ -225,7 +223,6 @@ def test_stop_partial_failure_returns_503(client, mock_io):
             1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
             2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     _make_partial_fail_io(mock_io, failing_zone=2)
 
@@ -243,7 +240,6 @@ def test_stop_partial_failure_response_contains_stopped_and_failed(client, mock_
             1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
             2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     _make_partial_fail_io(mock_io, failing_zone=2)
 
@@ -267,7 +263,6 @@ def test_stop_partial_failure_commits_only_successful_zones(client, mock_io):
             1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
             2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     _make_partial_fail_io(mock_io, failing_zone=2)
 
@@ -292,7 +287,6 @@ def test_stop_partial_failure_history_only_for_stopped_zones(client, mock_io):
             2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
         }
         state.run_history = []
-        _sync_legacy_single_fields_locked()
 
     _make_partial_fail_io(mock_io, failing_zone=2)
 
@@ -317,7 +311,6 @@ def test_stop_partial_failure_failed_zone_gets_immediate_end_time(client, mock_i
             1: ActiveRun(1, now + 60, "Sekunden", now, "manual", 60),
             2: ActiveRun(2, now + 60, "Sekunden", now, "manual", 60),
         }
-        _sync_legacy_single_fields_locked()
 
     before_stop = time.monotonic()
     _make_partial_fail_io(mock_io, failing_zone=2)
@@ -344,7 +337,6 @@ def test_stop_partial_failure_paused_zone_gets_end_time_set(client, mock_io):
         ar.remaining_s = 30
         state.active_runs = {1: ar}
         state.paused = True
-        _sync_legacy_single_fields_locked()
 
     def _fail_all_close(cmd: IOCommand, timeout_s: float = 5.0) -> IOResult:
         if cmd.action == "close":
