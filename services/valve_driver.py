@@ -1,4 +1,36 @@
 # app/services/valve_driver.py
+"""
+Ventil-Treiber: Hardware-Abstraktion für GPIO-gesteuerte Bewässerungsventile.
+
+Dieses Modul stellt eine einheitliche Schnittstelle für Ventiloperationen bereit,
+unabhängig davon ob ein echter Raspberry Pi oder eine Simulation verwendet wird.
+
+Treiber-Typen:
+  SimValveDriver    – Simulation (kein GPIO, nur Logging). Für Dev/Tests/Windows.
+  RpiGpioValveDriver – Echter Raspberry Pi GPIO via RPi.GPIO (BCM-Nummerierung).
+
+Treiber-Auswahl (Reihenfolge, see get_valve_driver()):
+  1. ENV-Variable IRRIGATION_VALVE_DRIVER ("sim" | "rpi")
+  2. device_config.json → state.valve_driver_mode
+  3. Fallback: "sim"
+
+Bei RpiGpioValveDriver:
+  - active_low=True: Relais-Board mit Active-Low-Logik (typisch für chinesische
+    8-Kanal-Relay-Boards). LOW = Relais anzieht = Ventil öffnet.
+  - active_low=False: Standard-Logik. HIGH = Relais anzieht = Ventil öffnet.
+  - Pins werden beim Init als Outputs konfiguriert und auf "geschlossen" gesetzt.
+  - close_all() ist best-effort: alle Zonen werden versucht, auch bei Teilfehlern.
+  - cleanup() gibt GPIO-Ressourcen frei – IMMER nach close_all() aufrufen.
+
+Singleton-Pattern:
+  get_valve_driver()   – gibt die globale Instanz zurück (lazy init)
+  reset_valve_driver() – setzt die Instanz zurück (für Tests / Reload nach Config-Änderung)
+  set_valve_driver()   – setzt eine vordefinierte Instanz (für Tests)
+
+ALLE Hardware-Operationen müssen über den IO-Worker-Thread laufen (services/io_worker.py).
+Den Treiber NIEMALS direkt aus dem Main-Thread oder unter state_lock aufrufen.
+"""
+
 from __future__ import annotations
 from typing import Dict, Any
 import os
@@ -7,6 +39,7 @@ from core.logging import log_event
 
 
 class ValveDriverError(RuntimeError):
+    """Fehler bei einer Hardware-Operation (open/close/close_all)."""
     pass
 
 
@@ -186,7 +219,14 @@ class RpiGpioValveDriver(BaseValveDriver):
 # --- Singleton / Accessor ---
 _driver: BaseValveDriver | None = None
 
+
 def reset_valve_driver() -> None:
+    """Setzt den globalen Valve-Driver zurück.
+
+    Wird nach einer Config-Änderung in load_device_config_from_disk() aufgerufen,
+    damit get_valve_driver() beim nächsten Aufruf einen neuen Driver initialisiert.
+    Auch für Tests nützlich.
+    """
     global _driver
     _driver = None
     log_event("valve_driver_reset", source="driver")
@@ -202,9 +242,10 @@ def set_valve_driver(driver: BaseValveDriver) -> None:
 
 
 def _read_driver_settings_from_state() -> dict[str, Any]:
-    """
-    Liest Driver-Settings aus state, falls vorhanden.
-    Wird von load_device_config_from_disk() gesetzt.
+    """Liest Driver-Settings (mode, active_low, pins) aus dem globalen State.
+
+    Der State wird von load_device_config_from_disk() (persistence.py) befüllt.
+    Diese Funktion ist der "Brücke" zwischen Persistence und Driver-Initialisierung.
     """
     try:
         from core.state import state, state_lock
@@ -219,11 +260,15 @@ def _read_driver_settings_from_state() -> dict[str, Any]:
 
 
 def get_valve_driver() -> BaseValveDriver:
-    """
+    """Gibt die globale Valve-Driver-Instanz zurück (lazy singleton).
+
     Reihenfolge (Best Practice):
       1) ENV override (wenn gesetzt)
       2) device_config.json/state
       3) fallback = sim
+
+    Bei Fehlern in der Initialisierung (z.B. RPi.GPIO nicht verfügbar,
+    fehlende GPIO-Pins) → sicherer Fallback auf SimValveDriver mit Error-Log.
     """
     global _driver
     if _driver is not None:

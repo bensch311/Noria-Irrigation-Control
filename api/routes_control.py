@@ -1,4 +1,39 @@
 # api/routes_control.py
+"""
+Steuerungs-Routen: Manuelle Ventilkontrolle und System-Konfiguration.
+
+Endpunkte:
+  GET  /status              – vollständiger Systemzustand (aktive Zonen, Queue, Fault)
+  POST /start               – einzelne Zone manuell starten
+  POST /stop                – alle aktiven Ventile sofort stoppen
+  POST /pause               – alle aktiven Ventile pausieren (Restzeit gespeichert)
+  POST /resume              – pausierte Ventile fortsetzen
+  POST /fault/clear         – Hardware-Fault quittieren (nach Operator-Prüfung)
+  GET  /automation          – Automatikmodus abfragen
+  POST /automation/enable   – Automatikmodus aktivieren
+  POST /automation/disable  – Automatikmodus deaktivieren
+  POST /automation/toggle   – Automatikmodus umschalten
+  GET  /parallel            – Parallelmodus abfragen
+  POST /parallel            – Parallelmodus setzen
+
+Sicherheitskritische Semantiken:
+  /stop: Nur Zonen die hardware-seitig erfolgreich geschlossen wurden, werden
+    aus active_runs entfernt. Fehlgeschlagene Zonen bleiben in active_runs
+    mit end_time=jetzt-1s und werden vom timer_loop via Backoff-Retry geschlossen.
+    Damit ist garantiert: logisch "gestoppt" ↔ Hardware physisch zu.
+
+  /pause: Nur wenn ALLE Zonen erfolgreich geschlossen wurden → State wird
+    pausiert. Bei Hardware-Fehler: kein State-Update (Rollback-Semantik).
+
+  /resume: Nur wenn ALLE Zonen erfolgreich geöffnet wurden → State wird
+    fortgesetzt. Bei Hardware-Fehler: State bleibt pausiert (Rollback-Semantik).
+
+  /fault/clear: Cooldown HW_FAULT_COOLDOWN_S (60s) verhindert vorschnelles
+    Quittieren. Nur wenn keine Ventile laufen.
+
+Alle Routen erfordern API-Key-Authentifizierung (X-API-Key Header).
+Schreibende Routen unterliegen MUTATION_LIMIT (Rate-Limiting).
+"""
 import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -77,6 +112,7 @@ def start(request: Request, req: StartRequest):
 #   Nur Zonen die hardware-seitig erfolgreich geschlossen wurden, werden aus
 #   active_runs entfernt und in die Historie geschrieben.
 #   Fehlgeschlagene Zonen verbleiben in active_runs mit end_time = jetzt - 1 s,
+#   damit der Timer sie beim nächsten Durchlauf via Backoff-Mechanismus erneut
 #   damit der Timer sie beim nächsten Durchlauf via Backoff-Mechanismus erneut
 #   versucht zu schließen – identisch zum normalen Timeout-Pfad.
 #

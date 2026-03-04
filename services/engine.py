@@ -1,3 +1,29 @@
+# services/engine.py
+"""
+Bewässerungs-Engine: Ventilsteuerung und Status-Aufbau.
+
+Dieses Modul enthält die zentralen Steuerungsfunktionen:
+  - start_valve()          Ventil starten (Prepare / Execute / Commit)
+  - start_queue_item()     Queue-Item starten (Wrapper um start_valve)
+  - engine_status_payload_locked()  Status-Dict für GET /status
+
+Sowie interne Hilfsfunktionen:
+  - _can_start_new_valve_locked()   Prüft Kapazität und HW-Fault
+  - _active_runs_snapshot_locked()  Serialisierbarer Snapshot der active_runs
+  - _history_add_locked()           Verlaufseintrag hinzufügen
+  - _calc_actual_run_s_ar()         Tatsächliche Laufzeit berechnen
+
+Naming-Konvention:
+  - Funktionen mit "_locked" im Namen MÜSSEN unter state_lock aufgerufen werden.
+  - start_valve() und start_queue_item() MÜSSEN OHNE state_lock aufgerufen werden
+    (sie holen den Lock intern via Prepare-Execute-Commit).
+
+Concurrency-Modell (Prepare / Execute / Commit):
+  Hardware-Operationen (GPIO) laufen ausschließlich über den io_worker-Thread.
+  Der state_lock wird NIE während eines Hardware-Calls gehalten, um Deadlocks
+  und Lock-Contention zu vermeiden.
+"""
+
 import time
 import math
 from typing import Dict
@@ -9,15 +35,39 @@ from core.logging import log_event
 from core.config import TZ
 from datetime import datetime
 
+
 def _can_start_new_valve_locked() -> bool:
-    # If hardware is faulted, block any new starts (manual/queue/schedule)
+    """Prüft, ob ein weiteres Ventil gestartet werden darf.
+
+    Berücksichtigt:
+      - Hardware-Fault-Latch (hw_faulted): blockiert jeden neuen Start
+      - Parallel-Modus aus: maximal 1 gleichzeitiges Ventil
+      - Parallel-Modus ein: maximal max_concurrent_valves gleichzeitige Ventile
+
+    MUSS unter state_lock aufgerufen werden.
+
+    Returns:
+        True wenn ein neues Ventil gestartet werden darf, sonst False.
+    """
     if getattr(state, "hw_faulted", False):
         return False
     if not state.parallel_enabled:
         return len(state.active_runs or {}) == 0
     return len(state.active_runs or {}) < max(1, int(state.max_concurrent_valves))
 
+
 def _active_runs_snapshot_locked() -> Dict[int, dict]:
+    """Erstellt einen JSON-serialisierbaren Snapshot aller aktiven Läufe.
+
+    Berechnet remaining_s live aus end_time (Lauf läuft) oder remaining_s
+    (Lauf pausiert). Das Ergebnis wird direkt in engine_status_payload_locked()
+    für das `active_runs`-Feld im /status-Response verwendet.
+
+    MUSS unter state_lock aufgerufen werden.
+
+    Returns:
+        Dict {zone: {"remaining_s", "time_unit", "started_source", "planned_s"}}
+    """
     now_m = time.monotonic()
     out: Dict[int, dict] = {}
     for zone, ar in (state.active_runs or {}).items():
@@ -37,7 +87,22 @@ def _active_runs_snapshot_locked() -> Dict[int, dict]:
         }
     return out
 
+
 def _history_add_locked(zone: int, duration_s: int, source: str, time_unit: str):
+    """Fügt einen abgeschlossenen Lauf zur Verlaufsliste hinzu.
+
+    Begrenzt die Liste automatisch auf max_history_items (aus state).
+    Setzt state.history_dirty = True → persistence_loop schreibt beim
+    nächsten Durchlauf.
+
+    MUSS unter state_lock aufgerufen werden.
+
+    Args:
+        zone:       Zonen-Nummer (1..MAX_VALVES)
+        duration_s: Tatsächlich gelaufene Sekunden
+        source:     Ursprung ("manual" | "queue" | "schedule")
+        time_unit:  Anzeigeeinheit ("Sekunden" | "Minuten")
+    """
     if state.run_history is None:
         state.run_history = []
 
@@ -56,9 +121,9 @@ def _history_add_locked(zone: int, duration_s: int, source: str, time_unit: str)
 
     state.history_dirty = True
 
+
 def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
-    """
-    Berechnet die tatsächliche Laufzeit (Sekunden) direkt aus einem ActiveRun.
+    """Berechnet die tatsächliche Laufzeit (Sekunden) direkt aus einem ActiveRun.
 
     Liest ausschließlich aus dem AR-Objekt – korrekt für alle Zonen.
 
@@ -66,6 +131,13 @@ def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
       - Ohne Pause : floor(active + eps)  → konservative Unterschätzung
       - Mit Pause  : ceil(active - eps)   → macht abgerundete Pause-Sekunden
                                             wieder sichtbar
+
+    Args:
+        ar:    Das ActiveRun-Objekt der Zone
+        now_m: Aktueller time.monotonic()-Wert
+
+    Returns:
+        Tatsächliche Laufzeit in Sekunden (>= 0)
     """
     if not ar.started_at:
         return 0
@@ -86,8 +158,7 @@ def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
 # ==================== REFACTORED: PREPARE-EXECUTE-COMMIT ====================
 
 def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
-    """
-    Startet ein Ventil via IO-Worker mit Prepare-Execute-Commit Pattern.
+    """Startet ein Ventil via IO-Worker mit Prepare-Execute-Commit Pattern.
 
     WICHTIG: Diese Funktion muss OHNE state_lock aufgerufen werden!
     Sie holt sich den Lock intern für Prepare und Commit.
@@ -96,8 +167,19 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
     1. PREPARE (unter Lock): Validierung, Context erstellen
     2. EXECUTE (ohne Lock): Hardware-Operation via IO-Worker
     3. COMMIT (unter Lock):  State-Update wenn Hardware erfolgreich
+
+    Args:
+        zone:       Zonen-Nummer (1..MAX_VALVES)
+        duration_s: Laufzeit in Sekunden
+        time_unit:  Anzeigeeinheit ("Sekunden" | "Minuten")
+        source:     Ursprung ("manual" | "queue" | "schedule")
+
+    Raises:
+        HTTPException 409: Zone läuft bereits, parallele Kapazität erschöpft
+        HTTPException 423: Hardware-Fault aktiv
+        HTTPException 503: Hardware-Fehler beim Öffnen
     """
-    
+
     # ============ PHASE 1: PREPARE (unter Lock) ============
     with state_lock:
         if state.active_runs is None:
@@ -110,12 +192,12 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
         if not _can_start_new_valve_locked():
             if getattr(state, "hw_faulted", False):
                 raise HTTPException(
-                    status_code=423, 
+                    status_code=423,
                     detail="Hardware-Fault aktiv. Start gesperrt. Bitte prüfen und /fault/clear ausführen."
                 )
             if state.parallel_enabled:
                 raise HTTPException(
-                    status_code=409, 
+                    status_code=409,
                     detail=f"Max. parallele Ventile erreicht ({state.max_concurrent_valves})."
                 )
             already = sorted(state.active_runs.keys())[0] if state.active_runs else "?"
@@ -134,14 +216,14 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
             "started_at": now_m,
             "end_time": now_m + duration_s,
         }
-    
+
     # ============ PHASE 2: EXECUTE (OHNE Lock via IO-Worker) ============
     from services.io_worker import get_io_worker, IOCommand
-    
+
     io_worker = get_io_worker()
     cmd = IOCommand(action="open", zone=zone)
     result = io_worker.send_command(cmd, timeout_s=5.0)
-    
+
     if not result.success:
         # Hardware-Fehler → Event loggen, Exception werfen
         log_event(
@@ -154,10 +236,10 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
             duration_ms=result.duration_ms
         )
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail=f"Hardware Fehler beim Öffnen von Ventil {zone}: {result.error}"
         )
-    
+
     # ============ PHASE 3: COMMIT (unter Lock) ============
     with state_lock:
         # Double-check: Zone könnte theoretisch jetzt schon belegt sein
@@ -171,7 +253,7 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
                 zone=zone,
                 message="Zone wurde zwischen Prepare und Commit von anderem Thread gestartet"
             )
-            
+
             # Hardware-Cleanup via IO-Worker (best effort, ohne Lock-Block)
             # Wir machen das async/non-blocking
             import threading
@@ -179,12 +261,12 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
                 cleanup_cmd = IOCommand(action="close", zone=zone)
                 io_worker.send_command(cleanup_cmd, timeout_s=5.0)
             threading.Thread(target=cleanup, daemon=True).start()
-            
+
             raise HTTPException(
-                status_code=409, 
+                status_code=409,
                 detail=f"Ventil {zone} wurde von anderem Request gestartet (Race Condition)"
             )
-        
+
         # Alles OK → State updaten
         state.active_runs[zone] = ActiveRun(
             zone=zone,
@@ -211,9 +293,11 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
 
 
 def start_queue_item(item: QueueItem):
-    """
-    Startet ein Queue-Item.
-    
+    """Startet ein Queue-Item.
+
+    Wrapper um start_valve() – stellt sicher dass das Argument-Mapping
+    konsistent bleibt.
+
     WICHTIG: Muss OHNE state_lock aufgerufen werden!
     """
     start_valve(
@@ -223,7 +307,24 @@ def start_queue_item(item: QueueItem):
         source=item.source,
     )
 
+
 def engine_status_payload_locked() -> dict:
+    """Baut das vollständige Status-Dict für GET /status.
+
+    Enthält sowohl Legacy-Felder (running_zone, remaining_time für
+    Single-Zone-Kompatibilität) als auch Multi-Zone-Felder (running_zones,
+    active_runs) und Hardware-Fault-Status.
+
+    Primary Zone Convention:
+      running_zone / remaining_time beziehen sich immer auf die Zone mit
+      der niedrigsten Nummer (kleinster Key in active_runs). Dies ist die
+      Kompatibilitätskonvention für Clients die nur eine Zone kennen.
+
+    MUSS unter state_lock aufgerufen werden.
+
+    Returns:
+        Dict mit allen Status-Feldern (direkt als JSON-Response verwendbar).
+    """
     # lazy import: verhindert unnötige Import-Ketten beim Modul-Import
     from services.valve_driver import get_valve_driver
     driver_name = get_valve_driver().name
@@ -289,6 +390,7 @@ def engine_status_payload_locked() -> dict:
         "hw_fault_zone": getattr(state, "hw_fault_zone", None),
         "hw_fault_since": getattr(state, "hw_fault_since", ""),
     }
+
 
 # Exports (für andere services/api)
 __all__ = [

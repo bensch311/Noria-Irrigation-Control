@@ -1,3 +1,27 @@
+# core/state.py
+"""
+Zentraler In-Memory-Zustand des Bewässerungscomputers.
+
+Dieses Modul definiert:
+  - Alle Dataclasses (ActiveRun, QueueItem, ScheduleRule, HistoryItem, RunState)
+  - Die globale Singleton-Instanz `state` (RunState)
+  - Den globalen `state_lock` (threading.Lock) für thread-sicheren Zugriff
+  - `shutdown_event` und `threads` für koordinierten Lifecycle
+
+WICHTIG – Thread-Safety:
+  Jeder Zugriff auf `state` muss unter `state_lock` erfolgen, außer in
+  Funktionen die explizit "_locked" im Namen tragen (diese erwarten, dass
+  der Lock bereits gehalten wird).
+
+  Einzige Ausnahme: read-only Zugriff auf rein immutable Felder wie
+  `state.max_valves` ist in Einzelfällen ohne Lock tolerierbar, sollte
+  aber als Ausnahme dokumentiert werden.
+
+WICHTIG – active_runs ist die einzige Quelle der Wahrheit für Ventilzustand:
+  Ein Ventil gilt genau dann als "läuft", wenn es in state.active_runs vorhanden
+  ist. Kein anderes Flag darf diesen Zustand duplizieren oder widersprechen.
+"""
+
 from __future__ import annotations
 
 import threading
@@ -11,101 +35,157 @@ threads: list[threading.Thread] = []
 
 state_lock = threading.Lock()
 
+
 @dataclass
 class ActiveRun:
+    """Repräsentiert einen aktiven Bewässerungslauf für eine Zone.
+
+    Wird in RunState.active_runs unter dem Zonen-Key gespeichert.
+    Wird nur unter state_lock erstellt/verändert/gelesen.
+    """
     zone: int
-    end_time: float
-    time_unit: str
-    started_at: float
-    started_source: str
-    started_planned_s: int
-    paused_at: float = 0.0
-    paused_total_s: float = 0.0
-    remaining_s: int = 0
-    hw_close_failures: int = 0
-    hw_next_retry_at: float = 0.0
-    hw_last_error: str = ""
+    end_time: float           # monotonic timestamp – Ablaufzeitpunkt (0.0 wenn pausiert)
+    time_unit: str            # "Sekunden" | "Minuten" – nur für Anzeige
+    started_at: float         # monotonic timestamp – Startzeitpunkt
+    started_source: str       # "manual" | "queue" | "schedule"
+    started_planned_s: int    # ursprünglich geplante Laufzeit in Sekunden
+
+    paused_at: float = 0.0          # monotonic timestamp des letzten Pause-Zeitpunkts (0.0 = nicht pausiert)
+    paused_total_s: float = 0.0     # kumulierte Pausenzeit in Sekunden (alle bisherigen Pausen)
+    remaining_s: int = 0            # verbleibende Sekunden zum Zeitpunkt der letzten Pause
+
+    # Retry/Backoff-Mechanismus für Hardware-Fehler beim Schließen (timer.py):
+    # Nach einem fehlgeschlagenen close() bleibt die Zone in active_runs und wird
+    # mit exponentiellem Backoff erneut versucht, bis HW_CLOSE_MAX_RETRIES erreicht ist.
+    hw_close_failures: int = 0      # Anzahl bisheriger fehlgeschlagener close()-Versuche
+    hw_next_retry_at: float = 0.0   # monotonic timestamp: frühester nächster Retry-Zeitpunkt
+    hw_last_error: str = ""         # Fehlermeldung des letzten Hardware-Fehlers (für Logging)
 
 
 @dataclass
 class QueueItem:
+    """Ein Eintrag in der Bewässerungswarteschlange."""
     zone: int
-    duration: int
+    duration: int       # Laufzeit in Sekunden
     time_unit: str
-    source: str = "queue"  # manual | queue | schedule
+    source: str = "queue"   # "manual" | "queue" | "schedule" – Ursprung des Eintrags
+
 
 @dataclass
 class ScheduleRule:
+    """Eine Zeitplan-Regel: wann welche Zone wie lange bewässert werden soll."""
     id: str
-    zone: int  # 1..MAX_VALVES oder 0=alle Ventile
-    weekdays: List[int]
-    start_times: List[str]
+    zone: int           # 1..MAX_VALVES oder 0 = alle Ventile sequenziell
+    weekdays: List[int] # 0=Montag .. 6=Sonntag (Python-Standard)
+    start_times: List[str]  # ["HH:MM", ...] im Format "06:00"
     duration_s: int
     time_unit: str
-    repeat: bool
+    repeat: bool        # True: wiederholt sich wöchentlich. False: Einmalregel.
     enabled: bool = True
-    last_run_on: Optional[str] = None
+    last_run_on: Optional[str] = None  # run_key "YYYY-MM-DD HH:MM" des letzten Auslösens
+
+    # Für Einmal-Regeln (repeat=False): Liste der noch ausstehenden run_keys.
+    # Format: ["Wochentag HH:MM", ...] z.B. ["2 06:00"].
+    # Wenn die Liste leer ist, wird die Regel automatisch gelöscht.
     once_pending: Optional[List[str]] = None
+
 
 @dataclass
 class HistoryItem:
-    ts_end: str
+    """Ein abgeschlossener Bewässerungslauf im Verlauf."""
+    ts_end: str         # ISO-8601-Zeitstempel des Laufendes (Europa/Berlin)
     zone: int
-    duration_s: int
-    source: str
+    duration_s: int     # tatsächlich gelaufene Sekunden
+    source: str         # "manual" | "queue" | "schedule"
     time_unit: str = "Sekunden"
+
 
 @dataclass
 class RunState:
-    # Runtime state – active_runs is the single source of truth for valve state.
-    # The only top-level valve flag that is NOT in ActiveRun is the global pause
-    # boolean, because pause applies to all zones simultaneously.
-    paused: bool = False
+    """Gesamter Laufzeit-Zustand des Bewässerungscomputers.
 
+    Instanziiert als globales Singleton `state`.
+    Alle Felder sind unter state_lock zu lesen und zu schreiben.
+
+    Felder-Gruppen:
+      - Ventil-Zustand:        paused, active_runs
+      - Queue:                 queue, queue_state, queue_state_before_valve_pause
+      - Zeitpläne:             schedules, automation_enabled, automation_block_run_key
+      - Dirty-Flags:           schedules_dirty, queue_dirty, history_dirty
+      - Hardware-Fault-Latch:  hw_faulted, hw_fault_*
+      - Parallel-Modus:        parallel_enabled, max_concurrent_valves, parallel_drain_logged
+      - Device-Konfiguration:  max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
+      - User-Settings:         max_history_items, navbar_title, accent_color, …
+      - Hard-Limits:           hard_max_runtime_s, hard_max_concurrent_valves
+      - Verlauf:               run_history
+    """
+
+    # ── Ventil-Zustand ────────────────────────────────────────────────────────
+    paused: bool = False
+    # active_runs: Zone → ActiveRun. EINZIGE Quelle der Wahrheit für laufende Ventile.
+    active_runs: Dict[int, ActiveRun] | None = None
+
+    # ── Queue ─────────────────────────────────────────────────────────────────
     queue: List[QueueItem] | None = None
-    queue_state: str = "bereit"
+    queue_state: str = "bereit"   # "bereit" | "läuft" | "pausiert" | "fertig"
+
+    # Speichert queue_state unmittelbar vor einer Ventil-Pause, damit /resume
+    # den korrekten Zustand ("läuft" vs "bereit") wiederherstellen kann.
     queue_state_before_valve_pause: str = "bereit"
 
+    # ── Zeitpläne ─────────────────────────────────────────────────────────────
     schedules: List[ScheduleRule] | None = None
     automation_enabled: bool = True
+
+    # Blockiert den scheduler_loop für genau eine Minute nach dem Start/Reload
+    # der Zeitpläne. Format: "YYYY-MM-DD HH:MM" des aktuellen run_key.
+    # Verhindert, dass ein Zeitplan beim Serverstart für die aktuelle Minute
+    # sofort ausgelöst wird, wenn er kurz vor dem Start bereits hätte laufen sollen.
     automation_block_run_key: Optional[str] = None
 
+    # ── Dirty-Flags (persistence_loop) ───────────────────────────────────────
     schedules_dirty: bool = False
     queue_dirty: bool = False
     history_dirty: bool = False
 
-    # hardware fault latch (prevents starting new valves until cleared)
+    # ── Hardware-Fault-Latch ──────────────────────────────────────────────────
+    # Wird gesetzt wenn alle HW_CLOSE_MAX_RETRIES fehlschlagen.
+    # Verhindert das Starten neuer Ventile bis /fault/clear aufgerufen wird.
     hw_faulted: bool = False
     hw_fault_reason: str = ""
     hw_fault_zone: Optional[int] = None
     hw_fault_since: str = ""
-    hw_fault_close_all_attempted: bool = False
+    hw_fault_close_all_attempted: bool = False  # True = close_all nach Fault bereits versucht
 
-    # parallel
+    # ── Parallel-Modus ────────────────────────────────────────────────────────
     parallel_enabled: bool = DEFAULT_PARALLEL_ENABLED
     max_concurrent_valves: int = MAX_CONCURRENT_VALVES
+
+    # Verhindert wiederholtes Logging beim Übergang "parallel drain → bereit".
+    # Wird auf True gesetzt wenn das Log-Event gesendet wurde, auf False zurück
+    # wenn neue Ventile starten.
     parallel_drain_logged: bool = False
 
-    # device/admin config (loaded from device_config.json)
+    # ── Device-Konfiguration (aus device_config.json) ─────────────────────────
     max_valves: int = 6
-    valve_driver_mode: str = "sim"
-    relay_active_low: bool = True
-    gpio_pins_by_zone: Dict[int, int] | None = None
+    valve_driver_mode: str = "sim"      # "sim" | "rpi"
+    relay_active_low: bool = True       # True = Relais-Board mit Active-Low-Logik
+    gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
 
-    # user settings (user_settings.json)
+    # ── User-Settings (aus user_settings.json) ────────────────────────────────
     max_history_items: int = 20
-
-    # user settings – display & defaults (user_settings.json)
     navbar_title: str = NAVBAR_TITLE
     accent_color: str = ACCENT_COLOR
     default_duration: int = DEFAULT_DURATION
     default_time_unit: str = DEFAULT_TIME_UNIT
 
-    # hard limits (device_config.json)
-    hard_max_runtime_s: int = 60 * 60
-    hard_max_concurrent_valves: int = 2
-    
-    active_runs: Dict[int, ActiveRun] | None = None
+    # ── Hard-Limits (aus device_config.json) ──────────────────────────────────
+    # Diese Limits überschreiben User-Eingaben im Route-Handler.
+    hard_max_runtime_s: int = 60 * 60           # maximale Einzellaufzeit in Sekunden
+    hard_max_concurrent_valves: int = 2         # maximale parallele Ventile (Hardware-Limit)
+
+    # ── Verlauf ───────────────────────────────────────────────────────────────
     run_history: List[HistoryItem] | None = None
+
 
 state = RunState()

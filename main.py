@@ -1,20 +1,21 @@
-# ---------------------------
-# ToDos:
-# - Persistenz der Zeitpläne (Datei/DB) -> erledigt
-# - Persistenz der Queue (Datei/DB) -> erledigt
-# - GPIO Ansteuerung (Raspberry Pi) -> erledigt
-# - Nach Stromausfall: alle Ventile stoppen, Zeitplan nachholen? -> erledigt (alle Ventile stoppen, Zeitplan wird nicht nachgeholt)
-# - GPIO-Simulation für Tests auf Nicht-Raspberry Pi Systemen -> erledigt
-# - GPIO-Errors behandeln (z.B. kein Zugriff auf /sys/class/...)
-# - GPIO-Error-Logging
-# - API Authentifizierung (Basic Auth / Token)? -> erledigt (Step 1)
-# - Rate Limiting -> erledigt (Step 2)
-# - CORS -> erledigt (Step 3)
-# - Security Response Headers -> erledigt (Step 4)
-# - Historie -> erledigt
-# - Software / Hardware Watchdog (Raspberry PI) -> erledigt (systemd WatchdogSec + sd_notify)
-# - Refactoring
-# ---------------------------
+# app/main.py
+"""
+FastAPI-Anwendung: Einstiegspunkt und Middleware-Stack.
+
+Dieses Modul instanziiert die FastAPI-App und konfiguriert:
+  - Rate-Limiting (SlowAPI)
+  - CORS (CORSMiddleware)
+  - Security-Header (SecurityHeadersMiddleware)
+  - Exception-Handler (errors.py)
+  - Alle API-Router (health, queue, schedule, control, history, settings)
+
+Der Lifecycle (Startup/Shutdown) wird vollständig in core/lifecycle.py verwaltet.
+Die App wird von uvicorn gestartet, typischerweise via systemd-Service.
+
+Offene Hardware-Punkte (noch nicht implementiert):
+  - GPIO-Fehlerbehandlung bei /sys/class/… Zugriffsproblemen
+  - GPIO-Fehler-Logging auf Treiber-Ebene (separate Log-Kategorie)
+"""
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

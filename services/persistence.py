@@ -1,4 +1,38 @@
 # services/persistence.py
+"""
+Persistenz-Schicht: Atomares Lesen und Schreiben von Zustandsdaten.
+
+Dieses Modul verwaltet alle Dateizugriffe des Bewässerungscomputers:
+
+Verwaltete Dateien:
+  schedules.json    – Zeitplan-Regeln + automation_enabled Flag
+  queue.json        – Bewässerungswarteschlange (gespeicherter Zustand)
+  history.json      – Verlauf abgeschlossener Läufe
+  device_config.json – Hardware-Konfiguration (admin-only, read-only im Betrieb)
+  user_settings.json – Vom Benutzer änderbare Einstellungen
+  runtime_state.json – Laufzeit-Toggles (parallel_enabled, max_concurrent_valves)
+
+Technische Eigenschaften:
+  Atomares Schreiben: _atomic_write_json() schreibt erst in .tmp, dann os.replace().
+    Ein Stromausfall während des Schreibens hinterlässt maximal eine .tmp-Datei,
+    nie eine halbgeschriebene Zieldatei (crash-safe).
+
+  Korrupte-Datei-Behandlung: Bei JSON-Parse-Fehler wird die korrupte Datei in
+    <name>.corrupt-<ts> umbenannt (max. CORRUPT_FILE_MAX_KEEP Backups),
+    und der State bleibt bei den Defaults/letzten bekannten Werten.
+
+  Dirty-Flag-Mechanismus: Änderungen setzen state.*_dirty=True.
+    persistence_loop() prüft alle 2s und schreibt nur geänderte Dateien.
+    Settings werden per save_user_settings_to_disk() sofort persistiert
+    (zu wichtig um auf den Loop zu warten).
+
+  Alle Lade-/Speicherfunktionen sind Thread-safe (holen state_lock intern).
+
+Background-Thread:
+  persistence_loop() läuft als Daemon-Thread und flusht dirty-State alle 2s.
+  Bei Shutdown werden alle dirty-Dateien in lifecycle.py explizit geflusht.
+"""
+
 import os
 import json
 from datetime import datetime
@@ -423,6 +457,8 @@ def load_schedules_from_disk():
         state.automation_block_run_key = None
         if state.automation_enabled:
             now = datetime.now(TZ)
+            # Blockiere die aktuelle Minute nach dem Laden, damit kein Zeitplan
+            # unmittelbar nach einem Neustart zur gerade aktuellen Minute ausgelöst wird.
             state.automation_block_run_key = now.strftime("%Y-%m-%d %H:%M")
         state.schedules = rules
         state.schedules_dirty = False
@@ -462,6 +498,8 @@ def load_queue_from_disk():
 
     with state_lock:
         state.queue = q
+        # queue_state wird bei Startup in lifecycle.py immer auf "bereit" zurückgesetzt –
+        # hier nur die Items laden, nicht den gespeicherten queue_state wiederherstellen.
         state.queue_state = "bereit"
         state.queue_dirty = False
 
@@ -509,6 +547,15 @@ def load_history_from_disk():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def persistence_loop():
+    """Background-Thread: schreibt dirty-State alle 2 Sekunden auf Disk.
+
+    Schreibt nur wenn das jeweilige dirty-Flag gesetzt ist (schedules_dirty,
+    queue_dirty, history_dirty). Nach erfolgreichem Schreiben wird das Flag
+    innerhalb der jeweiligen save_*-Funktion zurückgesetzt.
+
+    Terminiert sauber wenn shutdown_event gesetzt wird.
+    Ein letzter Flush bei Shutdown findet in lifecycle.py statt.
+    """
     from core.state import shutdown_event
 
     while not shutdown_event.is_set():

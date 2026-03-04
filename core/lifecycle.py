@@ -1,3 +1,37 @@
+# core/lifecycle.py
+"""
+FastAPI Lifespan: Startup- und Shutdown-Sequenz des Bewässerungscomputers.
+
+Dieser Modul verwaltet den gesamten Lebenszyklus der Anwendung als
+asynccontextmanager (`lifespan`), der an die FastAPI-App übergeben wird.
+
+Startup-Reihenfolge (kritisch – nicht umstellen!):
+  1. API-Key laden/generieren       (Sicherheit vor allem anderen)
+  2. State initialisieren           (Defaults setzen)
+  3. Konfigurationen laden          (device_config, user_settings, runtime_state)
+  4. Persistierte Daten laden       (schedules, queue, history)
+  5. IO-Worker starten              (MUSS vor Hardware-Ops starten)
+  6. Fail-Safe close_all            (Ventile nach Absturz/Stromausfall schließen)
+  7. Runtime-State zurücksetzen     (active_runs leeren, paused=False)
+  8. Background-Threads starten     (timer_loop, scheduler_loop, persistence_loop)
+  9. Watchdog-Thread starten        (systemd WATCHDOG=1)
+ 10. READY=1 an systemd senden
+
+Shutdown-Reihenfolge:
+  1. STOPPING=1 an systemd senden
+  2. shutdown_event setzen           (alle Threads terminieren)
+  3. Fail-Safe close_all             (Ventile bei Shutdown schließen)
+  4. Dirty-State flushen             (letzte Saves für schedules/queue/history)
+  5. Background-Threads joinen       (max. 2s pro Thread)
+  6. IO-Worker stoppen               (ZULETZT – nach allen anderen Threads)
+  7. GPIO-Cleanup                    (Pins auf Input zurücksetzen)
+
+systemd-Integration:
+  Nutzt sd_notify() für READY=1, STOPPING=1 und WATCHDOG=1.
+  Auf Nicht-systemd-Systemen (Entwicklung, Tests) ist _sd_notify() ein No-Op.
+  Erforderliche .service-Einstellungen: Type=notify, WatchdogSec=30.
+"""
+
 import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -81,7 +115,7 @@ async def lifespan(app: FastAPI):
 
         state.parallel_enabled = DEFAULT_PARALLEL_ENABLED
         state.max_concurrent_valves = MAX_CONCURRENT_VALVES
-        
+
         from core.config import MAX_VALVES
         state.max_valves = int(MAX_VALVES)
 
@@ -104,7 +138,7 @@ async def lifespan(app: FastAPI):
     try:
         cmd = IOCommand(action="close_all")
         result = io_worker.send_command(cmd, timeout_s=10.0)
-        
+
         if result.success:
             log_event(
                 "failsafe_close_all_startup",
@@ -171,7 +205,7 @@ async def lifespan(app: FastAPI):
     try:
         cmd = IOCommand(action="close_all")
         result = io_worker.send_command(cmd, timeout_s=10.0)
-        
+
         if result.success:
             log_event(
                 "failsafe_close_all_shutdown",

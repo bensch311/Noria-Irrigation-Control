@@ -1,3 +1,27 @@
+# api/routes_health.py
+"""
+Health-Endpunkt: GET /health
+
+Liefert den aktuellen Systemzustand für Monitoring und Deployment-Checks.
+
+Besonderheiten:
+  - Kein API-Key erforderlich (Monitoring-Systeme sollen ohne Auth prüfen können)
+  - HTTP-Status ist immer 200 – der `ok`-Wert im Response-Body ist das
+    eigentliche Gesundheitssignal (kompatibel mit Standard-Health-Check-Tools)
+  - ok=False signalisiert einen nicht-quittierten Hardware-Fault
+  - GPIO-Validierung (missing_zones, invalid_pins) nur bei valve_driver=rpi
+
+Response-Felder:
+  ok                  – False wenn hw_faulted=True, sonst True
+  service             – immer "irrigation"
+  version             – API-Version (int)
+  ts                  – aktueller ISO-8601-Zeitstempel
+  running_zones       – sortierte Liste aktiver Zonen
+  queue_length        – Anzahl Items in der Queue
+  hw_faulted          – True wenn Hardware-Fault aktiv (Start gesperrt)
+  hw_fault_*          – Fault-Details (reason, zone, since)
+  valves.*            – Treiber-Konfiguration und GPIO-Validierung
+"""
 from fastapi import APIRouter
 from datetime import datetime
 
@@ -5,6 +29,7 @@ from core.state import state, state_lock
 from core.config import TZ
 
 router = APIRouter()
+
 
 @router.get("/health")
 def health():
@@ -44,7 +69,7 @@ def health():
         gpio_config_valid = (len(missing_zones) == 0) and bool(gpio_validation.get("ok"))
 
     return {
-        # ok=False signalisiert Monitoring-Systemen einen nicht-quittiertem HW-Fault.
+        # ok=False signalisiert Monitoring-Systemen einen nicht-quittierten HW-Fault.
         # HTTP 200 bleibt immer erhalten – der ok-Wert im Body ist das
         # eigentliche Gesundheitssignal (kompatibel mit allen gängigen Health-Checks).
         "ok": not hw_faulted,
@@ -71,4 +96,3 @@ def health():
             "duplicate_pins": gpio_validation.get("duplicate_pins", []),
         },
     }
-

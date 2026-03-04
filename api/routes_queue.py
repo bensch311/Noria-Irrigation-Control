@@ -1,4 +1,30 @@
 # app/api/routes_queue.py
+"""
+Queue-Routen: Verwaltung der Bewässerungswarteschlange.
+
+Endpunkte:
+  GET  /queue        – aktuelle Queue-Einträge und Queue-Zustand abrufen
+  POST /queue/add    – ein oder mehrere Items einreihen (zone=0 = alle Ventile)
+  POST /queue/start  – Queue-Abarbeitung starten
+  POST /queue/pause  – Queue-Abarbeitung pausieren (laufende Ventile bleiben)
+  POST /queue/clear  – Queue vollständig leeren und zurücksetzen
+
+Queue-Zustände:
+  "bereit"   – Queue ist befüllt oder leer, wartet auf /queue/start
+  "läuft"    – Queue wird aktiv abgearbeitet (timer_loop startet nächste Items)
+  "pausiert" – Queue-Abarbeitung gestoppt (laufende Ventile nicht berührt)
+  "fertig"   – Alle Items abgearbeitet, Queue ist leer
+
+DoS-Schutz:
+  MAX_QUEUE_ITEMS begrenzt die Gesamtzahl der Queue-Einträge.
+  Die Prüfung findet unter state_lock statt (TOCTOU-sicher).
+
+Concurrency:
+  queue/start verwendet Prepare-Execute-Commit: Items werden unter Lock
+  gesammelt, dann OHNE Lock via start_queue_item() → io_worker gestartet.
+
+Alle Routen erfordern API-Key-Authentifizierung (X-API-Key Header).
+"""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock, QueueItem
