@@ -344,3 +344,71 @@ def test_schedule_delete_sets_dirty_flag(client, make_schedule):
 
     with state_lock:
         assert state.schedules_dirty is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /schedule/add – Kapazitätslimit (MAX_SCHEDULES)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _schedule_payload(**overrides) -> dict:
+    """Hilfsfunktion: gültiges ScheduleAddRequest-Payload."""
+    base = {
+        "zone": 1,
+        "weekdays": [0],
+        "start_times": ["06:00"],
+        "duration_s": 60,
+        "repeat": True,
+        "time_unit": "Sekunden",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_schedule_add_at_capacity_returns_400(client, make_schedule):
+    """
+    Wenn bereits MAX_SCHEDULES Zeitpläne vorhanden sind, muss
+    POST /schedule/add mit 400 abgelehnt werden.
+
+    DoS-Schutz: unbegrenzte Zeitplan-Liste würde Speicher und
+    Persistenz-I/O belasten.
+    """
+    from core.config import MAX_SCHEDULES
+
+    with state_lock:
+        state.schedules = [make_schedule(zone=1) for _ in range(MAX_SCHEDULES)]
+
+    resp = client.post("/schedule/add", json=_schedule_payload())
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert str(MAX_SCHEDULES) in detail
+
+
+def test_schedule_add_just_below_capacity_succeeds(client, make_schedule):
+    """
+    MAX_SCHEDULES - 1 vorhandene Einträge → ein weiterer darf hinzugefügt werden.
+    """
+    from core.config import MAX_SCHEDULES
+
+    with state_lock:
+        state.schedules = [make_schedule(zone=1) for _ in range(MAX_SCHEDULES - 1)]
+
+    resp = client.post("/schedule/add", json=_schedule_payload())
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_schedule_add_capacity_check_does_not_mutate_state_on_rejection(client, make_schedule):
+    """
+    Bei 400 darf der Schedules-State nicht verändert worden sein.
+    Die Kapazitätsprüfung findet VOR jeder State-Mutation statt.
+    """
+    from core.config import MAX_SCHEDULES
+
+    with state_lock:
+        state.schedules = [make_schedule(zone=1) for _ in range(MAX_SCHEDULES)]
+        count_before = len(state.schedules)
+
+    client.post("/schedule/add", json=_schedule_payload())
+
+    with state_lock:
+        assert len(state.schedules) == count_before

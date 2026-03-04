@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock, QueueItem
-from core.config import MAX_RUNTIME_S
+from core.config import MAX_RUNTIME_S, MAX_QUEUE_ITEMS
 from core.logging import log_event
 from core.security import require_api_key
 from core.limiter import limiter, MUTATION_LIMIT
@@ -32,6 +32,11 @@ def queue_add(request: Request, req: QueueAddRequest):
               sequenziell in die Queue eingereiht. Entspricht dem
               Verhalten von ScheduleAddRequest mit zone=0.
     zone>=1 → Einzelnes Ventil wie bisher.
+
+    Kapazitätslimit:
+    Die Queue darf MAX_QUEUE_ITEMS Einträge nicht überschreiten (DoS-Schutz).
+    Wird das Limit überschritten, gibt die Route 400 zurück. Der Prüfung
+    findet UNTER dem State-Lock statt, um TOCTOU-Races zu vermeiden.
     """
     with state_lock:
         max_v = int(getattr(state, "max_valves", 1))
@@ -51,9 +56,21 @@ def queue_add(request: Request, req: QueueAddRequest):
     zones_to_add = list(range(1, max_v + 1)) if req.zone == 0 else [req.zone]
 
     with state_lock:
+        state.queue = state.queue or []
+
+        # Kapazitätsprüfung BEVOR der Zustand verändert wird (TOCTOU-sicher).
+        if len(state.queue) + len(zones_to_add) > MAX_QUEUE_ITEMS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Queue voll: {len(state.queue)} Einträge vorhanden, "
+                    f"maximal {MAX_QUEUE_ITEMS} erlaubt. "
+                    "Bitte zuerst die Queue leeren oder abarbeiten."
+                ),
+            )
+
         if state.queue_state == "fertig":
             state.queue_state = "bereit"
-        state.queue = state.queue or []
         for z in zones_to_add:
             state.queue.append(QueueItem(zone=z, duration=req.duration, time_unit=req.time_unit, source="queue"))
         state.queue_dirty = True

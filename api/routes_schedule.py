@@ -5,13 +5,15 @@ Schedule-Routen für den Bewässerungscomputer.
 Validierungsstrategie (Step 5):
   - Struktur/Format-Validierung (weekdays 0-6, start_times HH:MM, time_unit Literal)
     → Pydantic (models/requests.py) → 422 Unprocessable Entity
-  - Laufzeit-abhängige Grenzen (zone > max_valves, duration_s > hard_max_runtime_s)
+  - Laufzeit-abhängige Grenzen (zone > max_valves, duration_s > hard_max_runtime_s,
+    Anzahl Zeitpläne > MAX_SCHEDULES)
     → Route-Handler → 400 Bad Request (State-Abhängig, kann Pydantic nicht prüfen)
 """
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock, ScheduleRule
+from core.config import MAX_SCHEDULES
 from core.logging import log_event
 from core.security import require_api_key
 from core.limiter import limiter, MUTATION_LIMIT
@@ -77,6 +79,17 @@ def add_schedule(request: Request, req: ScheduleAddRequest):
 
     with state_lock:
         state.schedules = state.schedules or []
+
+        # Kapazitätsprüfung BEVOR der Zustand verändert wird (TOCTOU-sicher).
+        if len(state.schedules) >= MAX_SCHEDULES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Maximale Anzahl Zeitpläne ({MAX_SCHEDULES}) erreicht. "
+                    "Bitte zuerst nicht mehr benötigte Zeitpläne löschen."
+                ),
+            )
+
         state.schedules.append(rule)
         state.schedules_dirty = True
 

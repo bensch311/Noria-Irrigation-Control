@@ -50,7 +50,14 @@ DEFAULT_PARALLEL_ENABLED = False
 HW_CLOSE_MAX_RETRIES = 5          # wie oft close() je Zone maximal versucht wird
 HW_RETRY_BACKOFF_BASE_S = 1.0     # 1,2,4,8,... Sekunden
 HW_RETRY_BACKOFF_MAX_S = 30.0     # Cap
-HW_FAULT_COOLDOWN_S = 60.0        # nach Fault: frühestens nach X Sekunden wieder freigeben (operator ack)
+HW_FAULT_COOLDOWN_S = 60.0        # nach Fault: frühestens nach X Sekunden quittierbar (Operator-Ack)
+
+# DoS-Schutz: maximale Anzahl Einträge in Queue und Zeitplan-Liste.
+# Unbegrenzte Listen würden bei gezielten Requests Arbeitsspeicher und
+# Persistenz-I/O belasten. Die Werte sind großzügig gewählt und schränken
+# den normalen Betrieb eines Gemüsebaubetriebs nicht ein.
+MAX_QUEUE_ITEMS = 50      # max. Einträge in der Bewässerungsqueue
+MAX_SCHEDULES   = 20      # max. gespeicherte Zeitpläne
 
 # Corrupt-Datei-Aufräumen: wie viele .corrupt-<ts>-Backups pro Datei maximal
 # behalten werden. Ältere werden nach jedem _backup_corrupt_file()-Aufruf gelöscht.

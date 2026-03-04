@@ -13,6 +13,13 @@ Design:
 
 Konstante Zeitvergleich via secrets.compare_digest() verhindert Timing-Angriffe.
 
+Dateisystem-Sicherheit:
+- api_key.txt wird mit Berechtigungen 600 (rw-------) erstellt und beim
+  Laden auf 600 gesetzt (repariert Dateien die vor dieser Änderung erstellt wurden).
+- Atomares Schreiben via .tmp + os.replace() verhindert Teildateien bei Absturz.
+  chmod wird auf die .tmp-Datei VOR os.replace() gesetzt; os.replace() überträgt
+  auf Linux die Inode-Berechtigungen der Quelldatei auf das Ziel.
+
 Step 6 – Audit Logging:
 - get_client_ip(): zentrale Hilfsfunktion für IP-Extraktion aus Request.
   Berücksichtigt X-Forwarded-For für Proxy-Setups (nginx).
@@ -20,6 +27,7 @@ Step 6 – Audit Logging:
 """
 
 import os
+import stat
 import secrets
 
 from fastapi import Header, HTTPException, Request
@@ -33,6 +41,9 @@ from core.logging import log_event, logger
 _api_key: str = ""
 
 _KEY_LENGTH = 64  # Zeichen; entspricht 256 bit (secrets.token_hex(32))
+
+# Berechtigungen für api_key.txt: nur Owner darf lesen und schreiben (600).
+_KEY_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 
 
 def _is_valid_key_format(key: str) -> bool:
@@ -51,6 +62,11 @@ def load_or_create_api_key() -> str:
     Muss genau einmal beim Startup aufgerufen werden (core/lifecycle.py).
     Setzt die globale Modulvariable _api_key.
 
+    Sicherheit:
+    - Neue Datei wird mit chmod 600 erstellt (nur Owner lesen/schreiben).
+    - Bestehende Datei wird ebenfalls auf 600 gesetzt, um Dateien zu
+      reparieren, die vor dieser Änderung ohne explizites chmod erstellt wurden.
+
     Returns:
         Den aktiven API-Key (64 Hex-Zeichen).
     """
@@ -64,6 +80,11 @@ def load_or_create_api_key() -> str:
 
             if _is_valid_key_format(key):
                 _api_key = key
+                # Berechtigungen korrigieren (idempotent; repariert Altdateien).
+                try:
+                    os.chmod(API_KEY_FILE, _KEY_FILE_MODE)
+                except OSError:
+                    logger.warning("api_key: chmod 600 auf bestehende Datei fehlgeschlagen")
                 log_event("api_key_loaded", source="system")
                 return _api_key
 
@@ -92,6 +113,9 @@ def load_or_create_api_key() -> str:
         tmp_path = API_KEY_FILE + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(new_key)
+        # chmod 600 VOR os.replace(): os.replace() überträgt die Inode-Berechtigungen
+        # der tmp-Datei auf das Ziel – die finale api_key.txt hat damit chmod 600.
+        os.chmod(tmp_path, _KEY_FILE_MODE)
         os.replace(tmp_path, API_KEY_FILE)  # atomares Ersetzen
         log_event("api_key_generated", source="system")
     except OSError:

@@ -243,3 +243,66 @@ def test_queue_clear(client):
         assert state.queue == []
         assert state.queue_state == "bereit"
         assert state.queue_dirty is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /queue/add – Kapazitätslimit (MAX_QUEUE_ITEMS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_queue_add_at_capacity_returns_400(client):
+    """
+    Wenn die Queue bereits MAX_QUEUE_ITEMS Einträge hat, muss POST /queue/add
+    mit 400 abgelehnt werden.
+
+    DoS-Schutz: unbegrenzte Queue würde bei gezielten Requests Arbeitsspeicher
+    und Persistenz-I/O belasten.
+    """
+    from core.config import MAX_QUEUE_ITEMS
+
+    with state_lock:
+        state.queue = [
+            QueueItem(zone=1, duration=60, time_unit="Sekunden", source="queue")
+            for _ in range(MAX_QUEUE_ITEMS)
+        ]
+
+    resp = client.post("/queue/add", json={"zone": 1, "duration": 60, "time_unit": "Sekunden"})
+    assert resp.status_code == 400
+    assert "voll" in resp.json()["detail"].lower() or str(MAX_QUEUE_ITEMS) in resp.json()["detail"]
+
+
+def test_queue_add_zone0_at_capacity_returns_400(client):
+    """
+    zone=0 würde max_valves Items hinzufügen. Wenn Queue + max_valves > MAX_QUEUE_ITEMS,
+    muss 400 zurückgegeben werden.
+    """
+    from core.config import MAX_QUEUE_ITEMS
+
+    with state_lock:
+        max_v = int(getattr(state, "max_valves", 1))
+        # Queue so befüllen, dass zone=0 das Limit überschreiten würde
+        fill_count = MAX_QUEUE_ITEMS - max_v + 1  # ein Item zu viel
+        state.queue = [
+            QueueItem(zone=1, duration=60, time_unit="Sekunden", source="queue")
+            for _ in range(fill_count)
+        ]
+
+    resp = client.post("/queue/add", json={"zone": 0, "duration": 60, "time_unit": "Sekunden"})
+    assert resp.status_code == 400
+
+
+def test_queue_add_just_below_capacity_succeeds(client):
+    """
+    Queue mit MAX_QUEUE_ITEMS - 1 Einträgen → ein weiterer Eintrag darf hinzugefügt werden.
+    """
+    from core.config import MAX_QUEUE_ITEMS
+
+    with state_lock:
+        state.queue = [
+            QueueItem(zone=1, duration=60, time_unit="Sekunden", source="queue")
+            for _ in range(MAX_QUEUE_ITEMS - 1)
+        ]
+
+    resp = client.post("/queue/add", json={"zone": 1, "duration": 60, "time_unit": "Sekunden"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True

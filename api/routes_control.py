@@ -4,7 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.state import state, state_lock
-from core.config import MAX_RUNTIME_S, TZ
+from core.config import MAX_RUNTIME_S, TZ, HW_FAULT_COOLDOWN_S
 from core.logging import log_event
 from core.security import require_api_key
 from core.limiter import limiter, MUTATION_LIMIT
@@ -380,6 +380,14 @@ def resume_current(request: Request):
 
 # ---------------------------
 # POST /fault/clear -> Quittiert Hardware-Fault (Operator-Ack)
+#
+# Cooldown-Design:
+#   HW_FAULT_COOLDOWN_S (aktuell 60 s) verhindert vorschnelles Quittieren direkt
+#   nach dem Fault. Der Operator soll Zeit haben, die Hardware wirklich zu
+#   prüfen bevor die Sperre aufgehoben wird.
+#   Ist hw_fault_since nicht gesetzt oder nicht parsierbar, wird der Cooldown
+#   übersprungen (fail open) – damit bestehende Betriebsabläufe nicht blockiert
+#   werden, wenn das Feld fehlt (z.B. Migration von Altdaten).
 # ---------------------------
 @router.post("/fault/clear")
 @limiter.limit(MUTATION_LIMIT)
@@ -394,6 +402,27 @@ def clear_fault(request: Request):
                 status_code=409,
                 detail="Fault kann nur quittiert werden, wenn keine Ventile laufen."
             )
+
+        # Cooldown-Prüfung: verhindert vorschnelles Quittieren.
+        # Nur wenn hw_fault_since gesetzt UND parsierbar (fail open bei fehlendem Wert).
+        if state.hw_fault_since:
+            try:
+                fault_dt = datetime.fromisoformat(state.hw_fault_since)
+                elapsed_s = (datetime.now(TZ) - fault_dt).total_seconds()
+                if elapsed_s < HW_FAULT_COOLDOWN_S:
+                    remaining = int(HW_FAULT_COOLDOWN_S - elapsed_s) + 1
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Fault-Quittierung gesperrt: Cooldown noch {remaining}s aktiv "
+                            f"(gesamt {int(HW_FAULT_COOLDOWN_S)}s). "
+                            "Bitte Hardware prüfen und dann erneut versuchen."
+                        ),
+                    )
+            except HTTPException:
+                raise  # HTTPException weiterwerfen, nicht schlucken
+            except Exception:
+                pass  # hw_fault_since nicht parsierbar → fail open (Operator-Convenience)
 
         state.hw_faulted = False
         state.hw_fault_reason = ""

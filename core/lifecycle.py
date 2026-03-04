@@ -21,6 +21,51 @@ from services.persistence import persistence_loop
 from services.io_worker import get_io_worker, IOCommand
 from core.security import load_or_create_api_key
 
+
+# ---------------------------------------------------------------------------
+# systemd sd_notify Integration
+#
+# Sendet Statussignale an systemd wenn die systemd-python Bibliothek verfügbar
+# ist. Auf Nicht-systemd-Systemen (Entwicklung, Tests) ist _sd_notify() ein
+# reines No-Op – kein Import-Fehler, kein Crash.
+#
+# Wichtige Signale:
+#   READY=1     → Service ist bereit (ExecStart abgeschlossen)
+#   STOPPING=1  → Graceful Shutdown beginnt
+#   WATCHDOG=1  → Watchdog-Keepalive (muss innerhalb WatchdogSec/2 gesendet werden)
+#
+# Voraussetzung in der .service-Datei:
+#   Type=notify
+#   WatchdogSec=30
+# ---------------------------------------------------------------------------
+
+def _sd_notify(msg: str) -> None:
+    """Sendet eine Statusmeldung an systemd (No-Op wenn systemd nicht verfügbar)."""
+    try:
+        import systemd.daemon  # type: ignore
+        systemd.daemon.notify(msg)
+    except ImportError:
+        pass  # Nicht auf systemd-System (Dev/Test) → erwartetes Verhalten
+    except Exception:
+        logger.debug("sd_notify(%r) fehlgeschlagen", msg)
+
+
+def _watchdog_loop(shutdown_ev: threading.Event, interval_s: float = 10.0) -> None:
+    """Sendet periodisch WATCHDOG=1 an systemd.
+
+    Hält den systemd Hardware-Watchdog am Leben (WatchdogSec=30 in .service).
+    Wenn dieser Thread stoppt oder der Prozess hängt, erkennt systemd das nach
+    WatchdogSec Sekunden und startet den Service neu (Restart=on-failure).
+
+    interval_s MUSS deutlich kleiner als WatchdogSec/2 sein (10s << 15s).
+    Der Loop terminiert sauber wenn shutdown_ev gesetzt wird.
+    """
+    log_event("watchdog_loop_started", source="system", interval_s=interval_s)
+    while not shutdown_ev.wait(timeout=interval_s):
+        _sd_notify("WATCHDOG=1")
+    log_event("watchdog_loop_stopped", source="system")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # STARTUP
@@ -98,11 +143,28 @@ async def lifespan(app: FastAPI):
         th.start()
         threads.append(th)
 
+    # Watchdog-Thread: sendet periodisch WATCHDOG=1 an systemd.
+    # Läuft als Daemon-Thread, terminiert sauber wenn shutdown_event gesetzt wird.
+    th_wd = threading.Thread(
+        target=_watchdog_loop,
+        args=(shutdown_event, 10.0),
+        daemon=True,
+        name="watchdog_loop",
+    )
+    th_wd.start()
+    threads.append(th_wd)
+
     log_event("service_start", source="system", version="v1", persistence=True)
+
+    # systemd signalisieren: Service ist bereit (Type=notify in .service-Datei)
+    _sd_notify("READY=1")
 
     yield
 
     # SHUTDOWN
+    # systemd signalisieren: Graceful Shutdown beginnt (stoppt Watchdog-Timer in systemd)
+    _sd_notify("STOPPING=1")
+
     shutdown_event.set()
 
     # Best-effort: try to close everything on shutdown as well.

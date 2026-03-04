@@ -822,3 +822,79 @@ class TestAuditLogging:
         events = self._get_events_by_type(caplog, "auth_failure")
         assert len(events) >= 1
         assert events[0].get("client_ip") == "203.0.113.5"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API Key File – Dateisystem-Berechtigungen (chmod 600)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestApiKeyFilePermissions:
+    """
+    api_key.txt muss mit chmod 600 erstellt werden und beim Laden auf 600 gesetzt
+    werden (repariert Dateien die ohne explizites chmod erstellt wurden).
+
+    Sicherheitsregel: Nur der Prozess-Owner darf die Datei lesen und schreiben.
+    Andere Benutzer auf dem System (z.B. www-data) dürfen den Key nicht lesen.
+    """
+
+    def test_new_api_key_file_has_mode_600(self, tmp_path, monkeypatch):
+        """
+        Beim Generieren einer neuen api_key.txt werden die Berechtigungen
+        auf 600 (rw-------) gesetzt.
+        """
+        import stat as _stat
+        import core.security as security_mod
+
+        key_file = tmp_path / "api_key.txt"
+        monkeypatch.setattr(security_mod, "API_KEY_FILE", str(key_file))
+        # _api_key leeren damit load_or_create nicht früh zurückkehrt
+        monkeypatch.setattr(security_mod, "_api_key", "")
+
+        security_mod.load_or_create_api_key()
+
+        assert key_file.exists(), "api_key.txt wurde nicht erstellt"
+        mode = _stat.S_IMODE(key_file.stat().st_mode)
+        assert mode == 0o600, f"Erwartet 0o600, erhalten {oct(mode)}"
+
+    def test_existing_api_key_file_gets_chmod_600_on_load(self, tmp_path, monkeypatch):
+        """
+        Eine bestehende api_key.txt mit falschen Berechtigungen (644) wird beim
+        Laden automatisch auf 600 korrigiert.
+
+        Repariert Dateien die vor Einführung des expliziten chmod erstellt wurden.
+        """
+        import stat as _stat
+        import core.security as security_mod
+
+        key_file = tmp_path / "api_key.txt"
+        valid_key = "a" * 64  # 64 gültige Hex-Zeichen (alle 'a')
+        key_file.write_text(valid_key, encoding="utf-8")
+        key_file.chmod(0o644)  # absichtlich falsche Berechtigungen
+
+        monkeypatch.setattr(security_mod, "API_KEY_FILE", str(key_file))
+        monkeypatch.setattr(security_mod, "_api_key", "")
+
+        loaded_key = security_mod.load_or_create_api_key()
+
+        assert loaded_key == valid_key, "Geladener Key stimmt nicht überein"
+        mode = _stat.S_IMODE(key_file.stat().st_mode)
+        assert mode == 0o600, f"Erwartet 0o600 nach Load, erhalten {oct(mode)}"
+
+    def test_api_key_file_content_unchanged_after_chmod(self, tmp_path, monkeypatch):
+        """
+        Das Setzen von chmod darf den Key-Inhalt nicht verändern.
+        """
+        import core.security as security_mod
+
+        key_file = tmp_path / "api_key.txt"
+        valid_key = "deadbeef" * 8  # 64 Hex-Zeichen
+        key_file.write_text(valid_key, encoding="utf-8")
+        key_file.chmod(0o644)
+
+        monkeypatch.setattr(security_mod, "API_KEY_FILE", str(key_file))
+        monkeypatch.setattr(security_mod, "_api_key", "")
+
+        loaded_key = security_mod.load_or_create_api_key()
+
+        assert loaded_key == valid_key
+        assert key_file.read_text(encoding="utf-8").strip() == valid_key

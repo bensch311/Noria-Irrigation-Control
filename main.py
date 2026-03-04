@@ -12,7 +12,7 @@
 # - CORS -> erledigt (Step 3)
 # - Security Response Headers -> erledigt (Step 4)
 # - Historie -> erledigt
-# - Software / Hardware Watchdog (Raspberry PI)
+# - Software / Hardware Watchdog (Raspberry PI) -> erledigt (systemd WatchdogSec + sd_notify)
 # - Refactoring
 # ---------------------------
 
@@ -20,7 +20,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 
-from api import routes_history
 from api.middleware import SecurityHeadersMiddleware
 from core.lifecycle import lifespan
 from core.limiter import limiter

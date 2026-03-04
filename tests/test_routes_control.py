@@ -493,10 +493,12 @@ def test_resume_hw_error_returns_503(client, failing_io):
 
 
 def test_fault_clear_success(client):
+    """Fault ohne hw_fault_since → Cooldown wird übersprungen (fail open), sofortiges Quittieren OK."""
     with state_lock:
         state.hw_faulted = True
         state.hw_fault_reason = "close_failed_max_retries"
         state.hw_fault_zone = 2
+        state.hw_fault_since = ""  # leer → Cooldown-Prüfung übersprungen
 
     resp = client.post("/fault/clear")
     assert resp.status_code == 200
@@ -522,6 +524,74 @@ def test_fault_clear_with_running_zones_returns_409(client, mock_io):
 
     resp = client.post("/fault/clear")
     assert resp.status_code == 409
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /fault/clear – Cooldown (HW_FAULT_COOLDOWN_S)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fault_clear_cooldown_active_returns_409(client):
+    """
+    Wenn hw_fault_since gesetzt und Cooldown noch nicht abgelaufen → 409.
+
+    Schutz: Operator soll nicht sofort nach dem Fault quittieren können,
+    ohne die Hardware wirklich geprüft zu haben.
+    """
+    from datetime import datetime, timedelta
+    from core.config import TZ, HW_FAULT_COOLDOWN_S
+
+    with state_lock:
+        state.hw_faulted = True
+        state.hw_fault_reason = "close_failed_max_retries"
+        state.hw_fault_zone = 2
+        # Fault erst vor 5 Sekunden aufgetreten → Cooldown noch aktiv
+        recent = datetime.now(TZ) - timedelta(seconds=5)
+        state.hw_fault_since = recent.isoformat(timespec="seconds")
+
+    resp = client.post("/fault/clear")
+    assert resp.status_code == 409
+    assert "Cooldown" in resp.json()["detail"]
+
+    # State muss unverändert sein (nicht gecleared)
+    with state_lock:
+        assert state.hw_faulted is True
+
+
+def test_fault_clear_cooldown_expired_allows_clear(client):
+    """
+    Wenn Cooldown abgelaufen ist, darf gecleared werden.
+    """
+    from datetime import datetime, timedelta
+    from core.config import TZ, HW_FAULT_COOLDOWN_S
+
+    with state_lock:
+        state.hw_faulted = True
+        state.hw_fault_reason = "close_failed_max_retries"
+        state.hw_fault_zone = 1
+        # Fault vor (Cooldown + 10) Sekunden → eindeutig abgelaufen
+        old_fault = datetime.now(TZ) - timedelta(seconds=HW_FAULT_COOLDOWN_S + 10)
+        state.hw_fault_since = old_fault.isoformat(timespec="seconds")
+
+    resp = client.post("/fault/clear")
+    assert resp.status_code == 200
+    assert resp.json()["cleared"] is True
+
+    with state_lock:
+        assert state.hw_faulted is False
+
+
+def test_fault_clear_unparseable_fault_since_allows_clear(client):
+    """
+    Wenn hw_fault_since nicht parsierbar ist, wird Cooldown übersprungen
+    (fail open – Operator-Convenience bei Datenmigration).
+    """
+    with state_lock:
+        state.hw_faulted = True
+        state.hw_fault_since = "nicht-ein-datum"
+
+    resp = client.post("/fault/clear")
+    assert resp.status_code == 200
+    assert resp.json()["cleared"] is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
