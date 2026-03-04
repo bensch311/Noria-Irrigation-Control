@@ -4,8 +4,10 @@ P:.
 │   pytest.ini
 │   main.py
 │   app.py
+│   app_helpers.py
 │
 ├───logs
+│       irrigation.jsonl.2
 │       irrigation.jsonl.1
 │       irrigation.jsonl
 │
@@ -13,20 +15,20 @@ P:.
 │       device_config.json
 │       api_key.txt
 │       frontend_config.json
-│       runtime_state.json
 │       user_settings.json
-│       queue.json
 │       history.json
 │       schedules.json
+│       queue.json
+│       runtime_state.json
 │
 ├───core
 │   │   logging.py
 │   │   __init__.py
-│   │   lifecycle.py
 │   │   limiter.py
 │   │   security.py
-│   │   state.py
 │   │   config.py
+│   │   state.py
+│   │   lifecycle.py
 │
 ├───models
 │   │   __init__.py
@@ -34,45 +36,45 @@ P:.
 │
 ├───services
 │   │   __init__.py
-│   │   valve_driver.py
 │   │   scheduler.py
 │   │   io_worker.py
-│   │   timer.py
-│   │   engine.py
 │   │   persistence.py
+│   │   engine.py
+│   │   timer.py
+│   │   valve_driver.py
 │
 ├───api
 │   │   __init__.py
 │   │   routes_history.py
-│   │   routes_health.py
 │   │   middleware.py
 │   │   routes_schedule.py
 │   │   errors.py
-│   │   routes_control.py
 │   │   routes_settings.py
 │   │   routes_queue.py
+│   │   routes_health.py
+│   │   routes_control.py
 │
 ├───tests
 │   │   test_io_worker.py
-│   │   test_engine.py
 │   │   test_history.py
 │   │   __init__.py
-│   │   test_health.py
-│   │   test_engine_extended.py
 │   │   test_persistence_loop.py
-│   │   test_routes_missing.py
-│   │   test_valve_driver.py
-│   │   test_scheduler.py
-│   │   test_persistence.py
 │   │   test_routes_schedule.py
-│   │   test_security.py
-│   │   test_timer.py
-│   │   test_routes_control.py
-│   │   conftest.py
 │   │   test_routes_settings.py
-│   │   test_routes_queue.py
 │   │   test_input_validation.py
-│   │
+│   │   test_health.py
+│   │   test_persistence.py
+│   │   test_engine.py
+│   │   test_timer.py
+│   │   test_routes_queue.py
+│   │   test_engine_extended.py
+│   │   test_routes_control.py
+│   │   test_routes_missing.py
+│   │   conftest.py
+│   │   test_scheduler.py
+│   │   test_valve_driver.py
+│   │   test_frontend_helpers.py
+│   │   test_security.py
 │
 └───www
         logo.svg
