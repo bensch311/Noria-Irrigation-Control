@@ -168,4 +168,19 @@ async def lifespan(app: FastAPI):
             error=repr(e)
         )
 
+    # GPIO-Cleanup nach IO-Worker-Shutdown: Pins auf Input zurücksetzen.
+    # Reihenfolge ist sicherheitskritisch: close_all() (oben) → io_worker.shutdown() → cleanup().
+    # SimValveDriver.cleanup() ist ein No-Op.
+    try:
+        from services.valve_driver import get_valve_driver
+        get_valve_driver().cleanup()
+    except Exception as e:
+        logger.exception("valve driver cleanup failed")
+        log_event(
+            "valve_driver_cleanup_failed",
+            level="error",
+            source="system",
+            error=repr(e)
+        )
+
     log_event("service_stop", source="system")

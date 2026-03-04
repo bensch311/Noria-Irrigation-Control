@@ -522,3 +522,39 @@ class TestGetValveDriver:
         set_valve_driver(custom)
         assert get_valve_driver() is custom
         # Cleanup durch autouse sim_driver Fixture erledigt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cleanup()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSimValveDriverCleanup:
+    def test_cleanup_does_not_raise(self):
+        """SimValveDriver.cleanup() ist ein No-Op und darf nicht werfen."""
+        drv = SimValveDriver()
+        drv.cleanup()  # kein raise erwartet
+
+
+class TestRpiGpioValveDriverCleanup:
+    def test_cleanup_calls_gpio_cleanup(self):
+        """cleanup() muss GPIO.cleanup() genau einmal aufrufen."""
+        driver, gpio = _make_rpi_driver({1: 17})
+        driver.cleanup()
+        gpio.cleanup.assert_called_once_with()
+
+    def test_cleanup_does_not_raise_on_gpio_error(self):
+        """Wenn GPIO.cleanup() eine Exception wirft, darf cleanup() nicht werfen.
+        Der Fehler wird geloggt (best-effort, identisch zu close_all-Semantik)."""
+        driver, gpio = _make_rpi_driver({1: 17})
+        gpio.cleanup.side_effect = RuntimeError("GPIO kaputt")
+        driver.cleanup()  # kein raise erwartet
+
+    def test_cleanup_logs_error_on_gpio_failure(self, caplog):
+        """Bei GPIO-Fehler muss ein valve_driver_gpio_cleanup_error-Event geloggt werden."""
+        import logging
+        driver, gpio = _make_rpi_driver({1: 17})
+        gpio.cleanup.side_effect = RuntimeError("GPIO kaputt")
+        with caplog.at_level(logging.ERROR):
+            driver.cleanup()
+        assert any("valve_driver_gpio_cleanup_error" in r.message for r in caplog.records)

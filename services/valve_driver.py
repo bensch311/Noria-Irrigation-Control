@@ -54,6 +54,13 @@ class BaseValveDriver:
     def close_all(self) -> None:
         raise NotImplementedError
 
+    def cleanup(self) -> None:
+        """Gibt Hardware-Ressourcen frei (z.B. GPIO.cleanup() auf RPi).
+        Default ist ein No-Op – Unterklassen überschreiben bei Bedarf.
+        Muss NACH close_all() aufgerufen werden.
+        """
+        pass
+
 
 @dataclass
 class SimValveDriver(BaseValveDriver):
@@ -156,6 +163,24 @@ class RpiGpioValveDriver(BaseValveDriver):
             failed_zones=failed_zones,
             failed_count=len(failed_zones),
         )
+
+    def cleanup(self) -> None:
+        """Gibt GPIO-Ressourcen frei und setzt alle Pins auf Input zurück.
+
+        Muss nach close_all() aufgerufen werden – niemals davor, da
+        GPIO.cleanup() die Pin-Kontrolle sofort abgibt.
+        """
+        try:
+            self._GPIO.cleanup()
+            log_event("valve_driver_gpio_cleanup", source="driver", driver=self.name)
+        except Exception as e:
+            log_event(
+                "valve_driver_gpio_cleanup_error",
+                level="error",
+                source="driver",
+                driver=self.name,
+                error=repr(e),
+            )
 
 
 # --- Singleton / Accessor ---
