@@ -65,6 +65,7 @@ Step 6 – Audit Logging mit Client-IP:
 import json
 import logging
 import os
+import sys
 
 import pytest
 from fastapi import FastAPI
@@ -828,6 +829,11 @@ class TestAuditLogging:
 # API Key File – Dateisystem-Berechtigungen (chmod 600)
 # ─────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Unix-Dateiberechtigungen (chmod 600) existieren nicht auf Windows. "
+           "Der Produktions-Code läuft auf Linux (Raspberry Pi) – dort greift chmod korrekt.",
+)
 class TestApiKeyFilePermissions:
     """
     api_key.txt muss mit chmod 600 erstellt werden und beim Laden auf 600 gesetzt

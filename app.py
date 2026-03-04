@@ -28,37 +28,15 @@ from faicons import icon_svg as icon
 # ANZAHL_VENTILE liest MAX_VALVES aus data/device_config.json –
 # Single Source of Truth, kein manuelles Doppelpflegen.
 
-import json as _json
-
-def _load_frontend_config() -> dict:
-    """Laedt frontend_config.json; bei Fehler: Fallback-Dict."""
-    _defaults = {
-        "base_url":                "http://127.0.0.1:8000",
-        "poll_status_s":           1,
-        "poll_slow_s":             5,
-        "backend_fail_threshold":  3,
-        "health_timeout_s":        0.8,
-        "anzahl_ventile_fallback": 6,
-        "navbar_logo":             "",   # Dateiname im www/-Ordner, z.B. "logo.svg". Leer = kein Logo.
-    }
-    try:
-        raw = Path("data/frontend_config.json").read_text(encoding="utf-8")
-        data = _json.loads(raw)
-        return {**_defaults, **{k: v for k, v in data.items() if not k.startswith("_")}}
-    except Exception:
-        return _defaults
-
-def _read_max_valves_from_device_config(fallback: int) -> int:
-    """Liest MAX_VALVES aus data/device_config.json (gleicher Pi).
-    Frontend und Backend laufen auf derselben Maschine – direkter Dateizugriff
-    ist die sauberste Loesung: kein API-Call beim Start, keine Race-Condition.
-    """
-    try:
-        raw = Path("data/device_config.json").read_text(encoding="utf-8")
-        cfg = _json.loads(raw)
-        return max(1, int(cfg.get("device", {}).get("MAX_VALVES", fallback)))
-    except Exception:
-        return fallback
+from app_helpers import (
+    WEEKDAY_CHOICES as _WEEKDAY_CHOICES_IMPORT,
+    _load_frontend_config,
+    _read_max_valves_from_device_config,
+    fmt_mmss,
+    fmt_duration,
+    fmt_weekdays,
+    _json_or_none,
+)
 
 _cfg = _load_frontend_config()
 
@@ -82,10 +60,8 @@ NAVBAR_LOGO_PATH: str = (
 # Aenderungen erfordern Neustart des Frontends (MAX_VALVES ist Hardware-Konfig).
 ANZAHL_VENTILE = _read_max_valves_from_device_config(_cfg["anzahl_ventile_fallback"])
 
-WEEKDAY_CHOICES = {
-    "0": "Mo", "1": "Di", "2": "Mi",
-    "3": "Do", "4": "Fr", "5": "Sa", "6": "So",
-}
+# WEEKDAY_CHOICES: importiert aus app_helpers (zusammen mit fmt_weekdays etc.)
+WEEKDAY_CHOICES = _WEEKDAY_CHOICES_IMPORT
 
 # --- API-Key -----------------------------------------------------------------
 
@@ -140,14 +116,6 @@ def _delete(path: str, json: Any = None, timeout: float = 3.0) -> requests.Respo
     except Exception:
         return None
 
-def _json_or_none(r: requests.Response | None) -> dict | None:
-    if r is None:
-        return None
-    try:
-        return r.json()
-    except Exception:
-        return None
-
 
 # --- Auth Handling -----------------------------------------------------------
 
@@ -195,17 +163,7 @@ def _wrap_auth(r: requests.Response | None) -> requests.Response | None:
 
 # --- Formatierungshilfsfunktionen --------------------------------------------
 
-def fmt_mmss(total_s: int) -> str:
-    m, s = divmod(max(0, int(total_s)), 60)
-    return f"{m}:{s:02d}"
-
-def fmt_duration(duration_s: int, time_unit: str = "Sekunden") -> str:
-    if time_unit == "Minuten" or duration_s % 60 == 0:
-        return f"{duration_s // 60} Min"
-    return f"{duration_s} Sek"
-
-def fmt_weekdays(weekdays: list[int]) -> str:
-    return ", ".join(WEEKDAY_CHOICES.get(str(w), str(w)) for w in sorted(weekdays))
+# fmt_mmss, fmt_duration, fmt_weekdays: importiert aus app_helpers
 
 def state_badge(state_str: str) -> ui.Tag:
     label_map = {
