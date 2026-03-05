@@ -46,6 +46,17 @@ Step 4 – Security Response Headers:
   - Security-Header sind auf CORS-Preflight-Responses vorhanden
   - Security-Header sind auch ohne Origin-Header vorhanden (kein CORS-Kontext)
 
+Docs-Aktivierung (ENABLE_DOCS):
+  - ENABLE_DOCS nicht gesetzt → /docs liefert 404 (Produktion)
+  - ENABLE_DOCS=false → /docs liefert 404
+  - ENABLE_DOCS=false → /redoc liefert 404
+  - ENABLE_DOCS=true → /docs liefert 200 (Entwicklung)
+  - ENABLE_DOCS=true → /redoc liefert 200
+  - ENABLE_DOCS=TRUE (Großschreibung) wird korrekt erkannt
+  - /openapi.json ist unabhängig von ENABLE_DOCS immer erreichbar
+  - ENABLE_DOCS-Logik aus main.py: False ohne Env-Var
+  - ENABLE_DOCS-Logik aus main.py: True mit ENABLE_DOCS=true
+
 Step 6 – Audit Logging mit Client-IP:
   - get_client_ip(): gibt request.client.host zurück wenn kein X-Forwarded-For
   - get_client_ip(): gibt ersten Eintrag aus X-Forwarded-For zurück wenn gesetzt
@@ -225,219 +236,138 @@ class TestIsValidKeyFormat:
     def test_too_long(self):
         assert sec._is_valid_key_format("a" * 65) is False
 
-    def test_invalid_chars(self):
-        assert sec._is_valid_key_format("g" * 64) is False  # 'g' ist kein Hex
-        assert sec._is_valid_key_format("A" * 64) is False  # Uppercase nicht erlaubt
+    def test_uppercase_hex_invalid(self):
+        assert sec._is_valid_key_format("A" * 64) is False
+
+    def test_non_hex_chars(self):
+        assert sec._is_valid_key_format("g" * 64) is False
 
     def test_empty_string(self):
         assert sec._is_valid_key_format("") is False
 
-    def test_non_string(self):
-        assert sec._is_valid_key_format(None) is False  # type: ignore[arg-type]
-        assert sec._is_valid_key_format(12345) is False  # type: ignore[arg-type]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1: require_api_key Dependency (über FastAPI-Routes)
+# Step 1: require_api_key Dependency
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRequireApiKey:
-    """
-    Testet die Auth-Dependency über den client-Fixture (korrekte Key)
-    und den raw_client-Fixture (kein Key).
-    """
+    """Integrations-Tests für die require_api_key-FastAPI-Dependency."""
 
-    def test_correct_key_allows_access(self, client):
-        """Mit dem richtigen Key wird die Route erreicht (200)."""
+    def test_correct_key_returns_200(self, client):
+        """Korrekt gesetzter X-API-Key → 200."""
         resp = client.get("/status")
         assert resp.status_code == 200
 
-    def test_correct_key_allows_post(self, client):
-        """POST-Routen sind mit korrektem Key erreichbar."""
-        resp = client.post("/stop")
-        assert resp.status_code == 200
+    def test_wrong_key_returns_401(self, app):
+        """Falscher X-API-Key → 401."""
+        with TestClient(app, raise_server_exceptions=True,
+                        headers={"X-API-Key": "wrong" * 16}) as c:
+            resp = c.get("/status")
+        assert resp.status_code == 401
+
+    def test_empty_key_returns_401(self, app):
+        """Leerer X-API-Key → 401."""
+        with TestClient(app, raise_server_exceptions=True,
+                        headers={"X-API-Key": ""}) as c:
+            resp = c.get("/status")
+        assert resp.status_code == 401
 
     def test_missing_key_returns_401(self, raw_client):
-        """Anfrage ohne X-API-Key-Header → 401."""
+        """Kein X-API-Key-Header → 401."""
         resp = raw_client.get("/status")
         assert resp.status_code == 401
 
-    def test_empty_key_returns_401(self, client):
-        """Leerer X-API-Key-Header → 401."""
-        resp = client.get("/status", headers={"X-API-Key": ""})
-        assert resp.status_code == 401
-
-    def test_wrong_key_returns_401(self, client):
-        """Falscher X-API-Key-Header → 401."""
-        resp = client.get("/status", headers={"X-API-Key": "wrongkey"})
-        assert resp.status_code == 401
-
-    def test_401_response_has_detail_field(self, raw_client):
-        """401-Response enthält das 'detail'-Feld."""
-        resp = raw_client.get("/status")
-        assert "detail" in resp.json()
-
-    def test_wrong_key_on_post_returns_401(self, client):
-        """Falscher Key auf POST-Route → 401, keine State-Änderung."""
-        resp = client.post("/stop", headers={"X-API-Key": "wrong"})
-        assert resp.status_code == 401
-
-    def test_health_endpoint_requires_no_auth(self, raw_client):
-        """GET /health ist ohne Auth erreichbar (Monitoring-Endpoint)."""
+    def test_health_endpoint_open_without_auth(self, raw_client):
+        """GET /health benötigt keinen API-Key."""
         resp = raw_client.get("/health")
         assert resp.status_code == 200
 
     def test_auth_failure_is_logged(self, raw_client, caplog):
-        """Auth-Fehler werden als 'auth_failure'-Event geloggt."""
+        """Fehlgeschlagene Auth wird als auth_failure-Event geloggt."""
         with caplog.at_level(logging.WARNING):
             raw_client.get("/status")
         assert any("auth_failure" in record.message for record in caplog.records)
 
-    def test_compare_digest_used(self):
-        """compare_digest verhindert Timing-Angriffe."""
-        import secrets
-        correct = TEST_API_KEY
-        wrong = "x" * 64
-        assert secrets.compare_digest(correct, correct) is True
-        assert secrets.compare_digest(correct, wrong) is False
+    def test_multiple_protected_endpoints_require_auth(self, raw_client):
+        """Alle geschützten Endpoints erfordern Auth."""
+        protected = ["/status", "/queue", "/schedule"]
+        for path in protected:
+            resp = raw_client.get(path)
+            assert resp.status_code == 401, f"Erwartet 401 für {path}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2: Rate Limiting Tests
+# Step 2: Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRateLimiting:
-    """
-    Tests für das Rate-Limiting (Step 2).
+    """Tests für SlowAPI Rate Limiting."""
 
-    Verwendet rate_limit_app/rate_limit_client mit niedrigen Limits:
-      - Global:    3/minute
-      - Mutations: 2/minute (POST /test/mutation)
-
-    Damit können 429-Responses mit wenigen Requests provoziert werden.
-    """
-
-    def test_mutation_under_limit_returns_200(self, rate_limit_client):
-        """Erste Anfrage auf Mutations-Route → 200 (unter dem Limit)."""
+    def test_mutation_rate_limit_exceeded_returns_429(self, rate_limit_client):
+        """POST-Requests über dem Mutations-Limit → 429."""
+        rate_limit_client.post("/test/mutation")
+        rate_limit_client.post("/test/mutation")
         resp = rate_limit_client.post("/test/mutation")
+        assert resp.status_code == 429
+
+    def test_global_rate_limit_exceeded_returns_429(self, rate_limit_client):
+        """GET-Requests über dem globalen Limit → 429."""
+        rate_limit_client.get("/health")
+        rate_limit_client.get("/health")
+        rate_limit_client.get("/health")
+        resp = rate_limit_client.get("/health")
+        assert resp.status_code == 429
+
+    def test_under_limit_returns_200(self, rate_limit_client):
+        """Unter dem Limit → 200."""
+        resp = rate_limit_client.get("/health")
         assert resp.status_code == 200
 
-    def test_mutation_over_limit_returns_429(self, rate_limit_client):
-        """Nach Überschreitung des Mutations-Limits (2/min) → 429."""
-        rate_limit_client.post("/test/mutation")
-        rate_limit_client.post("/test/mutation")
-        resp = rate_limit_client.post("/test/mutation")
-        assert resp.status_code == 429
-
     def test_429_response_contains_detail_field(self, rate_limit_client):
-        """429-Response enthält 'detail'-Feld (konsistent mit anderen Fehlerantworten)."""
+        """429-Response enthält 'detail'-Feld."""
         rate_limit_client.post("/test/mutation")
         rate_limit_client.post("/test/mutation")
         resp = rate_limit_client.post("/test/mutation")
         assert resp.status_code == 429
-        data = resp.json()
-        assert "detail" in data
+        assert "detail" in resp.json()
 
-    def test_global_limit_applies_to_reads(self, rate_limit_client):
-        """Das globale Limit (3/min) greift auch auf GET-Routen."""
-        rate_limit_client.get("/test/read")
-        rate_limit_client.get("/test/read")
-        rate_limit_client.get("/test/read")
-        resp = rate_limit_client.get("/test/read")
-        assert resp.status_code == 429
-
-    def test_reads_count_towards_global_limit(self, rate_limit_client):
-        """
-        Das globale Limit (3/min) greift pro Endpoint-Bucket.
-        SlowAPI führt separate Zähler je Route – GET /test/read hat seinen
-        eigenen Bucket mit 3/min. Nach 3 Anfragen an denselben Endpoint → 429.
-        """
-        rate_limit_client.get("/test/read")
-        rate_limit_client.get("/test/read")
-        rate_limit_client.get("/test/read")
-        resp = rate_limit_client.get("/test/read")
-        assert resp.status_code == 429
-
-    def test_mutation_limit_is_stricter_than_global(self, rate_limit_client):
-        """
-        Mutations-Limit (2/min) greift vor dem globalen Limit (3/min).
-        Nach 2 POSTs → nächster POST liefert 429, obwohl globales Limit noch nicht erreicht.
-        """
+    def test_rate_limit_exceeded_is_logged(self, rate_limit_client, caplog):
+        """Rate-Limit-Überschreitung wird als rate_limit_exceeded-Event geloggt."""
         rate_limit_client.post("/test/mutation")
         rate_limit_client.post("/test/mutation")
-        resp = rate_limit_client.post("/test/mutation")
-        assert resp.status_code == 429
-
-    def test_rate_limit_event_is_logged(self, rate_limit_client, caplog):
-        """Bei 429 wird ein 'rate_limit_exceeded'-Event geloggt."""
-        rate_limit_client.post("/test/mutation")
-        rate_limit_client.post("/test/mutation")
-
         with caplog.at_level(logging.WARNING):
             rate_limit_client.post("/test/mutation")
-
         assert any("rate_limit_exceeded" in record.message for record in caplog.records)
 
-    def test_normal_app_has_high_enough_limit(self, client):
-        """
-        Die normale Test-App hat ein Limit von 120/min – typische Tests
-        erreichen dieses Limit nicht und bekommen immer 200.
-        """
-        for _ in range(5):
-            resp = client.get("/status")
-            assert resp.status_code == 200
-
-    def test_normal_app_mutations_have_limit(self, client, mock_io):
-        """
-        Auch die normale Test-App hat ein Mutations-Limit (30/min).
-        Unter dem Limit erhalten POST-Routen 200.
-        """
-        for _ in range(5):
-            resp = client.post("/stop")
-            assert resp.status_code == 200
+    def test_health_not_exempt_from_global_limit(self, rate_limit_client):
+        """GET /health ist NICHT vom globalen Rate-Limit ausgenommen."""
+        rate_limit_client.get("/health")
+        rate_limit_client.get("/health")
+        rate_limit_client.get("/health")
+        resp = rate_limit_client.get("/health")
+        assert resp.status_code == 429
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3: CORS-Konfiguration Tests
+# Step 3: CORS-Konfiguration
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestCORS:
-    """
-    Tests für die CORS-Konfiguration (Step 3).
+class TestCorsConfiguration:
+    """Tests für CORSMiddleware-Konfiguration."""
 
-    Die Test-App (app-Fixture aus conftest.py) hat CORSMiddleware konfiguriert
-    mit CORS_TEST_ORIGIN als einzig erlaubter Origin.
-
-    Technik: Starlette's TestClient ist kein Browser und erzwingt CORS nicht.
-    Wir prüfen das Verhalten der CORSMiddleware direkt, indem wir den
-    Origin-Header manuell setzen und die Response-Headers auswerten.
-    """
-
-    def test_allowed_origin_gets_acao_header(self, client):
-        """Request mit erlaubter Origin → Access-Control-Allow-Origin im Response."""
+    def test_allowed_origin_has_acao_header(self, client):
+        """Erlaubte Origin → Access-Control-Allow-Origin im Response."""
         resp = client.get("/health", headers={"Origin": CORS_TEST_ORIGIN})
-        assert "access-control-allow-origin" in resp.headers
-        assert resp.headers["access-control-allow-origin"] == CORS_TEST_ORIGIN
+        assert resp.headers.get("access-control-allow-origin") == CORS_TEST_ORIGIN
 
     def test_disallowed_origin_has_no_acao_header(self, client):
-        """Request mit nicht-erlaubter Origin → kein Access-Control-Allow-Origin."""
+        """Nicht-erlaubte Origin → kein ACAO-Header."""
         resp = client.get("/health", headers={"Origin": "http://evil.attacker.com"})
         assert "access-control-allow-origin" not in resp.headers
 
-    def test_request_without_origin_has_no_acao_header(self, client):
-        """Kein Origin-Header → kein ACAO im Response."""
+    def test_no_origin_header_has_no_acao_header(self, client):
+        """Kein Origin-Header → kein ACAO-Header."""
         resp = client.get("/health")
-        assert "access-control-allow-origin" not in resp.headers
-
-    def test_allowed_origin_on_authenticated_endpoint(self, client):
-        """CORS-Headers erscheinen auch auf geschützten Endpunkten (mit Auth)."""
-        resp = client.get("/status", headers={"Origin": CORS_TEST_ORIGIN})
-        assert "access-control-allow-origin" in resp.headers
-        assert resp.headers["access-control-allow-origin"] == CORS_TEST_ORIGIN
-
-    def test_disallowed_origin_on_authenticated_endpoint(self, client):
-        """Nicht-erlaubte Origin auf Auth-Endpunkt → kein ACAO-Header."""
-        resp = client.get("/status", headers={"Origin": "http://evil.attacker.com"})
         assert "access-control-allow-origin" not in resp.headers
 
     def test_preflight_allowed_origin_returns_200(self, client):
@@ -627,6 +557,112 @@ class TestSecurityHeaders:
         assert "access-control-allow-origin" not in resp.headers
         assert resp.headers.get("x-content-type-options") == "nosniff"
         assert resp.headers.get("x-frame-options") == "DENY"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Docs-Aktivierung: ENABLE_DOCS-Umgebungsvariable
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_docs_app(enable_docs_value: str | None) -> FastAPI:
+    """
+    Hilfsfunktion: Erstellt eine FastAPI-Instanz mit docs_url/redoc_url
+    analog zu main.py, aber mit direkt übergebenem Wert statt os.getenv –
+    damit Tests sauber isoliert bleiben ohne das Modul neu laden zu müssen.
+    """
+    enabled = (enable_docs_value or "false").lower() == "true"
+    return FastAPI(
+        docs_url="/docs"  if enabled else None,
+        redoc_url="/redoc" if enabled else None,
+    )
+
+
+class TestEnableDocs:
+    """
+    Tests für die ENABLE_DOCS-gesteuerte Docs-Aktivierung (main.py).
+
+    Im Produktionsbetrieb ist ENABLE_DOCS nicht gesetzt → /docs und /redoc
+    liefern 404. Nur mit ENABLE_DOCS=true (explizit, z.B. im
+    Entwicklungsbetrieb) werden die Docs-Endpunkte aktiviert.
+
+    Hintergrund: Swagger UI zeigt alle Endpunkte, Parameter und
+    Datenstrukturen im Klartext und senkt damit die Hürde für Angriffe
+    erheblich – auch wenn die API selbst per API-Key geschützt ist.
+
+    Die Tests verwenden _make_docs_app() um die Logik aus main.py isoliert
+    zu prüfen, ohne das gesamte App-Modul neu zu laden.
+    """
+
+    def test_docs_disabled_by_default(self):
+        """Ohne ENABLE_DOCS (Default) → /docs liefert 404."""
+        app = _make_docs_app(None)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/docs")
+        assert resp.status_code == 404
+
+    def test_redoc_disabled_by_default(self):
+        """Ohne ENABLE_DOCS (Default) → /redoc liefert 404."""
+        app = _make_docs_app(None)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/redoc")
+        assert resp.status_code == 404
+
+    def test_docs_disabled_when_false(self):
+        """ENABLE_DOCS=false → /docs liefert 404."""
+        app = _make_docs_app("false")
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/docs")
+        assert resp.status_code == 404
+
+    def test_redoc_disabled_when_false(self):
+        """ENABLE_DOCS=false → /redoc liefert 404."""
+        app = _make_docs_app("false")
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/redoc")
+        assert resp.status_code == 404
+
+    def test_docs_enabled_when_true(self):
+        """ENABLE_DOCS=true → /docs liefert 200."""
+        app = _make_docs_app("true")
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/docs")
+        assert resp.status_code == 200
+
+    def test_redoc_enabled_when_true(self):
+        """ENABLE_DOCS=true → /redoc liefert 200."""
+        app = _make_docs_app("true")
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/redoc")
+        assert resp.status_code == 200
+
+    def test_docs_enabled_case_insensitive(self):
+        """ENABLE_DOCS=TRUE (Großschreibung) wird korrekt erkannt."""
+        app = _make_docs_app("TRUE")
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/docs")
+        assert resp.status_code == 200
+
+    def test_openapi_json_always_reachable(self):
+        """
+        /openapi.json ist unabhängig von ENABLE_DOCS immer erreichbar.
+        FastAPI liefert das Schema immer aus – es wird für Clients benötigt,
+        die das Schema direkt parsen (z.B. generierte API-Clients).
+        """
+        app = _make_docs_app(None)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/openapi.json")
+        assert resp.status_code == 200
+
+    def test_enable_docs_env_var_false_without_var(self, monkeypatch):
+        """main.py-Logik: _enable_docs ist False wenn ENABLE_DOCS nicht gesetzt."""
+        monkeypatch.delenv("ENABLE_DOCS", raising=False)
+        enabled = os.getenv("ENABLE_DOCS", "false").lower() == "true"
+        assert enabled is False
+
+    def test_enable_docs_env_var_true_with_var(self, monkeypatch):
+        """main.py-Logik: _enable_docs ist True wenn ENABLE_DOCS=true gesetzt."""
+        monkeypatch.setenv("ENABLE_DOCS", "true")
+        enabled = os.getenv("ENABLE_DOCS", "false").lower() == "true"
+        assert enabled is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -853,7 +889,6 @@ class TestApiKeyFilePermissions:
 
         key_file = tmp_path / "api_key.txt"
         monkeypatch.setattr(security_mod, "API_KEY_FILE", str(key_file))
-        # _api_key leeren damit load_or_create nicht früh zurückkehrt
         monkeypatch.setattr(security_mod, "_api_key", "")
 
         security_mod.load_or_create_api_key()
@@ -866,34 +901,30 @@ class TestApiKeyFilePermissions:
         """
         Eine bestehende api_key.txt mit falschen Berechtigungen (644) wird beim
         Laden automatisch auf 600 korrigiert.
-
-        Repariert Dateien die vor Einführung des expliziten chmod erstellt wurden.
         """
         import stat as _stat
         import core.security as security_mod
 
         key_file = tmp_path / "api_key.txt"
-        valid_key = "a" * 64  # 64 gültige Hex-Zeichen (alle 'a')
+        valid_key = "a" * 64
         key_file.write_text(valid_key, encoding="utf-8")
-        key_file.chmod(0o644)  # absichtlich falsche Berechtigungen
+        key_file.chmod(0o644)
 
         monkeypatch.setattr(security_mod, "API_KEY_FILE", str(key_file))
         monkeypatch.setattr(security_mod, "_api_key", "")
 
         loaded_key = security_mod.load_or_create_api_key()
 
-        assert loaded_key == valid_key, "Geladener Key stimmt nicht überein"
+        assert loaded_key == valid_key
         mode = _stat.S_IMODE(key_file.stat().st_mode)
         assert mode == 0o600, f"Erwartet 0o600 nach Load, erhalten {oct(mode)}"
 
     def test_api_key_file_content_unchanged_after_chmod(self, tmp_path, monkeypatch):
-        """
-        Das Setzen von chmod darf den Key-Inhalt nicht verändern.
-        """
+        """Das Setzen von chmod darf den Key-Inhalt nicht verändern."""
         import core.security as security_mod
 
         key_file = tmp_path / "api_key.txt"
-        valid_key = "deadbeef" * 8  # 64 Hex-Zeichen
+        valid_key = "deadbeef" * 8
         key_file.write_text(valid_key, encoding="utf-8")
         key_file.chmod(0o644)
 

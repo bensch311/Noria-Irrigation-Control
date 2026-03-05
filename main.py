@@ -12,10 +12,19 @@ Dieses Modul instanziiert die FastAPI-App und konfiguriert:
 Der Lifecycle (Startup/Shutdown) wird vollständig in core/lifecycle.py verwaltet.
 Die App wird von uvicorn gestartet, typischerweise via systemd-Service.
 
+Swagger UI / ReDoc:
+  Standardmäßig DEAKTIVIERT (docs_url=None, redoc_url=None).
+  Aktivierung nur für Entwicklung via Umgebungsvariable ENABLE_DOCS=true.
+  Im Produktionsbetrieb darf ENABLE_DOCS nicht gesetzt sein – die Docs-Endpunkte
+  würden sonst die vollständige API-Struktur für alle Netzwerkteilnehmer
+  ohne zusätzliche Authentifizierung sichtbar machen.
+
 Offene Hardware-Punkte (noch nicht implementiert):
   - GPIO-Fehlerbehandlung bei /sys/class/… Zugriffsproblemen
   - GPIO-Fehler-Logging auf Treiber-Ebene (separate Log-Kategorie)
 """
+
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +42,22 @@ from api.routes_control import router as control_router
 from api.routes_history import router as history_router
 from api.routes_settings import router as settings_router
 
-app = FastAPI(lifespan=lifespan)
+# ---------------------------------------------------------------------------
+# Swagger UI / ReDoc – nur in Entwicklung aktivieren.
+#
+# ENABLE_DOCS=true  → /docs und /redoc werden von FastAPI bereitgestellt.
+# Nicht gesetzt     → docs_url=None, redoc_url=None: FastAPI registriert
+#                     die Pfade gar nicht → 404, noch vor jeder Middleware.
+# ---------------------------------------------------------------------------
+_enable_docs = os.getenv("ENABLE_DOCS", "false").lower() == "true"
+_docs_url    = "/docs"  if _enable_docs else None
+_redoc_url   = "/redoc" if _enable_docs else None
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+)
 
 # Rate Limiting: Limiter-Instanz in app.state setzen (wird von SlowAPIMiddleware genutzt).
 app.state.limiter = limiter
