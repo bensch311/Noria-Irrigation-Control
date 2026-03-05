@@ -19,9 +19,6 @@ Swagger UI / ReDoc:
   würden sonst die vollständige API-Struktur für alle Netzwerkteilnehmer
   ohne zusätzliche Authentifizierung sichtbar machen.
 
-Offene Hardware-Punkte (noch nicht implementiert):
-  - GPIO-Fehlerbehandlung bei /sys/class/… Zugriffsproblemen
-  - GPIO-Fehler-Logging auf Treiber-Ebene (separate Log-Kategorie)
 """
 
 import os
