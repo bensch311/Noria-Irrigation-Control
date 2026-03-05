@@ -1,0 +1,191 @@
+# Bewässerungscomputer – Raspberry Pi
+
+Produktionsreifes Bewässerungssteuersystem für den professionellen Einsatz in Gemüsebaubetrieben.
+
+---
+
+## Übersicht
+
+Der Bewässerungscomputer ist ein Python-basiertes System, das über Relaismodule Magnetventile ansteuert und eine browserbasierte Benutzeroberfläche für manuelle und automatische Steuerung bietet.
+
+**Kernfunktionen:**
+- Manuelle Einzelventilsteuerung mit konfigurierbarer Laufzeit
+- Bewässerungswarteschlange (Queue) mit mehreren Einträgen
+- Wochentag-basierte Zeitpläne (einmalig oder wiederkehrend)
+- Parallelbetrieb mehrerer Ventile (konfigurierbar)
+- Hardware-Fault-Erkennung mit exponentiellem Backoff-Retry und Operator-Quittierung
+- Vollständiger Verlauf abgeschlossener Läufe
+- Stromausfall-sichere Persistenz (atomares Schreiben, Korruptionserkennung)
+- API-Key-Authentifizierung, Rate-Limiting, CORS, Security-Header
+
+---
+
+## Systemarchitektur (Überblick)
+
+```
+┌──────────────────┐   HTTP/JSON (X-API-Key)   ┌──────────────────────┐
+│  Shiny-Frontend  │ ─────────────────────────► │   FastAPI-Backend    │
+│   (app.py)       │ ◄─────────────────────────  │   (main.py)          │
+│   Port 8080      │                            │   Port 8000          │
+└──────────────────┘                            └────────┬─────────────┘
+                                                         │  IO-Worker-Thread
+                                                ┌────────▼─────────────┐
+                                                │  RPi.GPIO / Simulation│
+                                                └────────┬─────────────┘
+                                                         │
+                                                ┌────────▼─────────────┐
+                                                │   Magnetventile      │
+                                                └──────────────────────┘
+```
+
+Das Backend verwaltet alle Hintergrund-Threads (Timer, Scheduler, Persistenz, IO-Worker, Watchdog) und stellt eine REST-API bereit. Das Frontend ist eine Python-Shiny-Express-App, die per HTTP-Polling den Systemzustand abfragt.
+
+Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
+
+---
+
+## Systemanforderungen
+
+| Komponente | Anforderung |
+|---|---|
+| Hardware | <!-- TODO: Empfohlenes Raspberry Pi-Modell eintragen (z.B. Raspberry Pi 4B 2GB) --> |
+| Betriebssystem | <!-- TODO: Raspberry Pi OS Version eintragen (z.B. Raspberry Pi OS Lite 64-bit, Debian Bookworm) --> |
+| Python | ≥ 3.11 |
+| Speicherplatz | ≥ 1 GB frei (Logs, Daten, Venv) |
+| Netzwerk | Lokales LAN oder direkter Zugriff; kein Internet erforderlich |
+| Relay-Board | <!-- TODO: Relay-Board-Modell eintragen (z.B. 8-Kanal 5V Optokoppler-Relay) --> |
+
+---
+
+## Verzeichnisstruktur
+
+```
+.
+├── main.py                   # FastAPI-Einstiegspunkt (Backend, Port 8000)
+├── app.py                    # Shiny-Express-Frontend (Port 8080)
+├── app_helpers.py            # Frontend-Hilfsfunktionen (Config, Formatierung)
+├── requirements.txt          # Python-Abhängigkeiten (pinned)
+├── pytest.ini                # Test-Konfiguration
+│
+├── api/                      # FastAPI-Router und Middleware
+│   ├── errors.py             # Globale Exception-Handler
+│   ├── middleware.py         # SecurityHeadersMiddleware
+│   ├── routes_control.py     # /start /stop /pause /resume /status /fault/clear /automation /parallel
+│   ├── routes_health.py      # /health (ohne Auth, für Monitoring)
+│   ├── routes_history.py     # /history
+│   ├── routes_queue.py       # /queue /queue/add /queue/start /queue/pause /queue/clear
+│   ├── routes_schedule.py    # /schedule /schedule/add /schedule/enable|disable|delete
+│   └── routes_settings.py    # /settings
+│
+├── core/                     # Kernmodule
+│   ├── config.py             # Hard-Limits, Dateipfade, ENV-Variablen
+│   ├── lifecycle.py          # Startup/Shutdown-Sequenz (FastAPI lifespan)
+│   ├── limiter.py            # Rate-Limiting (SlowAPI, 120/min global, 30/min Mutationen)
+│   ├── logging.py            # Strukturiertes JSONL-Logging (RotatingFileHandler)
+│   ├── security.py           # API-Key-Authentifizierung (X-API-Key Header)
+│   └── state.py              # Globaler In-Memory-Zustand (RunState + Dataclasses)
+│
+├── models/
+│   └── requests.py           # Pydantic-Request-Modelle
+│
+├── services/                 # Business-Logik und Hardware-Services
+│   ├── engine.py             # Ventilstart-Logik, Status-Payload
+│   ├── io_worker.py          # Serialisierter Hardware-Thread (alle GPIO-Ops)
+│   ├── persistence.py        # Atomares Schreiben/Lesen (schedules, queue, history, config)
+│   ├── scheduler.py          # Zeitplan-Loop (prüft Zeitpläne, startet Queue-Items)
+│   ├── timer.py              # Timer-Loop (schließt Ventile nach Ablauf, Backoff-Retry)
+│   └── valve_driver.py       # Hardware-Abstraktion (SimValveDriver / RpiGpioValveDriver)
+│
+├── tests/                    # Pytest-Testsuite
+│   ├── conftest.py           # Globale Fixtures, State-Reset, Mock-IO-Worker
+│   └── test_*.py             # Modul-Tests
+│
+├── data/                     # Laufzeit-Daten (nicht in Git)
+│   ├── api_key.txt           # API-Key (64 Hex-Zeichen, chmod 600)
+│   ├── device_config.json    # Hardware-Konfiguration (GPIO, Treiber)
+│   ├── frontend_config.json  # Frontend-Verbindungsparameter
+│   ├── user_settings.json    # Benutzereinstellungen
+│   ├── runtime_state.json    # Laufzeit-Zustand (Parallel-Modus etc.)
+│   ├── schedules.json        # Persistierte Zeitpläne
+│   ├── queue.json            # Persistierte Queue
+│   └── history.json          # Verlauf abgeschlossener Bewässerungsläufe
+│
+├── logs/                     # Log-Dateien (nicht in Git)
+│   └── irrigation.jsonl      # JSONL-Log (max. 10 MB, bis zu 10 Rotationsdateien)
+│
+└── www/                      # Statische Frontend-Assets (von Shiny als Root serviert)
+    ├── app.css               # Frontend-CSS
+    └── logo.svg              # Optionales Navbar-Logo (konfigurierbar)
+```
+
+---
+
+## Quick-Start (Entwicklung / erster Test)
+
+### 1. Repository klonen und Abhängigkeiten installieren
+
+```bash
+git clone <REPO-URL> bewaesserung
+cd bewaesserung
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Auf Nicht-Pi-Systemen: RPi.GPIO-Zeile in requirements.txt auskommentieren
+pip install -r requirements.txt
+```
+
+### 2. Backend starten (Simulationsmodus, kein GPIO erforderlich)
+
+```bash
+uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+Beim ersten Start wird automatisch erstellt:
+- `data/api_key.txt` – kryptografisch sicherer 256-bit-Key
+- `data/device_config.json` – Vorlage (Simulationstreiber, 6 Ventile)
+- `data/user_settings.json` – Benutzer-Defaults
+
+### 3. API-Key auslesen
+
+```bash
+cat data/api_key.txt
+# Ausgabe: a3f8e2d1b7c4...  (64 Hex-Zeichen)
+```
+
+### 4. Frontend starten
+
+```bash
+shiny run app.py --host 127.0.0.1 --port 8080
+```
+
+Frontend aufrufen: `http://localhost:8080`
+
+Beim ersten Aufruf wird der API-Key aus `data/api_key.txt` automatisch geladen.
+
+---
+
+## Produktionsbetrieb
+
+Für den Produktionsbetrieb (systemd-Services, GPIO-Konfiguration, HTTPS):
+→ **[DEPLOYMENT.md](DEPLOYMENT.md)**
+
+---
+
+## Weiterführende Dokumentation
+
+| Dokument | Inhalt | Zielgruppe |
+|---|---|---|
+| [DEPLOYMENT.md](DEPLOYMENT.md) | systemd, GPIO-Setup, Firewall, HTTPS | Inbetriebnahme |
+| [CONFIGURATION.md](CONFIGURATION.md) | Alle Konfigurationsfelder mit Typen und Defaults | Einrichtung |
+| [OPERATIONS.md](OPERATIONS.md) | Log-Referenz, Fault-Behandlung, Backup & Recovery | Betrieb |
+| [API_REFERENCE.md](API_REFERENCE.md) | Alle Endpunkte, Request/Response, curl-Beispiele | Frontend-Dev / Integration |
+| [HARDWARE_SETUP.md](HARDWARE_SETUP.md) | GPIO-Verkabelung, Relay-Board-Anleitung | Erstinstallation |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Thread-Modell, State-Machine, Concurrency-Design | Vertiefung / Wartung |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Lokale Entwicklung, Tests, neue Routen | Weiterentwicklung |
+
+---
+
+## Lizenz
+
+<!-- TODO: Lizenz eintragen -->

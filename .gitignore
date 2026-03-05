@@ -15,9 +15,10 @@ data/
 .DS_Store
 Thumbs.db
 
-# pytest coverage
+# pytest
 .coverage
 htmlcov/
+.pytest_cache/
 
 # Ordnerstruktur.txt
 Ordnerstruktur.txt

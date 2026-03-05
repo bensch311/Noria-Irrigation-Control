@@ -1,0 +1,85 @@
+# /etc/systemd/system/irrigation.service
+#
+# Bewässerungscomputer – Backend-Service (FastAPI via uvicorn)
+#
+# Installation:
+#   sudo cp irrigation.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable irrigation
+#   sudo systemctl start irrigation
+#
+# Logs:
+#   sudo journalctl -u irrigation -f
+#
+# Voraussetzungen:
+#   - Dedizierter Systembenutzer:  sudo useradd --system --no-create-home irrigation
+#   - GPIO-Gruppe:                  sudo usermod -aG gpio irrigation
+#   - App-Verzeichnis:              /opt/irrigation/app  (enthält main.py)
+#   - Virtualenv:                   /opt/irrigation/venv (enthält uvicorn, fastapi, ...)
+#   - Daten-Verzeichnis:            /opt/irrigation/app/data  (755, Owner irrigation)
+#
+# Optional: Umgebungsvariablen in /opt/irrigation/.env setzen (s.u.)
+
+[Unit]
+Description=Bewässerungscomputer Backend (FastAPI/uvicorn)
+After=network.target
+Wants=network.target
+
+[Service]
+# Type=notify: uvicorn wartet auf sd_notify("READY=1") aus lifecycle.py
+# bevor systemd den Start als erfolgreich markiert.
+# Voraussetzung: pip install systemd-python im Virtualenv installiert.
+Type=notify
+
+User=irrigation
+Group=irrigation
+
+WorkingDirectory=/opt/irrigation/app
+
+# Kein zugängllicher Prozessabschluss für den Betreiber → stdout/stderr via journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=irrigation
+
+# Startkommando: ein Worker (single-process, threading-basierter Loop).
+# Mehrere Worker würden den geteilten State inkonsistent machen.
+ExecStart=/opt/irrigation/venv/bin/uvicorn main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --no-access-log
+
+# Graceful Shutdown: SIGTERM → lifespan-Cleanup → SIGKILL nach Timeout.
+# TimeoutStopSec muss > close_all-Timeout (10 s) + flush-Zeit sein.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Neustart-Strategie: bei Absturz oder Hardware-Watchdog-Timeout neu starten.
+Restart=on-failure
+RestartSec=5s
+# Sicherheitsnetz: max. 5 Neustarts in 60 s (verhindert Crash-Schleife)
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Systemd Hardware-Watchdog:
+# Wenn lifecycle.py nicht innerhalb von WatchdogSec WATCHDOG=1 sendet,
+# tötet systemd den Prozess und startet ihn via Restart=on-failure neu.
+# interval_s im _watchdog_loop (10 s) << WatchdogSec/2 (15 s) → sicherer Puffer.
+WatchdogSec=30
+
+# Ressourcen-Limits
+LimitNOFILE=65536
+
+# Umgebungsvariablen (direkt oder via EnvironmentFile).
+# EnvironmentFile=-/opt/irrigation/.env lädt die .env-Datei falls vorhanden.
+# Das '-' vor dem Pfad macht die Datei optional (kein Fehler wenn nicht vorhanden).
+#
+# Wichtige Variablen (Beispiele):
+#   IRRIGATION_VALVE_DRIVER=rpi           # rpi für Produktion, sim für Tests
+#   ALLOWED_ORIGINS=http://192.168.1.100:8080,http://localhost:8080
+#   IRRIGATION_RELAY_ACTIVE_LOW=true      # true für Standard-Relaisplatinen
+EnvironmentFile=-/opt/irrigation/.env
+
+[Install]
+WantedBy=multi-user.target
