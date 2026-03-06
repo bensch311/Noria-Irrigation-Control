@@ -1,6 +1,6 @@
 # API_REFERENCE.md – API-Referenz
 
-Vollständige Dokumentation aller REST-Endpunkte des Bewässerungs-Backends.
+Vollständige Dokumentation aller REST-Endpunkte des Noria-Backends.
 
 ---
 
@@ -632,7 +632,7 @@ Benutzereinstellungen abrufen.
 ```json
 {
   "max_history_items": 20,
-  "navbar_title": "Bewaesserungscomputer",
+  "navbar_title": "Noria",
   "accent_color": "#82372a",
   "default_duration": 5,
   "default_time_unit": "Minuten",

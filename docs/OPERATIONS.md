@@ -167,7 +167,7 @@ Nach erfolgreicher Quittierung: `hw_faulted` wird `false`, das System ist wieder
 □ Verkabelung: GPIO-Pin gegen device_config.json prüfen
 □ RPi.GPIO: Läuft der Backend-Prozess als Benutzer mit gpio-Gruppe?
 □ Ventil: Manuelle Funktionsprüfung (Direktansteuerung)
-□ Nach Behebung: sudo systemctl restart irrigation-backend
+□ Nach Behebung: sudo systemctl restart noria-backend
 □ Mindestens 60 Sekunden warten
 □ POST /fault/clear ausführen
 □ Test: Manuellen Kurz-Start (5 Sekunden) durchführen und Log prüfen
@@ -232,10 +232,10 @@ Das gesamte `data/`-Verzeichnis enthält alle relevanten Daten:
 
 ```bash
 # Manuelles Backup
-sudo cp -r /opt/bewaesserung/data /backup/bewaesserung-data-$(date +%Y%m%d)
+sudo cp -r /opt/noria/data /backup/noria-data-$(date +%Y%m%d)
 
 # Automatisches tägliches Backup via cron (als root)
-echo "0 3 * * * root cp -r /opt/bewaesserung/data /backup/bewaesserung-data-\$(date +\%Y\%m\%d) && find /backup -name 'bewaesserung-data-*' -mtime +30 -exec rm -rf {} +" | sudo tee /etc/cron.d/bewaesserung-backup
+echo "0 3 * * * root cp -r /opt/noria/data /backup/noria-data-\$(date +\%Y\%m\%d) && find /backup -name 'noria-data-*' -mtime +30 -exec rm -rf {} +" | sudo tee /etc/cron.d/noria-backup
 ```
 
 ### 4.3 `.corrupt-*`-Dateien verstehen
@@ -267,10 +267,10 @@ rm data/*.corrupt-*
 
 ```bash
 # Aus Backup wiederherstellen
-sudo systemctl stop irrigation-backend
-sudo cp /backup/bewaesserung-data-20250301/schedules.json /opt/bewaesserung/data/
-sudo chown irrigation:irrigation /opt/bewaesserung/data/schedules.json
-sudo systemctl start irrigation-backend
+sudo systemctl stop noria-backend
+sudo cp /backup/noria-data-20250301/schedules.json /opt/noria/data/
+sudo chown noria:noria /opt/noria/data/schedules.json
+sudo systemctl start noria-backend
 ```
 
 #### API-Key wiederherstellen / neu generieren
@@ -278,10 +278,10 @@ sudo systemctl start irrigation-backend
 Wenn `api_key.txt` verloren geht, wird beim nächsten Backend-Start automatisch ein neuer Key generiert. Das Frontend muss dann mit dem neuen Key aktualisiert werden.
 
 ```bash
-sudo systemctl stop irrigation-backend
-sudo rm /opt/bewaesserung/data/api_key.txt  # erzwingt Neugenerierung
-sudo systemctl start irrigation-backend
-sudo cat /opt/bewaesserung/data/api_key.txt  # neuen Key anzeigen
+sudo systemctl stop noria-backend
+sudo rm /opt/noria/data/api_key.txt  # erzwingt Neugenerierung
+sudo systemctl start noria-backend
+sudo cat /opt/noria/data/api_key.txt  # neuen Key anzeigen
 ```
 
 ---
@@ -312,10 +312,10 @@ Das Backend sendet alle ~15 Sekunden `WATCHDOG=1` via `sd_notify`. Der Watchdog 
 
 ```bash
 # Watchdog-Status prüfen
-sudo systemctl status irrigation-backend | grep -i watchdog
+sudo systemctl status noria-backend | grep -i watchdog
 
 # Watchdog-Ereignisse in journald suchen
-sudo journalctl -u irrigation-backend | grep -i watchdog
+sudo journalctl -u noria-backend | grep -i watchdog
 ```
 
 Wenn der Backend-Prozess einfriert (z.B. Deadlock), erkennt systemd dies spätestens nach 30 Sekunden und startet den Service neu.

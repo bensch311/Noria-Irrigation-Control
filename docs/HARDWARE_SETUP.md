@@ -220,11 +220,11 @@ Gemäß Abschnitt 4 verkabeln.
 
 ```bash
 # Backend starten
-sudo systemctl start irrigation-backend
+sudo systemctl start noria-backend
 
 # Ventil 1 für 5 Sekunden öffnen
 curl -X POST http://localhost:8000/start \
-  -H "X-API-Key: $(sudo cat /opt/bewaesserung/data/api_key.txt)" \
+  -H "X-API-Key: $(sudo cat /opt/noria/data/api_key.txt)" \
   -H "Content-Type: application/json" \
   -d '{"zone": 1, "duration": 5, "time_unit": "Sekunden"}'
 

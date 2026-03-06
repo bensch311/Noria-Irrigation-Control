@@ -1,4 +1,4 @@
-# Bewässerungscomputer – Raspberry Pi
+# Noria – Bewässerungssteuerung für Raspberry Pi
 
 Produktionsreifes Bewässerungssteuersystem für den professionellen Einsatz in Gemüsebaubetrieben.
 
@@ -6,7 +6,7 @@ Produktionsreifes Bewässerungssteuersystem für den professionellen Einsatz in 
 
 ## Übersicht
 
-Der Bewässerungscomputer ist ein Python-basiertes System, das über Relaismodule Magnetventile ansteuert und eine browserbasierte Benutzeroberfläche für manuelle und automatische Steuerung bietet.
+Der Noria ist ein Python-basiertes System, das über Relaismodule Magnetventile ansteuert und eine browserbasierte Benutzeroberfläche für manuelle und automatische Steuerung bietet.
 
 **Kernfunktionen:**
 - Manuelle Einzelventilsteuerung mit konfigurierbarer Laufzeit
@@ -67,6 +67,10 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 ├── requirements.txt          # Python-Abhängigkeiten (pinned)
 ├── pytest.ini                # Test-Konfiguration
 │
+├── scripts/
+│   ├── install.sh            # Installations-Script (einmalig, als root)
+│   └── update.sh             # Update-Script (nach git pull, als root)
+│
 ├── api/                      # FastAPI-Router und Middleware
 │   ├── errors.py             # Globale Exception-Handler
 │   ├── middleware.py         # SecurityHeadersMiddleware
@@ -120,13 +124,45 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---
 
+## Produktionsbetrieb (Raspberry Pi)
+
+### Schnellinstallation
+
+```bash
+# System aktualisieren und git installieren
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git
+
+# Repository klonen
+git clone <REPO-URL> ~/noria
+
+# Installations-Script ausführen (einmalig, interaktiv)
+sudo bash ~/noria/scripts/install.sh
+```
+
+Das Script fragt IP-Adresse, Ventilanzahl und GPIO-Pins ab – für alle anderen Einstellungen einfach Enter drücken. Danach sind beide systemd-Services aktiv und starten bei jedem Neustart automatisch.
+
+**Oberfläche aufrufen:** `http://<PI-IP>:8080`
+
+### Updates einspielen
+
+```bash
+cd ~/noria
+git pull
+sudo bash scripts/update.sh
+```
+
+Vollständige Deployment-Anleitung (systemd, Firewall, HTTPS): → **[DEPLOYMENT.md](DEPLOYMENT.md)**
+
+---
+
 ## Quick-Start (Entwicklung / erster Test)
 
 ### 1. Repository klonen und Abhängigkeiten installieren
 
 ```bash
-git clone <REPO-URL> bewaesserung
-cd bewaesserung
+git clone <REPO-URL> noria
+cd noria
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -165,18 +201,11 @@ Beim ersten Aufruf wird der API-Key aus `data/api_key.txt` automatisch geladen.
 
 ---
 
-## Produktionsbetrieb
-
-Für den Produktionsbetrieb (systemd-Services, GPIO-Konfiguration, HTTPS):
-→ **[DEPLOYMENT.md](DEPLOYMENT.md)**
-
----
-
 ## Weiterführende Dokumentation
 
 | Dokument | Inhalt | Zielgruppe |
 |---|---|---|
-| [DEPLOYMENT.md](DEPLOYMENT.md) | systemd, GPIO-Setup, Firewall, HTTPS | Inbetriebnahme |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Installations-Script, systemd, GPIO-Setup, Firewall, HTTPS | Inbetriebnahme |
 | [CONFIGURATION.md](CONFIGURATION.md) | Alle Konfigurationsfelder mit Typen und Defaults | Einrichtung |
 | [OPERATIONS.md](OPERATIONS.md) | Log-Referenz, Fault-Behandlung, Backup & Recovery | Betrieb |
 | [API_REFERENCE.md](API_REFERENCE.md) | Alle Endpunkte, Request/Response, curl-Beispiele | Frontend-Dev / Integration |

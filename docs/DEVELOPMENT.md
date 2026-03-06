@@ -14,8 +14,8 @@ Anleitung für lokale Entwicklung, Tests und Erweiterungen.
 ### 1.2 Setup
 
 ```bash
-git clone <REPO-URL> bewaesserung
-cd bewaesserung
+git clone <REPO-URL> noria
+cd noria
 
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate

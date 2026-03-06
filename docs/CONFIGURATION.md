@@ -98,7 +98,7 @@ Benutzereinstellungen. Werden beim Start geladen und können zur Laufzeit über 
   "version": 1,
   "user": {
     "MAX_HISTORY_ITEMS": 20,
-    "NAVBAR_TITLE": "Bewaesserungscomputer",
+    "NAVBAR_TITLE": "Noria",
     "ACCENT_COLOR": "#82372a",
     "DEFAULT_DURATION": 5,
     "DEFAULT_TIME_UNIT": "Minuten"
@@ -109,7 +109,7 @@ Benutzereinstellungen. Werden beim Start geladen und können zur Laufzeit über 
 | Feld | Typ | Default | Beschreibung |
 |---|---|---|---|
 | `MAX_HISTORY_ITEMS` | int, 1..1000 | `20` | Maximale Anzahl Einträge im Bewässerungsverlauf. Ältere Einträge werden automatisch abgeschnitten. |
-| `NAVBAR_TITLE` | string | `"Bewaesserungscomputer"` | Titel in der Navigationsleiste des Frontends. |
+| `NAVBAR_TITLE` | string | `"Noria"` | Titel in der Navigationsleiste des Frontends. |
 | `ACCENT_COLOR` | string, `#RRGGBB` | `"#82372a"` | Akzentfarbe für das Frontend-UI (Hex-Format). |
 | `DEFAULT_DURATION` | int, ≥ 1 | `5` | Standardlaufzeit beim manuellen Start. Einheit bestimmt `DEFAULT_TIME_UNIT`. |
 | `DEFAULT_TIME_UNIT` | `"Sekunden"` \| `"Minuten"` | `"Minuten"` | Standardzeiteinheit für die Anzeige und das Startformular. |

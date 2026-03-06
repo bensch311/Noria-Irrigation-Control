@@ -1,6 +1,6 @@
 # ARCHITECTURE.md – Systemarchitektur
 
-Technische Tiefenbeschreibung des Bewässerungscomputers: Thread-Modell, Concurrency-Design, State-Machine, Persistenz und Sicherheitsschichten.
+Technische Tiefenbeschreibung von Noria: Thread-Modell, Concurrency-Design, State-Machine, Persistenz und Sicherheitsschichten.
 
 ---
 

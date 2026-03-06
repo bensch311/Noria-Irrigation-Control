@@ -1,10 +1,62 @@
 # DEPLOYMENT.md – Produktionsbetrieb
 
-Anleitung für die Einrichtung des Bewässerungscomputers auf einem Raspberry Pi für den Produktionseinsatz.
+Anleitung für die Einrichtung des Norias auf einem Raspberry Pi für den Produktionseinsatz.
 
 ---
 
-## 1. Raspberry Pi vorbereiten
+## 0. Schnellinstallation (empfohlen)
+
+Für die meisten Installationen reicht das mitgelieferte Installations-Script. Es übernimmt alle Schritte aus den Abschnitten 1–4 automatisch und fragt nur das Nötigste ab.
+
+### Voraussetzungen
+
+- Raspberry Pi OS Lite 64-bit (Debian Bookworm oder neuer), frisch installiert
+- Internetzugang für pip-Pakete
+- Python ≥ 3.11 (in aktuellem Raspberry Pi OS enthalten)
+
+### Schritt 1: System aktualisieren
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git
+```
+
+### Schritt 2: Repository klonen
+
+```bash
+git clone <REPO-URL> ~/noria
+```
+
+### Schritt 3: Installations-Script ausführen
+
+```bash
+sudo bash ~/noria/scripts/install.sh
+```
+
+Das Script fragt:
+- IP-Adresse des Pi (wird automatisch erkannt, Enter zum Bestätigen)
+- Anzahl der Ventile (Standard: 6)
+- GPIO-Pin je Ventil (Standard-Pins vorbelegt, Enter zum Übernehmen)
+- Relais-Polarität (Standard: Aktiv-Low – für die meisten Relay-Boards korrekt)
+- Maximale Laufzeit und gleichzeitige Ventile
+
+Danach läuft alles automatisch. Nach Abschluss ist die Oberfläche unter `http://<PI-IP>:8080` erreichbar.
+
+### Updates einspielen
+
+```bash
+cd ~/noria
+git pull
+sudo bash scripts/update.sh
+```
+
+---
+
+## 1. Manuelle Installation (Referenz / Sonderfälle)
+
+Die folgenden Abschnitte beschreiben die manuelle Installation Schritt für Schritt. Dieser Weg ist nur nötig wenn das Script nicht verwendbar ist (z.B. kein Internet, Sonderumgebung) oder zur Fehlersuche.
+
+---
 
 ### 1.1 Betriebssystem
 
@@ -16,7 +68,7 @@ Empfehlung: Raspberry Pi OS Lite (ohne Desktop), 64-bit.
 Nach dem ersten Boot:
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git python3-pip python3-venv
+sudo apt install -y git python3-pip python3-venv build-essential libsystemd-dev
 ```
 
 ### 1.2 Python-Version prüfen
@@ -34,51 +86,51 @@ Falls eine ältere Version installiert ist, Python 3.11 aus den Backports oder p
 
 ```bash
 # Dedizierten Benutzer ohne Login anlegen
-sudo adduser --system --group --no-create-home irrigation
+sudo adduser --system --group --no-create-home noria
 
 # Benutzer der GPIO-Gruppe hinzufügen (für RPi.GPIO)
-sudo usermod -aG gpio irrigation
+sudo usermod -aG gpio noria
 ```
 
 ---
 
-## 2. Anwendung installieren
+## 2. Anwendung installieren (manuell)
 
 ### 2.1 Code deployen
 
 ```bash
 # Als root oder sudo-Benutzer
-sudo mkdir -p /opt/bewaesserung
-sudo chown irrigation:irrigation /opt/bewaesserung
+sudo mkdir -p /opt/noria/app
+sudo chown noria:noria /opt/noria
 
-# Als irrigation-Benutzer (oder mit sudo -u irrigation)
-cd /opt/bewaesserung
-git clone <REPO-URL> .
+# Code kopieren (ohne Test- und Dev-Dateien)
+sudo rsync -a \
+    --exclude='.git/' --exclude='data/' --exclude='logs/' \
+    --exclude='test_*.py' --exclude='conftest.py' --exclude='pytest.ini' \
+    ~/noria/  /opt/noria/app/
 ```
 
 ### 2.2 Python-Umgebung erstellen
 
 ```bash
-cd /opt/bewaesserung
-python3 -m venv .venv
-source .venv/bin/activate
+cd /opt/noria
+python3 -m venv venv
+source venv/bin/activate
 
-# RPi.GPIO ist auf dem Pi verfügbar – MUSS installiert werden
-pip install -r requirements.txt
-# Falls RPi.GPIO in requirements.txt auskommentiert ist:
-pip install RPi.GPIO
+pip install -r app/requirements.txt
+
+# systemd-Integration (für Watchdog / READY=1)
+pip install systemd-python
 ```
 
 ### 2.3 Datenverzeichnis einrichten
 
 ```bash
-# Datenverzeichnis anlegen (falls nicht vorhanden)
-mkdir -p /opt/bewaesserung/data
-mkdir -p /opt/bewaesserung/logs
-
-# Eigentümer setzen
-chown -R irrigation:irrigation /opt/bewaesserung/data
-chown -R irrigation:irrigation /opt/bewaesserung/logs
+mkdir -p /opt/noria/app/data
+mkdir -p /opt/noria/app/logs
+chown -R noria:noria /opt/noria
+chmod 700 /opt/noria/app/data
+chmod 700 /opt/noria/app/logs
 ```
 
 ---
@@ -87,7 +139,7 @@ chown -R irrigation:irrigation /opt/bewaesserung/logs
 
 ### 3.1 Hardware-Konfiguration
 
-`/opt/bewaesserung/data/device_config.json` anlegen:
+`/opt/noria/app/data/device_config.json` anlegen:
 
 ```json
 {
@@ -118,7 +170,7 @@ Vollständige Feldbeschreibung → [CONFIGURATION.md](CONFIGURATION.md).
 
 ### 3.2 Frontend-Konfiguration
 
-`/opt/bewaesserung/data/frontend_config.json` anlegen:
+`/opt/noria/app/data/frontend_config.json` anlegen:
 
 ```json
 {
@@ -134,20 +186,24 @@ Vollständige Feldbeschreibung → [CONFIGURATION.md](CONFIGURATION.md).
 Wenn Backend und Frontend auf demselben Pi laufen: `base_url` = `http://127.0.0.1:8000`.  
 Wenn das Frontend von einem anderen Gerät aus auf den Pi zugreift: `base_url` = `http://<PI-IP>:8000`.
 
-### 3.3 CORS-Konfiguration
+### 3.3 Umgebungsvariablen (.env)
 
-CORS steuert, von welchen Browser-Origins aus die API aufgerufen werden darf.
-
-Die erlaubten Origins werden über die Umgebungsvariable `ALLOWED_ORIGINS` gesetzt (komma-separiert):
+`/opt/noria/.env` anlegen:
 
 ```bash
-# Beispiel: Pi-IP und localhost erlauben
+IRRIGATION_VALVE_DRIVER=rpi
+IRRIGATION_RELAY_ACTIVE_LOW=true
 ALLOWED_ORIGINS=http://192.168.1.100:8080,http://localhost:8080
 ```
 
-Standardwert ohne Umgebungsvariable: `http://localhost:8080`
+`ALLOWED_ORIGINS` steuert, von welchen Browser-Origins aus die API aufgerufen werden darf. Muss die tatsächliche IP/URL enthalten, unter der das Frontend erreichbar ist.
 
 **Hinweis:** CORS betrifft nur Browser-seitige Requests (JavaScript). Server-seitige Requests des Shiny-Frontends sind nicht betroffen.
+
+```bash
+chmod 640 /opt/noria/.env
+chown noria:noria /opt/noria/.env
+```
 
 ---
 
@@ -157,37 +213,41 @@ Zwei separate Services: Backend (FastAPI) und Frontend (Shiny).
 
 ### 4.1 Backend-Service
 
-Datei anlegen: `/etc/systemd/system/irrigation-backend.service`
+Datei anlegen: `/etc/systemd/system/noria-backend.service`
 
 ```ini
 [Unit]
-Description=Bewässerungscomputer Backend (FastAPI)
+Description=Noria Backend (FastAPI)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=notify
-User=irrigation
-Group=irrigation
-WorkingDirectory=/opt/bewaesserung
-Environment="PATH=/opt/bewaesserung/.venv/bin"
-Environment="ALLOWED_ORIGINS=http://192.168.1.100:8080,http://localhost:8080"
-# ENABLE_DOCS absichtlich NICHT gesetzt → Swagger UI und ReDoc sind deaktiviert.
-# Nur für Entwicklung lokal aktivieren: ENABLE_DOCS=true uvicorn ...
-ExecStart=/opt/bewaesserung/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
-Restart=always
+User=noria
+Group=noria
+WorkingDirectory=/opt/noria/app
+Environment="PATH=/opt/noria/venv/bin"
+EnvironmentFile=/opt/noria/.env
+ExecStart=/opt/noria/venv/bin/uvicorn main:app \
+    --host 0.0.0.0 --port 8000 --workers 1 --no-access-log
+Restart=on-failure
 RestartSec=5
-WatchdogSec=30
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=30
 KillSignal=SIGTERM
-TimeoutStopSec=15
+KillMode=mixed
+WatchdogSec=30
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=noria-backend
 
-# Sicherheitshärtung
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/bewaesserung/data /opt/bewaesserung/logs
+ReadWritePaths=/opt/noria/app/data /opt/noria/app/logs
 
-# GPIO-Zugriff benötigt
 DeviceAllow=/dev/gpiomem rw
 SupplementaryGroups=gpio
 
@@ -196,35 +256,39 @@ WantedBy=multi-user.target
 ```
 
 **Wichtig:**
-- `Type=notify` und `WatchdogSec=30`: Das Backend sendet `WATCHDOG=1` alle ~15 Sekunden via `sd_notify`. Wenn der Watchdog innerhalb von 30 Sekunden keinen Heartbeat empfängt, wird der Service neu gestartet.
-- `ALLOWED_ORIGINS`: Mit der tatsächlichen IP des Pi ersetzen.
+- `Type=notify` und `WatchdogSec=30`: Das Backend sendet `WATCHDOG=1` alle ~10 Sekunden via `sd_notify`. Wenn der Watchdog innerhalb von 30 Sekunden keinen Heartbeat empfängt, wird der Service neu gestartet. Erfordert `systemd-python` im Virtualenv.
+- Falls `systemd-python` nicht installierbar ist: `Type=notify` durch `Type=simple` ersetzen.
 
 ### 4.2 Frontend-Service
 
-Datei anlegen: `/etc/systemd/system/irrigation-frontend.service`
+Datei anlegen: `/etc/systemd/system/noria-frontend.service`
 
 ```ini
 [Unit]
-Description=Bewässerungscomputer Frontend (Shiny)
-After=network.target irrigation-backend.service
-Wants=irrigation-backend.service
+Description=Noria Frontend (Shiny)
+After=network.target noria-backend.service
+Wants=noria-backend.service
 
 [Service]
 Type=simple
-User=irrigation
-Group=irrigation
-WorkingDirectory=/opt/bewaesserung
-Environment="PATH=/opt/bewaesserung/.venv/bin"
-ExecStart=/opt/bewaesserung/.venv/bin/shiny run app.py --host 0.0.0.0 --port 8080
-Restart=always
+User=noria
+Group=noria
+WorkingDirectory=/opt/noria/app
+Environment="PATH=/opt/noria/venv/bin"
+ExecStart=/opt/noria/venv/bin/shiny run app.py \
+    --host 0.0.0.0 --port 8080
+Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
 KillSignal=SIGTERM
-TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=noria-frontend
 
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/bewaesserung/data /opt/bewaesserung/logs
+ReadWritePaths=/opt/noria/app/data /opt/noria/app/logs
 
 [Install]
 WantedBy=multi-user.target
@@ -235,22 +299,23 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 
-sudo systemctl enable irrigation-backend
-sudo systemctl enable irrigation-frontend
+sudo systemctl enable noria-backend
+sudo systemctl enable noria-frontend
 
-sudo systemctl start irrigation-backend
-sudo systemctl start irrigation-frontend
+sudo systemctl start noria-backend
+sleep 5
+sudo systemctl start noria-frontend
 ```
 
 ### 4.4 Service-Status prüfen
 
 ```bash
-sudo systemctl status irrigation-backend
-sudo systemctl status irrigation-frontend
+sudo systemctl status noria-backend
+sudo systemctl status noria-frontend
 
 # Live-Log verfolgen
-sudo journalctl -u irrigation-backend -f
-sudo journalctl -u irrigation-frontend -f
+sudo journalctl -u noria-backend -f
+sudo journalctl -u noria-frontend -f
 ```
 
 ---
@@ -260,14 +325,14 @@ sudo journalctl -u irrigation-frontend -f
 Nach dem ersten Start des Backends wurde der API-Key automatisch generiert:
 
 ```bash
-sudo cat /opt/bewaesserung/data/api_key.txt
+sudo cat /opt/noria/app/data/api_key.txt
 ```
 
 Das Frontend liest den Key automatisch aus `data/api_key.txt`. Bei korrektem Setup (Backend und Frontend auf demselben Pi, gleicher `WorkingDirectory`) ist keine manuelle Konfiguration erforderlich.
 
 Wenn der Key ungültig oder nicht lesbar ist, zeigt das Frontend einen roten Auth-Modal. In diesem Fall:
-1. Backend-Log prüfen: `sudo journalctl -u irrigation-backend --since "5 minutes ago"`
-2. Dateiberechtigung prüfen: `ls -la /opt/bewaesserung/data/api_key.txt` (muss `600` sein)
+1. Backend-Log prüfen: `sudo journalctl -u noria-backend --since "5 minutes ago"`
+2. Dateiberechtigung prüfen: `ls -la /opt/noria/app/data/api_key.txt` (muss `600` sein)
 3. Key manuell in das Modal eingeben oder `api_key.txt` vom Pi kopieren
 
 ---
@@ -276,13 +341,13 @@ Wenn der Key ungültig oder nicht lesbar ist, zeigt das Frontend einen roten Aut
 
 ```bash
 # api_key.txt muss 600 sein (nur Owner lesen/schreiben)
-ls -la /opt/bewaesserung/data/api_key.txt
-# Erwartete Ausgabe: -rw------- 1 irrigation irrigation ...
+ls -la /opt/noria/app/data/api_key.txt
+# Erwartete Ausgabe: -rw------- 1 noria noria ...
 
 # Das Backend setzt 600 automatisch beim Erstellen und Laden.
 # Falls falsch:
-sudo chmod 600 /opt/bewaesserung/data/api_key.txt
-sudo chown irrigation:irrigation /opt/bewaesserung/data/api_key.txt
+sudo chmod 600 /opt/noria/app/data/api_key.txt
+sudo chown noria:noria /opt/noria/app/data/api_key.txt
 ```
 
 ---
@@ -313,7 +378,7 @@ Wenn das Frontend über Standard-HTTP-Port 80 erreichbar sein soll oder HTTPS be
 sudo apt install -y nginx
 ```
 
-Konfiguration `/etc/nginx/sites-available/bewaesserung`:
+Konfiguration `/etc/nginx/sites-available/noria`:
 
 ```nginx
 server {
@@ -342,7 +407,7 @@ server {
 ```
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/bewaesserung /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/noria /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl restart nginx
 ```
@@ -355,8 +420,8 @@ sudo systemctl restart nginx
 
 ```bash
 sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-  -keyout /etc/ssl/private/bewaesserung.key \
-  -out /etc/ssl/certs/bewaesserung.crt \
+  -keyout /etc/ssl/private/noria.key \
+  -out /etc/ssl/certs/noria.crt \
   -subj "/CN=<PI-IP-ODER-HOSTNAME>"
 ```
 
@@ -364,8 +429,8 @@ nginx-Konfiguration ergänzen:
 ```nginx
 server {
     listen 443 ssl;
-    ssl_certificate /etc/ssl/certs/bewaesserung.crt;
-    ssl_certificate_key /etc/ssl/private/bewaesserung.key;
+    ssl_certificate /etc/ssl/certs/noria.crt;
+    ssl_certificate_key /etc/ssl/private/noria.key;
     # ... rest der Konfiguration wie oben
 }
 ```
@@ -379,31 +444,23 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d <DOMAIN>
 ```
 
-**Wichtig nach HTTPS-Umstellung:** `ALLOWED_ORIGINS` und `base_url` in `frontend_config.json` entsprechend auf `https://` aktualisieren.
+**Wichtig nach HTTPS-Umstellung:** `ALLOWED_ORIGINS` in `/opt/noria/.env` und `base_url` in `frontend_config.json` entsprechend auf `https://` aktualisieren, dann Services neu starten.
 
 ---
 
 ## 10. Updates einspielen
 
 ```bash
-cd /opt/bewaesserung
+cd ~/noria
 
-# Dienste stoppen
-sudo systemctl stop irrigation-frontend irrigation-backend
-
-# Code aktualisieren
+# Neuesten Code holen
 git pull
 
-# Abhängigkeiten aktualisieren (falls requirements.txt geändert)
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Dienste neu starten
-sudo systemctl start irrigation-backend irrigation-frontend
-
-# Status prüfen
-sudo systemctl status irrigation-backend irrigation-frontend
+# Update-Script ausführen (stoppt Services, deployt Code, startet neu)
+sudo bash scripts/update.sh
 ```
+
+Das Update-Script stoppt die Services graceful, kopiert den neuen Code, aktualisiert pip-Pakete und startet neu. Konfigurationsdateien und Nutzerdaten werden dabei nicht verändert.
 
 ---
 
@@ -411,7 +468,7 @@ sudo systemctl status irrigation-backend irrigation-frontend
 
 Nach einem Systemabsturz oder Stromausfall:
 
-1. Backend startet neu (via systemd `Restart=always`)
+1. Backend startet neu (via systemd `Restart=on-failure`)
 2. Beim Startup: `close_all()` via IO-Worker → alle Ventile werden geschlossen (Fail-Safe)
 3. `active_runs` wird geleert, `paused=False` (Laufzeit-Zustand wird NICHT wiederhergestellt)
 4. Queue und Zeitpläne werden aus `data/queue.json` bzw. `data/schedules.json` wiederhergestellt
