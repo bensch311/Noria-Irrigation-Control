@@ -76,7 +76,7 @@ body {
   overflow: hidden;
 }
 .navbar .navbar-brand { color: var(--text_white) !important; font-family: "Fraunces", Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-.navbar .nav-link { color: var(--text_white) !important; }
+.navbar .nav-link { color: var(--text_white) !important; font-size:     1.2rem !important;}
 
 .navbar .nav-link.active,
 .navbar .nav-link:hover {
