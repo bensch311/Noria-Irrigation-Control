@@ -28,6 +28,7 @@ from faicons import icon_svg as icon
 # ANZAHL_VENTILE liest MAX_VALVES aus data/device_config.json –
 # Single Source of Truth, kein manuelles Doppelpflegen.
 
+from version import __version__
 from app_helpers import (
     WEEKDAY_CHOICES as _WEEKDAY_CHOICES_IMPORT,
     _load_frontend_config,
@@ -1616,6 +1617,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 d = _settings_data()
                 backend_max = d.get("max_valves", "?") if d else "?"
                 rows = [
+                    ("Version",              __version__),
                     ("Backend-URL",          BASE_URL),
                     ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
                     ("Ventile (Backend)",     str(backend_max)),
