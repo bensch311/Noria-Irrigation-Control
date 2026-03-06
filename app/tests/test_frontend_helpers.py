@@ -161,14 +161,14 @@ class TestLoadFrontendConfig:
 
     def test_missing_file_returns_defaults(self, tmp_path, monkeypatch):
         """Fehlende frontend_config.json → sichere Defaults."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         cfg = h._load_frontend_config()
         assert "base_url" in cfg
         assert isinstance(cfg["poll_status_s"], int)
 
     def test_valid_config_overrides_defaults(self, tmp_path, monkeypatch):
         """Gültige frontend_config.json überschreibt Default-Werte."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "frontend_config.json").write_text(
             json.dumps({"base_url": "http://192.168.1.10:8000", "poll_status_s": 2}),
@@ -180,7 +180,7 @@ class TestLoadFrontendConfig:
 
     def test_corrupt_json_returns_defaults(self, tmp_path, monkeypatch):
         """Kaputtes JSON → Defaults, kein Crash."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "frontend_config.json").write_text(
             "{corrupt json!!!", encoding="utf-8"
@@ -190,7 +190,7 @@ class TestLoadFrontendConfig:
 
     def test_private_keys_filtered(self, tmp_path, monkeypatch):
         """Keys mit '_'-Präfix (Kommentare) werden nicht übernommen."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "frontend_config.json").write_text(
             json.dumps({"_comment": "ignored", "poll_status_s": 3}),
@@ -209,11 +209,11 @@ class TestReadMaxValves:
     """_read_max_valves_from_device_config(fallback) liest MAX_VALVES."""
 
     def test_missing_file_returns_fallback(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         assert h._read_max_valves_from_device_config(fallback=6) == 6
 
     def test_valid_config_returns_max_valves(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "device_config.json").write_text(
             json.dumps({"device": {"MAX_VALVES": 4}}), encoding="utf-8"
@@ -222,7 +222,7 @@ class TestReadMaxValves:
 
     def test_max_valves_minimum_is_1(self, tmp_path, monkeypatch):
         """MAX_VALVES=0 in Konfig → min. 1 (max(1, ...))."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "device_config.json").write_text(
             json.dumps({"device": {"MAX_VALVES": 0}}), encoding="utf-8"
@@ -230,7 +230,7 @@ class TestReadMaxValves:
         assert h._read_max_valves_from_device_config(fallback=6) == 1
 
     def test_corrupt_json_returns_fallback(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "device_config.json").write_text(
             "not valid json {{{", encoding="utf-8"
@@ -239,7 +239,7 @@ class TestReadMaxValves:
 
     def test_missing_device_key_returns_fallback(self, tmp_path, monkeypatch):
         """Konfig ohne 'device'-Schlüssel → fallback."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
         (tmp_path / "data").mkdir()
         (tmp_path / "data" / "device_config.json").write_text(
             json.dumps({"other_key": 42}), encoding="utf-8"
