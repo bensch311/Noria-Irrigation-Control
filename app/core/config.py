@@ -38,8 +38,8 @@ from zoneinfo import ZoneInfo
 MAX_VALVES = 6
 MAX_RUNTIME_S = 60 * 60
 MAX_HISTORY_ITEMS = 20
-NAVBAR_TITLE = "Bewaesserungscomputer"
-ACCENT_COLOR = "#82372a"
+NAVBAR_TITLE = "Noria - Irrigation Control"
+ACCENT_COLOR = "#b8902a"
 DEFAULT_DURATION = 5
 DEFAULT_TIME_UNIT = "Minuten"
 

@@ -1,4 +1,4 @@
-# app.py - Bewaesserungscomputer Frontend
+# app.py - Noria - Irrigation Control Frontend
 # Shiny Express | FastAPI Backend: http://127.0.0.1:8000
 #
 # Rate-Limit-Strategie:
@@ -248,8 +248,8 @@ ui.tags.head(
 
 # Initiale Defaults – werden nach dem ersten _settings_data()-Poll durch
 # die reaktiven Renderer überschrieben.
-ACCENT_COLOR_DEFAULT = "#82372a"
-NAVBAR_TITLE_DEFAULT = "Bewaesserungscomputer"
+ACCENT_COLOR_DEFAULT = "#b8902a"
+NAVBAR_TITLE_DEFAULT = "Noria - Irrigation Control"
 
 # Initiales CSS mit Fallback-Farbe (sofort beim Laden aktiv)
 ui.tags.style(f":root {{ --accent: {ACCENT_COLOR_DEFAULT}; }}")
