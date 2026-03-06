@@ -56,27 +56,35 @@ body {
   padding-right: 1.25rem !important;
 }
 
-.app-shell { padding: 0.9rem 0.9rem 1.4rem; }
-
-.app-title {
-  font-weight: 750;
-  letter-spacing: 0.01em;
-}
-
-.app-subtitle {
-  color: var(--muted);
-  font-size: 0.92rem;
-}
 
 /* ---------- NAV ---------- */
 .navbar {
   background: var(--accent) !important;
   border-radius: var(--radius2) !important;
   margin: 0.6rem 0.6rem 0 !important;
+  padding-top: 0.35rem !important;
+  padding-bottom: 0.35rem !important;
   overflow: hidden;
 }
-.navbar .navbar-brand { color: var(--text_white) !important; font-family: "Fraunces", Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-.navbar .nav-link { color: var(--text_white) !important; font-size:     1.2rem !important;}
+
+/* .navbar-brand ist ein span im Shiny-generierten HTML.
+   Per Default nimmt es nicht die volle Höhe des Flex-Containers an.
+   align-self: stretch + display: flex + align-items: center sorgt dafür,
+   dass es genauso hoch wie der container-fluid ist und der Inhalt
+   vertikal zentriert wird.
+   padding: 0 überschreibt den Bootstrap-Default (0.3125rem top/bottom),
+   der das Zentrieren verhindert. */
+.navbar .navbar-brand {
+  display: flex !important;
+  align-items: center !important;
+  align-self: stretch !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  color: var(--text_white) !important;
+  font-family: "Fraunces", Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+.navbar .nav-link { color: var(--text_white) !important; }
 
 .navbar .nav-link.active,
 .navbar .nav-link:hover {
@@ -96,8 +104,6 @@ body {
   font-size:     0.92rem !important;
   font-weight:   650 !important;
   letter-spacing:0.04em !important;
-
-  /* Ziffernbreite fixieren → kein Springen */
   font-variant-numeric: tabular-nums;
   min-width: 7.2ch;
   display: inline-block;
@@ -105,22 +111,22 @@ body {
 }
 
 /* ---------- Navbar Brand: Logo + Titel ---------- */
+/* height: 100% damit der innere Container genauso hoch ist wie
+   .navbar-brand (das durch align-self:stretch die volle Navbar-Höhe hat).
+   display: flex + align-items: center zentriert Icon und Text darin. */
 .navbar-brand-inner {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 1.55rem;
+  height: 100%;
+  gap: 0.85rem;
 }
 
-/* Logo: Höhe an Navbar-Schrift angepasst, Breite proportional.
-   object-fit:contain verhindert Verzerrung bei nicht-quadratischen SVGs. */
+/* Icon: feste quadratische Größe passend zum 32x32 viewBox SVG */
 .navbar-brand-logo {
-  height: 1.75rem;
-  width: auto;
-  object-fit: contain;
-  /* Weißes Bild auf Accent-Hintergrund braucht kein Filter.
-     Falls das Logo auf anderen Hintergründen dunkel wirkt, kann man
-     hier filter: brightness(0) invert(1) ergänzen. */
+  height: 2.5rem;
+  width: 2.5rem;
   flex-shrink: 0;
+  object-fit: contain;
 }
 
 /* ---------- CARDS ---------- */
