@@ -49,7 +49,7 @@ def _load_frontend_config() -> dict:
         "navbar_logo":             "",   # Dateiname im www/-Ordner, z.B. "logo.svg". Leer = kein Logo.
     }
     try:
-        raw = Path("data/frontend_config.json").read_text(encoding="utf-8")
+        raw = (Path(__file__).parent / "data" / "frontend_config.json").read_text(encoding="utf-8")
         data = _json.loads(raw)
         return {**_defaults, **{k: v for k, v in data.items() if not k.startswith("_")}}
     except Exception:
@@ -63,7 +63,7 @@ def _read_max_valves_from_device_config(fallback: int) -> int:
     ist die sauberste Loesung: kein API-Call beim Start, keine Race-Condition.
     """
     try:
-        raw = Path("data/device_config.json").read_text(encoding="utf-8")
+        raw = (Path(__file__).parent / "data" / "device_config.json").read_text(encoding="utf-8")
         cfg = _json.loads(raw)
         return max(1, int(cfg.get("device", {}).get("MAX_VALVES", fallback)))
     except Exception:

@@ -52,7 +52,7 @@ HEALTH_TIMEOUT_S       = float(_cfg["health_timeout_s"])
 _logo_filename = str(_cfg.get("navbar_logo", "")).strip()
 NAVBAR_LOGO_PATH: str = (
     _logo_filename
-    if _logo_filename and Path(f"www/{_logo_filename}").is_file()
+    if _logo_filename and (Path(__file__).parent / "www" / _logo_filename).is_file()
     else ""
 )
 
@@ -65,7 +65,7 @@ WEEKDAY_CHOICES = _WEEKDAY_CHOICES_IMPORT
 
 # --- API-Key -----------------------------------------------------------------
 
-_API_KEY_PATH = Path("./data/api_key.txt")
+_API_KEY_PATH = Path(__file__).parent / "data" / "api_key.txt"
 
 _api_key = reactive.Value("")          # session-scoped durch Shiny Express
 _auth_ok = reactive.Value(True)
@@ -253,7 +253,7 @@ NAVBAR_TITLE_DEFAULT = "Bewaesserungscomputer"
 
 # Initiales CSS mit Fallback-Farbe (sofort beim Laden aktiv)
 ui.tags.style(f":root {{ --accent: {ACCENT_COLOR_DEFAULT}; }}")
-ui.include_css("www/app.css")
+ui.include_css(Path(__file__).parent / "www" / "app.css")
 
 # =============================================================================
 # SEITE
