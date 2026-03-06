@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 
+from version import APP_NAME, __version__
 from api.middleware import SecurityHeadersMiddleware
 from core.lifecycle import lifespan
 from core.limiter import limiter
@@ -51,6 +52,8 @@ _docs_url    = "/docs"  if _enable_docs else None
 _redoc_url   = "/redoc" if _enable_docs else None
 
 app = FastAPI(
+    title=APP_NAME,
+    version=__version__,
     lifespan=lifespan,
     docs_url=_docs_url,
     redoc_url=_redoc_url,

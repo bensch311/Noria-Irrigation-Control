@@ -15,6 +15,7 @@ Response-Felder:
   ok                  – False wenn hw_faulted=True, sonst True
   service             – immer "irrigation"
   version             – API-Version (int)
+  app_version         – Noria Software-Version (SemVer-String, z.B. "0.9.0")
   ts                  – aktueller ISO-8601-Zeitstempel
   running_zones       – sortierte Liste aktiver Zonen
   queue_length        – Anzahl Items in der Queue
@@ -25,6 +26,7 @@ Response-Felder:
 from fastapi import APIRouter
 from datetime import datetime
 
+from version import __version__
 from core.state import state, state_lock
 from core.config import TZ
 
@@ -75,6 +77,7 @@ def health():
         "ok": not hw_faulted,
         "service": "irrigation",
         "version": 1,
+        "app_version": __version__,
         "ts": datetime.now(TZ).isoformat(timespec="seconds"),
         "running_zones": running,
         "queue_length": qlen,
