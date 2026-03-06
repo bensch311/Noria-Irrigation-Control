@@ -1,0 +1,36 @@
+<svg width="280" height="80" viewBox="0 0 280 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght=700&amp;family=DM+Sans:wght=400');
+      .orbit  { animation: orb 7s linear infinite; transform-origin: 38px 38px; }
+      .drop   { animation: pf 2.8s ease-in-out infinite; }
+      .dashed { animation: orb 16s linear infinite; transform-origin: 38px 38px; animation-direction: reverse; }
+      @keyframes orb { to { transform: rotate(360deg); } }
+      @keyframes pf  { 0%,100%{opacity:.6;} 50%{opacity:1;} }
+    </style>
+  </defs>
+  <g transform="translate(38,40)">
+    <circle cx="0" cy="0" r="33" fill="#fdf6e0"/>
+    <circle cx="0" cy="0" r="33" stroke="#b8902a" stroke-width="2.2" fill="none"/>
+    <circle cx="0" cy="0" r="21" stroke="#b8902a" stroke-width="0.9" stroke-dasharray="3.5 3" fill="none" opacity="0.45" class="dashed"/>
+    <path class="drop"
+      d="M 0 -18 C 0 -18 -11.5 -4.5 -11.5 4.5 C -11.5 10.8 -6.3 16 0 16 C 6.3 16 11.5 10.8 11.5 4.5 C 11.5 -4.5 0 -18 0 -18 Z"
+      fill="#b8902a"/>
+    <ellipse cx="-4" cy="1.5" rx="3.5" ry="6" fill="white" opacity="0.22" transform="rotate(-18,-4,1.5)"/>
+    <g class="orbit">
+      <circle cx="0" cy="-33" r="4.5" fill="#b8902a"/>
+    </g>
+    <circle cx="0"   cy="-33" r="1.8" fill="#b8902a" opacity="0.35"/>
+    <circle cx="0"   cy="33"  r="1.8" fill="#b8902a" opacity="0.35"/>
+    <circle cx="-33" cy="0"   r="1.8" fill="#b8902a" opacity="0.35"/>
+    <circle cx="33"  cy="0"   r="1.8" fill="#b8902a" opacity="0.35"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="88" y="38"
+    font-family="Cinzel, serif" font-size="30" font-weight="700"
+    fill="#1a1400" letter-spacing="3">NORIA</text>
+  <line x1="88" y1="46" x2="272" y2="46" stroke="#b8902a" stroke-width="0.7" opacity="0.55"/>
+  <text x="89" y="58"
+    font-family="DM Sans, sans-serif" font-size="8.5" fill="#b8902a"
+    letter-spacing="4.5" font-weight="400">IRRIGATION CONTROL</text>
+</svg>

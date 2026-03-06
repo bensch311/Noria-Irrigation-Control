@@ -1623,16 +1623,23 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ("Slow-Poll",             f"{POLL_SLOW_S} s"),
                     ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
                 ]
-                return ui.tags.table(
-                    ui.tags.tbody(*[
-                        ui.tags.tr(
-                            ui.tags.td(label, class_="text-muted small pe-3",
-                                       style="white-space:nowrap;width:1%;"),
-                            ui.tags.td(value, class_="small fw-semibold"),
-                        )
-                        for label, value in rows
-                    ]),
-                    class_="table table-sm",
+                return ui.div(
+                    ui.tags.img(
+                        src="noria-logo-animated-light.svg",
+                        alt="Noria",
+                        style="height:56px; display:block; margin-bottom:1.25rem;",
+                    ),
+                    ui.tags.table(
+                        ui.tags.tbody(*[
+                            ui.tags.tr(
+                                ui.tags.td(label, class_="text-muted small pe-3",
+                                           style="white-space:nowrap;width:1%;"),
+                                ui.tags.td(value, class_="small fw-semibold"),
+                            )
+                            for label, value in rows
+                        ]),
+                        class_="table table-sm",
+                    ),
                 )
 
         # ----- Speichern -----------------------------------------------------
