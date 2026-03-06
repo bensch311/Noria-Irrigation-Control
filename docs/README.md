@@ -1,6 +1,14 @@
-# Noria – Bewässerungssteuerung für Raspberry Pi
+<p align="center">
+  <img src="www/noria-logo-static-light.svg" width="260" alt="Noria Logo"/>
+</p>
 
-Produktionsreifes Bewässerungssteuersystem für den professionellen Einsatz in Gemüsebaubetrieben.
+<p align="center">
+  <strong>Produktionsreifes Bewässerungssteuersystem für den professionellen Einsatz in Gemüsebaubetrieben.</strong>
+</p>
+
+---
+
+# Noria – Bewässerungssteuerung für Raspberry Pi
 
 ---
 
