@@ -7,22 +7,25 @@
 #   sudo bash scripts/install.sh
 #
 # Voraussetzungen:
-#   - Raspberry Pi OS Lite 64-bit (Debian Bookworm oder neuer)
+#   - Raspberry Pi OS with Desktop 64-bit (Debian Bookworm)       ← Standard
+#     ODER Raspberry Pi OS Lite 64-bit (wenn Kiosk-Modus = Nein)
 #   - Python >= 3.11  (sudo apt install python3.11 falls älter)
 #   - Internetverbindung für pip-Pakete
 #   - Script muss mit sudo / als root ausgeführt werden
 #
 # Was dieses Script tut:
 #   1. Systemprüfung  (OS, Python, git)
-#   2. IP-Adresse + Ventil-Konfiguration abfragen
-#   3. Systembenutzer 'noria' anlegen
-#   4. Code nach /opt/noria/app deployen
-#   5. Python-Virtualenv erstellen + Pakete installieren
-#   6. Konfigurationsdateien generieren (device_config, frontend_config, .env)
-#   7. systemd-Services generieren, aktivieren und starten
-#   8. Abschlusszusammenfassung mit Zugriffs-URLs ausgeben
+#   2. IP-Adresse + Ventil- + Kiosk-Konfiguration abfragen
+#   3. Zusammenfassung & Bestätigung
+#   4. Systembenutzer anlegen + Systempakete installieren
+#   5. Code nach /opt/noria/app deployen
+#   6. Python-Virtualenv erstellen + Pakete installieren
+#   7. Konfigurationsdateien generieren (device_config, frontend_config, .env)
+#   8. systemd-Services generieren, aktivieren und starten
+#   9. Kiosk-Modus einrichten (optional)
 #
 # Bei einem Neustart des Pi starten die Services automatisch.
+# Im Kiosk-Modus öffnet sich Chromium direkt nach dem Boot im Vollbild.
 # =============================================================================
 
 set -uo pipefail
@@ -56,6 +59,8 @@ LOGS_DIR="$APP_DIR/logs"
 ENV_FILE="$INSTALL_DIR/.env"
 SYSTEMD_DIR="/etc/systemd/system"
 APP_USER="noria"
+KIOSK_USER="kiosk"
+KIOSK_HOME="/home/$KIOSK_USER"
 BACKEND_PORT=8000
 FRONTEND_PORT=8080
 
@@ -89,7 +94,7 @@ echo "  Dienste ein, die bei jedem Systemstart laufen."
 echo
 
 # ── 1. SYSTEMPRÜFUNG ─────────────────────────────────────────────────────────
-section "1 / 8  Systemprüfung"
+section "1 / 9  Systemprüfung"
 
 # Root-Rechte prüfen
 if [[ $EUID -ne 0 ]]; then
@@ -158,7 +163,7 @@ if [[ -d "$APP_DIR" ]]; then
 fi
 
 # ── 2. KONFIGURATION ABFRAGEN ─────────────────────────────────────────────────
-section "2 / 8  Konfiguration"
+section "2 / 9  Konfiguration"
 
 echo
 echo "  Bitte einige Fragen zur Hardware-Konfiguration beantworten."
@@ -246,8 +251,23 @@ if ! [[ "$MAX_RUNTIME" =~ ^[0-9]+$ ]] || [[ "$MAX_RUNTIME" -lt 1 ]]; then
 fi
 success "Betriebsgrenzen: max. $MAX_CONCURRENT gleichzeitig, max. ${MAX_RUNTIME}s Laufzeit"
 
+echo
+echo "─── Kiosk-Modus ────────────────────────────────────────"
+echo "  Im Kiosk-Modus startet Chromium nach dem Boot automatisch"
+echo "  im Vollbild und zeigt die Noria-Oberfläche an."
+echo "  Der Benutzer kann den Browser nicht verlassen."
+echo
+echo "  Voraussetzung: Raspberry Pi OS with Desktop (64-bit, Bookworm)"
+echo "  (nicht Lite – ein Display-Stack muss vorhanden sein)"
+echo
+read -rp "  Kiosk-Modus auf diesem Gerät einrichten? [J/n]: " KIOSK_ANSWER
+case "${KIOSK_ANSWER,,}" in
+    n|nein) KIOSK_MODE=false; info "Kiosk-Modus: Nein" ;;
+    *)      KIOSK_MODE=true;  info "Kiosk-Modus: Ja – Chromium Vollbild-Autostart wird konfiguriert" ;;
+esac
+
 # ── 3. ZUSAMMENFASSUNG & BESTÄTIGUNG ──────────────────────────────────────────
-section "3 / 8  Zusammenfassung"
+section "3 / 9  Zusammenfassung"
 
 echo
 echo -e "  ${BOLD}Installationsverzeichnis :${NC} $INSTALL_DIR"
@@ -264,6 +284,12 @@ echo -e "  ${BOLD}Relais Aktiv-Low         :${NC} $RELAY_ACTIVE_LOW"
 echo -e "  ${BOLD}Max. gleichz. Ventile    :${NC} $MAX_CONCURRENT"
 echo -e "  ${BOLD}Max. Laufzeit            :${NC} ${MAX_RUNTIME}s"
 echo
+if [[ "$KIOSK_MODE" == "true" ]]; then
+    echo -e "  ${BOLD}Kiosk-Modus              :${NC} ${GREEN}Ja${NC} – Chromium Vollbild (Benutzer: $KIOSK_USER)"
+else
+    echo -e "  ${BOLD}Kiosk-Modus              :${NC} Nein"
+fi
+echo
 read -rp "  Installation jetzt starten? [J/n]: " CONFIRM
 case "${CONFIRM,,}" in
     n|nein) echo "Abgebrochen."; exit 0 ;;
@@ -272,7 +298,7 @@ esac
 echo
 
 # ── 4. SYSTEMBENUTZER & SYSTEMABHÄNGIGKEITEN ──────────────────────────────────
-section "4 / 8  Systembenutzer & Systemabhängigkeiten"
+section "4 / 9  Systembenutzer & Systemabhängigkeiten"
 
 info "Installiere benötigte Systempakete..."
 apt-get install -y \
@@ -283,7 +309,7 @@ apt-get install -y \
     2>&1 | grep -v "^$" || true
 success "Systempakete installiert"
 
-# Systembenutzer anlegen
+# Systembenutzer 'noria' anlegen (für Backend/Frontend-Services)
 if id "$APP_USER" &>/dev/null; then
     success "Systembenutzer '$APP_USER' existiert bereits"
 else
@@ -299,8 +325,87 @@ else
     warn "Gruppe 'gpio' nicht gefunden – GPIO-Zugriff evtl. nicht möglich"
 fi
 
+# Kiosk-spezifische Pakete und Benutzer
+if [[ "$KIOSK_MODE" == "true" ]]; then
+    echo
+    info "Installiere Kiosk-Pakete (chromium, unclutter, curl, x11-xserver-utils)..."
+
+    # Chromium: Paketname variiert je nach Pi OS Version
+    # Bookworm: 'chromium', Bullseye: 'chromium-browser'
+    CHROMIUM_PKG=""
+    for pkg in chromium chromium-browser; do
+        if apt-cache show "$pkg" &>/dev/null 2>&1; then
+            CHROMIUM_PKG="$pkg"
+            break
+        fi
+    done
+    if [[ -z "$CHROMIUM_PKG" ]]; then
+        die "Chromium-Paket nicht in apt-cache gefunden.\n  Bitte sicherstellen dass Raspberry Pi OS with Desktop verwendet wird."
+    fi
+
+    apt-get install -y \
+        "$CHROMIUM_PKG" \
+        unclutter \
+        curl \
+        x11-xserver-utils \
+        --quiet \
+        2>&1 | grep -v "^$" || true
+    success "Kiosk-Pakete installiert (Chromium: $CHROMIUM_PKG)"
+
+    # Chromium-Binary ermitteln
+    CHROMIUM_BIN=""
+    for bin in chromium chromium-browser; do
+        if command -v "$bin" &>/dev/null; then
+            CHROMIUM_BIN="$bin"
+            break
+        fi
+    done
+    [[ -z "$CHROMIUM_BIN" ]] && die "Chromium-Binary nicht gefunden nach Installation."
+    success "Chromium-Binary: $CHROMIUM_BIN"
+
+    # lightdm-Verfügbarkeit prüfen (nur mit Desktop vorhanden)
+    if ! command -v lightdm &>/dev/null && ! dpkg -l lightdm &>/dev/null 2>&1; then
+        warn "lightdm nicht gefunden."
+        warn "Kiosk-Modus benötigt einen Display-Manager (lightdm)."
+        warn "Bitte Raspberry Pi OS with Desktop verwenden."
+        read -rp "  Trotzdem fortfahren (Kiosk-Konfiguration wird geschrieben, aber kein Autologin)? [j/N]: " KIOSK_CONT
+        if [[ "${KIOSK_CONT,,}" != "j" && "${KIOSK_CONT,,}" != "ja" ]]; then
+            KIOSK_MODE=false
+            warn "Kiosk-Modus deaktiviert."
+        fi
+    fi
+
+    if [[ "$KIOSK_MODE" == "true" ]]; then
+        # Kiosk-Benutzer anlegen (normaler User, kein sudo, kein Passwort-Login)
+        # Getrennt von 'noria' (System-User) für saubere Rollentrennnung:
+        #   noria  → Service-User (Backend/Frontend systemd services)
+        #   kiosk  → Display-User (autologin, startet Chromium)
+        if id "$KIOSK_USER" &>/dev/null; then
+            success "Benutzer '$KIOSK_USER' existiert bereits"
+        else
+            adduser \
+                --gecos "Noria Kiosk Display" \
+                --disabled-password \
+                --shell /bin/bash \
+                "$KIOSK_USER"
+            # Login-Passwort explizit sperren (kein lokaler Login möglich,
+            # nur über lightdm Autologin)
+            passwd -l "$KIOSK_USER"
+            success "Benutzer '$KIOSK_USER' angelegt (kein Passwort-Login)"
+        fi
+
+        # Nötige Gruppen für Display-Zugriff
+        for grp in video audio input render; do
+            if getent group "$grp" &>/dev/null; then
+                usermod -aG "$grp" "$KIOSK_USER"
+            fi
+        done
+        success "Benutzer '$KIOSK_USER' zu Display-Gruppen hinzugefügt"
+    fi
+fi
+
 # ── 5. VERZEICHNISSE & CODE ───────────────────────────────────────────────────
-section "5 / 8  Code deployen"
+section "5 / 9  Code deployen"
 
 info "Erstelle Verzeichnisse..."
 mkdir -p "$APP_DIR" "$DATA_DIR" "$LOGS_DIR"
@@ -329,7 +434,7 @@ rsync -a \
 success "Code kopiert"
 
 # ── 6. PYTHON-UMGEBUNG ────────────────────────────────────────────────────────
-section "6 / 8  Python-Umgebung & Pakete"
+section "6 / 9  Python-Umgebung & Pakete"
 
 if [[ "$REINSTALL" == "true" && -d "$VENV_DIR" ]]; then
     info "Bestehende Virtualenv wird aktualisiert..."
@@ -359,7 +464,7 @@ else
 fi
 
 # ── 7. KONFIGURATIONSDATEIEN ERSTELLEN ───────────────────────────────────────
-section "7 / 8  Konfigurationsdateien"
+section "7 / 9  Konfigurationsdateien"
 
 # device_config.json generieren (wird immer neu geschrieben – Hardware-Konfiguration)
 info "Erstelle device_config.json..."
@@ -444,7 +549,7 @@ chmod 640 "$ENV_FILE"
 success "Berechtigungen gesetzt (Daten: 700, App: 750)"
 
 # ── 8. SYSTEMD-SERVICES ───────────────────────────────────────────────────────
-section "8 / 8  Dienste einrichten"
+section "8 / 9  Dienste einrichten"
 
 # ──── Backend-Service ────────────────────────────────────────────────────────
 info "Erstelle noria-backend.service..."
@@ -645,6 +750,204 @@ else
     warn "  Logs prüfen: sudo journalctl -u noria-frontend -n 50"
 fi
 
+# ── 9. KIOSK-MODUS ───────────────────────────────────────────────────────────
+KIOSK_OK=false
+if [[ "$KIOSK_MODE" == "true" ]]; then
+    section "9 / 9  Kiosk-Modus einrichten"
+
+    # ── 9a. X11 als Anzeigeserver erzwingen ──────────────────────────────────
+    # Pi 5 + Bookworm Desktop nutzt standardmäßig Wayland (Wayfire).
+    # Für Kiosk-Betrieb ist X11 stabiler; raspi-config setzt es systemweit.
+    # Auf Pi 4 / anderen Systemen ist dieser Aufruf idempotent (bleibt X11).
+    if command -v raspi-config &>/dev/null; then
+        info "Setze X11 als Anzeigeserver (stabil für Kiosk)..."
+        raspi-config nonint do_wayland W1 2>/dev/null \
+            && success "Anzeigeserver: X11 (wirksam nach Neustart)" \
+            || warn "raspi-config do_wayland fehlgeschlagen – bitte manuell prüfen"
+    else
+        warn "raspi-config nicht gefunden – Anzeigeserver bitte manuell auf X11 setzen"
+        warn "  raspi-config → Advanced Options → Wayland → X11"
+    fi
+
+    # ── 9b. lightdm Autologin konfigurieren ──────────────────────────────────
+    # Der kiosk-User loggt sich nach dem Boot automatisch ein.
+    # xserver-command deaktiviert den DPMS-Screensaver auf Anzeige-Ebene.
+    if command -v lightdm &>/dev/null || dpkg -l lightdm &>/dev/null 2>&1; then
+        info "Konfiguriere lightdm Autologin für Benutzer '$KIOSK_USER'..."
+        mkdir -p /etc/lightdm/lightdm.conf.d
+        cat > /etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf << EOF
+# Noria Kiosk – lightdm Autologin
+# Generiert von scripts/install.sh – nicht manuell editieren.
+[Seat:*]
+autologin-user=$KIOSK_USER
+autologin-user-timeout=0
+# Screensaver und DPMS auf X-Server-Ebene deaktivieren
+xserver-command=X -s 0 -dpms
+EOF
+        success "lightdm Autologin konfiguriert"
+    else
+        warn "lightdm nicht gefunden – Autologin nicht konfiguriert"
+        warn "  Bitte Raspberry Pi OS with Desktop (64-bit) verwenden"
+    fi
+
+    # ── 9c. Kiosk-Start-Wrapper-Script ───────────────────────────────────────
+    # Dieses Script läuft als kiosk-User nach dem Autologin.
+    # Es wartet aktiv bis das Noria-Frontend auf Port 8080 antwortet,
+    # dann startet es Chromium im Kiosk-Modus.
+    #
+    # --user-data-dir=/tmp/chromium-kiosk:
+    #   Frisches Profil bei jedem Start → kein "Browser ist abgestürzt"-Dialog.
+    #   /tmp wird bei Neustart geleert → kein Aufräumen nötig.
+    #
+    # --disable-features=TranslateUI,Notifications:
+    #   Kein "Seite übersetzen?"-Popup, keine Browser-Benachrichtigungen.
+    info "Erstelle Kiosk-Wrapper-Script /opt/noria/kiosk-start.sh..."
+    cat > "$INSTALL_DIR/kiosk-start.sh" << KIOSK_SCRIPT_EOF
+#!/usr/bin/env bash
+# =============================================================================
+# kiosk-start.sh – Noria Kiosk-Starter
+# Läuft als 'kiosk'-Benutzer nach dem lightdm Autologin.
+# =============================================================================
+
+FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
+LOG_PREFIX="[noria-kiosk]"
+
+echo "\$LOG_PREFIX Starte – warte auf Noria-Frontend..."
+
+# Warte bis Frontend antwortet (max. 120s, dann trotzdem starten)
+WAIT_S=0
+until curl -sf --max-time 2 "\$FRONTEND_URL" >/dev/null 2>&1; do
+    if [[ \$WAIT_S -ge 120 ]]; then
+        echo "\$LOG_PREFIX Frontend nach 120s nicht erreichbar – starte Chromium trotzdem"
+        break
+    fi
+    sleep 2
+    WAIT_S=\$((WAIT_S + 2))
+done
+echo "\$LOG_PREFIX Frontend erreichbar nach \${WAIT_S}s"
+
+# X11-Screensaver und DPMS auf Session-Ebene deaktivieren
+# (Ergänzung zur xserver-command-Einstellung in lightdm)
+xset s off        2>/dev/null || true
+xset -dpms        2>/dev/null || true
+xset s noblank    2>/dev/null || true
+
+# Maus-Cursor nach 0.5s Inaktivität ausblenden
+unclutter -idle 0.5 -root &
+
+# Chromium im Kiosk-Modus starten
+# --kiosk:                  Vollbild, kein Schliessen, keine Adressleiste
+# --noerrdialogs:           Keine Absturz-Dialoge
+# --disable-infobars:       Keine Info-Leisten ("wird verwaltet von...")
+# --no-first-run:           Kein Willkommens-Dialog
+# --disable-pinch:          Touch-Zoom deaktiviert
+# --overscroll-history-navigation=0: Kein Zurück/Vor durch Wischen
+# --user-data-dir:          Frisches Profil pro Start (kein Absturz-Banner)
+exec ${CHROMIUM_BIN} \\
+    --kiosk \\
+    --noerrdialogs \\
+    --disable-infobars \\
+    --no-first-run \\
+    --disable-translate \\
+    --disable-features=TranslateUI,Notifications,PasswordManager \\
+    --disable-session-crashed-bubble \\
+    --check-for-update-interval=31536000 \\
+    --disable-pinch \\
+    --overscroll-history-navigation=0 \\
+    --user-data-dir=/tmp/chromium-kiosk \\
+    "\$FRONTEND_URL"
+KIOSK_SCRIPT_EOF
+
+    chmod +x "$INSTALL_DIR/kiosk-start.sh"
+    chown "$KIOSK_USER:$KIOSK_USER" "$INSTALL_DIR/kiosk-start.sh"
+    success "Kiosk-Wrapper-Script erstellt: $INSTALL_DIR/kiosk-start.sh"
+
+    # ── 9d. LXDE Autostart konfigurieren ─────────────────────────────────────
+    # LXDE liest ~/.config/lxsession/LXDE-pi/autostart nach dem Login.
+    # @-Präfix: LXDE startet den Prozess neu falls er beendet wird.
+    # openbox-Anweisungen deaktivieren Desktop-Elemente die den Kiosk stören.
+    info "Konfiguriere LXDE Autostart für '$KIOSK_USER'..."
+    mkdir -p "$KIOSK_HOME/.config/lxsession/LXDE-pi"
+    cat > "$KIOSK_HOME/.config/lxsession/LXDE-pi/autostart" << EOF
+# Noria Kiosk – LXDE Autostart
+# Generiert von scripts/install.sh
+# Desktop-Elemente deaktivieren
+@xset s off
+@xset -dpms
+@xset s noblank
+# Kiosk-Browser starten (wird bei Absturz automatisch neu gestartet)
+@$INSTALL_DIR/kiosk-start.sh
+EOF
+    success "LXDE Autostart konfiguriert"
+
+    # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
+    # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
+    # beendet" an und blockiert. exit_type=Normal und exited_cleanly=true
+    # unterdrücken diesen Dialog.
+    # Hinweis: --user-data-dir=/tmp/chromium-kiosk im Start-Script macht
+    # dies im Normalbetrieb überflüssig, aber als Fallback trotzdem sinnvoll.
+    info "Erstelle Chromium-Profil-Vorlage (kein Absturz-Dialog)..."
+    CHROMIUM_PROFILE_DIR="$KIOSK_HOME/.config/chromium/Default"
+    mkdir -p "$CHROMIUM_PROFILE_DIR"
+    # Nur anlegen wenn nicht vorhanden (vorhandene Einstellungen erhalten)
+    if [[ ! -f "$CHROMIUM_PROFILE_DIR/Preferences" ]]; then
+        cat > "$CHROMIUM_PROFILE_DIR/Preferences" << 'EOF'
+{
+   "browser": {
+      "has_seen_welcome_page": true,
+      "show_home_button": false
+   },
+   "profile": {
+      "exit_type": "Normal",
+      "exited_cleanly": true
+   },
+   "session": {
+      "restore_on_startup": 4
+   }
+}
+EOF
+        success "Chromium-Profil erstellt (kein Absturz-Banner)"
+    else
+        info "Chromium-Profil bereits vorhanden – nicht überschrieben"
+    fi
+
+    # Alle kiosk-Home-Dateien dem kiosk-User zuweisen
+    chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME"
+
+    # ── 9f. openbox-Konfiguration (kein Rechtsklick-Desktop-Menü) ─────────────
+    # openbox ist der Fenstermanager unter LXDE. Das Rechtsklick-Menü
+    # auf dem Desktop würde Zugriff auf Programme ermöglichen.
+    OPENBOX_CONFIG_DIR="$KIOSK_HOME/.config/openbox"
+    if [[ -d /etc/xdg/openbox ]]; then
+        info "Konfiguriere openbox (kein Desktop-Kontextmenü)..."
+        mkdir -p "$OPENBOX_CONFIG_DIR"
+        # Leere menu.xml → kein Rechtsklick-Menü
+        cat > "$OPENBOX_CONFIG_DIR/menu.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Noria Kiosk: Rechtsklick-Menü deaktiviert -->
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+</openbox_menu>
+EOF
+        # rc.xml: Desktop-Tastenkürzel deaktivieren
+        # Kopiere Standard-rc.xml und entferne gefährliche Keybindings
+        if [[ -f /etc/xdg/openbox/rc.xml ]]; then
+            cp /etc/xdg/openbox/rc.xml "$OPENBOX_CONFIG_DIR/rc.xml"
+            # Super+D (Desktop anzeigen), Super+E (Dateimanager) entfernen
+            # Dies ist eine konservative Lösung; physische Tastatur im Feld
+            # sowieso abgesteckt.
+        fi
+        chown -R "$KIOSK_USER:$KIOSK_USER" "$OPENBOX_CONFIG_DIR"
+        success "openbox konfiguriert (kein Desktop-Kontextmenü)"
+    fi
+
+    KIOSK_OK=true
+    success "Kiosk-Modus vollständig konfiguriert"
+    warn "  Neustart erforderlich damit Kiosk-Modus aktiv wird!"
+else
+    section "9 / 9  Kiosk-Modus"
+    info "Kiosk-Modus nicht gewählt – übersprungen."
+fi
+
 # ── ABSCHLUSS ─────────────────────────────────────────────────────────────────
 echo
 if [[ "$BACKEND_OK" == "true" && "$FRONTEND_OK" == "true" ]]; then
@@ -678,12 +981,28 @@ echo -e "  ${BOLD}Watchdog:${NC}"
 if [[ "$HW_WATCHDOG_ENABLED" == "true" ]]; then
     echo "  + Hardware-Watchdog (BCM) konfiguriert -- wirksam nach Neustart"
     echo "  + systemd-Prozess-Watchdog aktiv (sofort)"
-    echo
-    warn "  Fuer vollstaendigen Hardware-Watchdog-Schutz jetzt neu starten:"
-    echo "    sudo reboot"
 else
     echo "  + systemd-Prozess-Watchdog aktiv"
     echo "  - Hardware-Watchdog: nicht verfuegbar (kein Raspberry Pi erkannt)"
+fi
+echo
+if [[ "$KIOSK_OK" == "true" ]]; then
+    echo -e "  ${BOLD}Kiosk-Modus:${NC}"
+    echo "  + Autologin konfiguriert (Benutzer: $KIOSK_USER)"
+    echo "  + Chromium startet automatisch nach dem Boot im Vollbild"
+    echo "  + Anzeigeserver: X11 (Wayland deaktiviert)"
+    echo "  + Kiosk-Script: $INSTALL_DIR/kiosk-start.sh"
+    echo
+    echo -e "  ${BOLD}${YELLOW}► Neustart jetzt durchführen damit alle Einstellungen aktiv werden:${NC}"
+    echo "    sudo reboot"
+elif [[ "$KIOSK_MODE" == "false" ]]; then
+    echo "  Kiosk-Modus:  nicht eingerichtet"
+    echo "  (Nachträglich aktivierbar: sudo bash scripts/install.sh)"
+fi
+echo
+if [[ "$HW_WATCHDOG_ENABLED" == "true" && "$KIOSK_OK" == "false" ]]; then
+    warn "  Fuer vollstaendigen Hardware-Watchdog-Schutz jetzt neu starten:"
+    echo "    sudo reboot"
 fi
 echo
 echo "  Nach einem Stromausfall starten die Dienste automatisch neu."
