@@ -11,10 +11,10 @@ Für die meisten Installationen reicht das mitgelieferte Installations-Script. E
 ### OS-Auswahl vor der Installation
 
 **Ohne Kiosk-Modus (Bedienung per Browser von einem anderen Gerät):**
-→ **Raspberry Pi OS Lite 64-bit** (Debian Bookworm) — kein Desktop, minimaler Overhead.
+→ **Raspberry Pi OS Lite 64-bit** (Debian Trixie) — kein Desktop, minimaler Overhead.
 
 **Mit Kiosk-Modus (direkt angeschlossener Touchscreen, Chromium startet automatisch):**
-→ **Raspberry Pi OS with Desktop 64-bit** (Debian Bookworm) — Desktop-Stack wird benötigt.
+→ **Raspberry Pi OS with Desktop 64-bit** (Debian Trixie) — Desktop-Stack wird benötigt.
 
 > **Wichtig:** Es ist **nicht** nötig, bei der Installation X11 manuell auszuwählen. Das install.sh-Script setzt X11 automatisch über `raspi-config` — unabhängig davon, ob der Pi mit Wayland (Standard auf Pi 5) oder X11 (Standard auf Pi 4) ausgeliefert wurde. Einfach die Standard-Desktop-Version installieren und das Script übernimmt den Rest.
 
@@ -85,8 +85,8 @@ Die folgenden Abschnitte beschreiben die manuelle Installation Schritt für Schr
 
 | Einsatz | OS-Variante |
 |---|---|
-| Bedienung per Browser (anderes Gerät, kein lokaler Bildschirm) | Raspberry Pi OS **Lite** 64-bit, Debian Bookworm |
-| Direkt angeschlossener Touchscreen / Kiosk-Modus | Raspberry Pi OS **with Desktop** 64-bit, Debian Bookworm |
+| Bedienung per Browser (anderes Gerät, kein lokaler Bildschirm) | Raspberry Pi OS **Lite** 64-bit, Debian Trixie |
+| Direkt angeschlossener Touchscreen / Kiosk-Modus | Raspberry Pi OS **with Desktop** 64-bit, Debian Trixie |
 
 **Installation via Raspberry Pi Imager** (empfohlen):
 
@@ -100,7 +100,7 @@ Die folgenden Abschnitte beschreiben die manuelle Installation Schritt für Schr
    - WLAN-Daten (falls gewünscht)
 5. Schreiben → SD-Karte in den Pi einlegen → booten
 
-> **Hinweis zu X11 / Wayland:** Der Pi 5 kommt mit der Desktop-Version standardmäßig mit Wayland (Wayfire). Eine manuelle Auswahl bei der Installation ist nicht nötig — das install.sh-Script erzwingt X11 automatisch via `raspi-config`, was für den Kiosk-Betrieb stabiler ist.
+> **Hinweis zu X11 / Wayland:** Trixie Desktop nutzt standardmäßig Wayland (labwc auf Pi 5). Eine manuelle Auswahl bei der Installation ist nicht nötig — das install.sh-Script erzwingt X11 automatisch via `raspi-config`, was für den Kiosk-Betrieb stabiler ist.
 
 Nach dem ersten Boot:
 ```bash

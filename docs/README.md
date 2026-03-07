@@ -57,7 +57,7 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 | Komponente | Anforderung |
 |---|---|
 | Hardware | Raspberry Pi 4B (2 GB RAM) oder Pi 5 (4/8 GB RAM) empfohlen |
-| Betriebssystem | **Ohne Kiosk:** Raspberry Pi OS Lite 64-bit, Debian Bookworm · **Mit Kiosk:** Raspberry Pi OS with Desktop 64-bit, Debian Bookworm |
+| Betriebssystem | **Ohne Kiosk:** Raspberry Pi OS Lite 64-bit, Debian Trixie · **Mit Kiosk:** Raspberry Pi OS with Desktop 64-bit, Debian Trixie |
 | Python | ≥ 3.11 |
 | Speicherplatz | ≥ 1 GB frei (Logs, Daten, Venv) |
 | Netzwerk | Lokales LAN oder direkter Zugriff; kein Internet erforderlich |
@@ -136,8 +136,8 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ### OS-Auswahl
 
-- **Kein lokaler Bildschirm** (Bedienung per Browser vom PC/Tablet): → **Raspberry Pi OS Lite 64-bit** (Bookworm)
-- **Direkt angeschlossener Touchscreen** (Kiosk-Modus): → **Raspberry Pi OS with Desktop 64-bit** (Bookworm)
+- **Kein lokaler Bildschirm** (Bedienung per Browser vom PC/Tablet): → **Raspberry Pi OS Lite 64-bit** (Trixie)
+- **Direkt angeschlossener Touchscreen** (Kiosk-Modus): → **Raspberry Pi OS with Desktop 64-bit** (Trixie)
 
 Installation immer per **Raspberry Pi Imager**. X11 muss nicht manuell ausgewählt werden — das install.sh-Script setzt X11 bei Bedarf automatisch.
 
