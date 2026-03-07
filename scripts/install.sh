@@ -85,7 +85,7 @@ fi
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║          Noria – Installation            ║${NC}"
+echo -e "${BOLD}${GREEN}║          Noria – Installation                      ║${NC}"
 echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════════╝${NC}"
 echo
 echo "  Dieses Script installiert Noria"
@@ -448,7 +448,7 @@ info "Aktualisiere pip..."
 "$VENV_DIR/bin/pip" install --upgrade pip --quiet
 
 info "Installiere Anwendungspakete (kann 2–5 Minuten dauern)..."
-"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
+"$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt" --quiet
 success "Anwendungspakete installiert"
 
 # systemd-python für READY=1 / WATCHDOG=1 Signale

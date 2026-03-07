@@ -89,7 +89,7 @@ success "Code aktualisiert"
 # Abhängigkeiten aktualisieren
 info "Aktualisiere Python-Pakete..."
 "$VENV_DIR/bin/pip" install --upgrade pip --quiet
-"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
+"$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt" --quiet
 success "Pakete aktualisiert"
 
 # Berechtigungen sicherstellen
