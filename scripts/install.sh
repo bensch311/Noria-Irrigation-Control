@@ -956,7 +956,7 @@ if [[ "$BACKEND_OK" == "true" && "$FRONTEND_OK" == "true" ]]; then
     echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════════╝${NC}"
 else
     echo -e "${BOLD}${YELLOW}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${YELLOW}║  Installation abgeschlossen – Services prüfen!    ║${NC}"
+    echo -e "${BOLD}${YELLOW}║  Installation abgeschlossen – Services prüfen!     ║${NC}"
     echo -e "${BOLD}${YELLOW}╚════════════════════════════════════════════════════╝${NC}"
 fi
 echo
