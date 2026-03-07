@@ -2,7 +2,7 @@
 """
 Tests fuer api/routes_settings.py
 
-GET  /settings : liefert alle User-Settings + max_valves (readonly)
+GET  /settings : liefert alle User-Settings + max_valves + valve_driver (readonly)
 POST /settings : validiert + setzt State + persistiert sofort
 
 Neue Felder (zusaetzlich zu max_history_items):
@@ -10,6 +10,10 @@ Neue Felder (zusaetzlich zu max_history_items):
   accent_color       : 6-stelliger Hex-Farbwert (#rrggbb)
   default_duration   : int 1–120
   default_time_unit  : "Sekunden" | "Minuten"
+
+Readonly-Felder (aus device_config, nicht via POST setzbar):
+  max_valves         : Anzahl konfigurierter Ventile
+  valve_driver       : aktiver Treiber ("rpi" | "sim")
 """
 
 import pytest
@@ -48,7 +52,8 @@ def test_get_settings_returns_all_keys(client):
     assert resp.status_code == 200
     data = resp.json()
     for key in ("max_history_items", "navbar_title", "accent_color",
-                "default_duration", "default_time_unit", "max_valves"):
+                "default_duration", "default_time_unit", "max_valves",
+                "valve_driver"):
         assert key in data, f"Key fehlt: {key}"
 
 
@@ -61,6 +66,7 @@ def test_get_settings_types(client):
     assert isinstance(data["default_duration"], int)
     assert isinstance(data["default_time_unit"], str)
     assert isinstance(data["max_valves"], int)
+    assert isinstance(data["valve_driver"], str)
 
 
 def test_get_settings_reflects_state(client):
@@ -83,6 +89,27 @@ def test_get_settings_max_valves_readonly(client):
     with state_lock:
         state.max_valves = 8
     assert client.get("/settings").json()["max_valves"] == 8
+
+
+def test_get_settings_valve_driver_readonly_rpi(client):
+    """valve_driver spiegelt state.valve_driver_mode – nicht via POST aenderbar."""
+    with state_lock:
+        state.valve_driver_mode = "rpi"
+    assert client.get("/settings").json()["valve_driver"] == "rpi"
+
+
+def test_get_settings_valve_driver_readonly_sim(client):
+    with state_lock:
+        state.valve_driver_mode = "sim"
+    assert client.get("/settings").json()["valve_driver"] == "sim"
+
+
+def test_get_settings_valve_driver_fallback_unknown(client):
+    """Unbekannter/fehlender State liefert '?' statt Exception."""
+    with state_lock:
+        state.valve_driver_mode = None
+    data = client.get("/settings").json()
+    assert data["valve_driver"] == "None"  # str(None) – kein Crash
 
 
 # ─────────────────────────────────────────────────────────────────────────────

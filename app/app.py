@@ -1615,12 +1615,14 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             @render.ui
             def _settings_sysinfo():
                 d = _settings_data()
-                backend_max = d.get("max_valves", "?") if d else "?"
+                backend_max    = d.get("max_valves",    "?") if d else "?"
+                valve_driver   = d.get("valve_driver",  "?") if d else "?"
                 rows = [
                     ("Version",              __version__),
                     ("Backend-URL",          BASE_URL),
                     ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
                     ("Ventile (Backend)",     str(backend_max)),
+                    ("Treiber",               valve_driver),
                     ("Status-Poll",           f"{POLL_STATUS_S} s"),
                     ("Slow-Poll",             f"{POLL_SLOW_S} s"),
                     ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),

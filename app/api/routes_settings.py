@@ -43,7 +43,8 @@ def get_settings():
             "accent_color":       str(getattr(state, "accent_color", "#82372a")),
             "default_duration":   int(getattr(state, "default_duration", 5)),
             "default_time_unit":  str(getattr(state, "default_time_unit", "Minuten")),
-            "max_valves":         int(getattr(state, "max_valves", 6)),  # readonly
+            "max_valves":         int(getattr(state, "max_valves", 6)),        # readonly
+            "valve_driver":       str(getattr(state, "valve_driver_mode", "?")),  # readonly
         }
 
 
