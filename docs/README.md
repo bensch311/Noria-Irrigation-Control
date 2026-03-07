@@ -56,8 +56,8 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 | Komponente | Anforderung |
 |---|---|
-| Hardware | <!-- TODO: Empfohlenes Raspberry Pi-Modell eintragen (z.B. Raspberry Pi 4B 2GB) --> |
-| Betriebssystem | <!-- TODO: Raspberry Pi OS Version eintragen (z.B. Raspberry Pi OS Lite 64-bit, Debian Bookworm) --> |
+| Hardware | Raspberry Pi 4B (2 GB RAM) oder Pi 5 (4/8 GB RAM) empfohlen |
+| Betriebssystem | **Ohne Kiosk:** Raspberry Pi OS Lite 64-bit, Debian Bookworm · **Mit Kiosk:** Raspberry Pi OS with Desktop 64-bit, Debian Bookworm |
 | Python | ≥ 3.11 |
 | Speicherplatz | ≥ 1 GB frei (Logs, Daten, Venv) |
 | Netzwerk | Lokales LAN oder direkter Zugriff; kein Internet erforderlich |
@@ -134,6 +134,13 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Produktionsbetrieb (Raspberry Pi)
 
+### OS-Auswahl
+
+- **Kein lokaler Bildschirm** (Bedienung per Browser vom PC/Tablet): → **Raspberry Pi OS Lite 64-bit** (Bookworm)
+- **Direkt angeschlossener Touchscreen** (Kiosk-Modus): → **Raspberry Pi OS with Desktop 64-bit** (Bookworm)
+
+Installation immer per **Raspberry Pi Imager**. X11 muss nicht manuell ausgewählt werden — das install.sh-Script setzt X11 bei Bedarf automatisch.
+
 ### Schnellinstallation
 
 ```bash
@@ -148,9 +155,15 @@ git clone <REPO-URL> ~/noria
 sudo bash ~/noria/scripts/install.sh
 ```
 
-Das Script fragt IP-Adresse, Ventilanzahl und GPIO-Pins ab – für alle anderen Einstellungen einfach Enter drücken. Danach sind beide systemd-Services aktiv und starten bei jedem Neustart automatisch.
+Das Script fragt IP-Adresse, Ventilanzahl, GPIO-Pins und optional den Kiosk-Modus ab — für alle anderen Einstellungen einfach Enter drücken. Danach sind beide systemd-Services aktiv und starten bei jedem Neustart automatisch.
 
 **Oberfläche aufrufen:** `http://<PI-IP>:8080`
+
+Bei aktiviertem Kiosk-Modus nach der Installation einmal neu starten:
+
+```bash
+sudo reboot
+```
 
 ### Updates einspielen
 
@@ -160,7 +173,7 @@ git pull
 sudo bash scripts/update.sh
 ```
 
-Vollständige Deployment-Anleitung (systemd, Firewall, HTTPS): → **[DEPLOYMENT.md](DEPLOYMENT.md)**
+Vollständige Deployment-Anleitung (OS-Installation, Kiosk-Modus, systemd, Firewall, HTTPS): → **[DEPLOYMENT.md](DEPLOYMENT.md)**
 
 ---
 
