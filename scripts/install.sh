@@ -497,12 +497,14 @@ success "device_config.json erstellt"
 info "Erstelle frontend_config.json..."
 cat > "$DATA_DIR/frontend_config.json" << EOF
 {
-  "base_url": "http://127.0.0.1:$BACKEND_PORT",
+  "_comment": "Frontend-Deployment-Konfiguration. Wird einmalig beim Start von app.py gelesen. Aenderungen erfordern Neustart. Wird NICHT zur Laufzeit beschrieben.",
+  "base_url": "http://127.0.0.1:8000",
   "poll_status_s": 1,
   "poll_slow_s": 5,
   "backend_fail_threshold": 3,
   "health_timeout_s": 0.8,
-  "anzahl_ventile_fallback": $NUM_VALVES
+  "anzahl_ventile_fallback": 6,
+  "navbar_logo": "noria-icon-navbar.svg"
 }
 EOF
 success "frontend_config.json erstellt"
