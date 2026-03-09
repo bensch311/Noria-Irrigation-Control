@@ -96,7 +96,8 @@ success "Code aktualisiert"
 # Abhängigkeiten aktualisieren
 info "Aktualisiere Python-Pakete..."
 "$VENV_DIR/bin/pip" install --upgrade pip --quiet
-"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
+# requirements.txt liegt im Repo-Root, nicht in app/ – daher $REPO_DIR, nicht $APP_DIR
+"$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt" --quiet
 success "Pakete aktualisiert"
 
 # Berechtigungen sicherstellen
