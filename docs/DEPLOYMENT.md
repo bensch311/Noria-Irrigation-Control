@@ -6,67 +6,61 @@ Anleitung für die Einrichtung des Norias auf einem Raspberry Pi für den Produk
 
 ## 0. Schnellinstallation (empfohlen)
 
-Für die meisten Installationen reicht das mitgelieferte Installations-Script. Es übernimmt alle Schritte aus den Abschnitten 1–4 automatisch und fragt nur das Nötigste ab.
-
-### OS-Auswahl vor der Installation
-
-**Ohne Kiosk-Modus (Bedienung per Browser von einem anderen Gerät):**
-→ **Raspberry Pi OS Lite 64-bit** (Debian Trixie) — kein Desktop, minimaler Overhead.
-
-**Mit Kiosk-Modus (direkt angeschlossener Touchscreen, Chromium startet automatisch):**
-→ **Raspberry Pi OS with Desktop 64-bit** (Debian Trixie) — Desktop-Stack wird benötigt.
-
-> **Wichtig:** Es ist **nicht** nötig, bei der Installation X11 manuell auszuwählen. Das install.sh-Script setzt X11 automatisch über `raspi-config` — unabhängig davon, ob der Pi mit Wayland (Standard auf Pi 5) oder X11 (Standard auf Pi 4) ausgeliefert wurde. Einfach die Standard-Desktop-Version installieren und das Script übernimmt den Rest.
-
-Beide Versionen werden mit dem **Raspberry Pi Imager** installiert (→ [Abschnitt 1.1](#11-betriebssystem)).
+Für die meisten Installationen reicht das Bootstrap-Script. Es übernimmt alle Schritte vollautomatisch – System-Update, Repository-Klon und die gesamte Einrichtung.
 
 ### Voraussetzungen
 
-- Raspberry Pi OS 64-bit (Lite oder with Desktop), frisch installiert — je nach Kiosk-Bedarf (siehe oben)
-- Internetzugang für pip-Pakete
+- Raspberry Pi OS Lite 64-bit oder with Desktop (Debian Bookworm), frisch installiert
+- Internetverbindung
 - Python ≥ 3.11 (in aktuellem Raspberry Pi OS enthalten)
 
-### Schritt 1: System aktualisieren
+### Ein einziger Befehl
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git
+curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
 ```
 
-### Schritt 2: Repository klonen
-
-```bash
-git clone <REPO-URL> ~/noria
-```
-
-### Schritt 3: Installations-Script ausführen
-
-```bash
-sudo bash ~/noria/scripts/install.sh
-```
-
-Das Script fragt:
+Das war es. Das Script fragt danach interaktiv:
 - IP-Adresse des Pi (wird automatisch erkannt, Enter zum Bestätigen)
 - Anzahl der Ventile (Standard: 6)
 - GPIO-Pin je Ventil (Standard-Pins vorbelegt, Enter zum Übernehmen)
 - Relais-Polarität (Standard: Aktiv-Low – für die meisten Relay-Boards korrekt)
 - Maximale Laufzeit und gleichzeitige Ventile
-- **Kiosk-Modus** einrichten? (J/n) — Chromium Vollbild-Autostart nach Boot
+- Kiosk-Modus (Chromium Vollbild nach Boot – optional)
 
-Danach läuft alles automatisch. Nach Abschluss ist die Oberfläche unter `http://<PI-IP>:8080` erreichbar.
+Nach Abschluss ist die Oberfläche unter `http://<PI-IP>:8080` erreichbar.
 
-Bei aktiviertem Kiosk-Modus abschließend neu starten:
+### Was das Bootstrap-Script im Hintergrund tut
+
+1. Prüft Root-Rechte
+2. Installiert `git` und `curl` falls noch nicht vorhanden
+3. Klont das Repository nach `/root/noria`
+4. Ruft `scripts/install.sh` auf, das dann:
+   - Systempakete aktualisiert (`apt upgrade`)
+   - Python-Virtualenv erstellt
+   - Konfigurationsdateien generiert
+   - systemd-Services einrichtet und startet
+
+### Reinstallation / Reparatur
+
+Denselben Befehl erneut ausführen. Das Bootstrap-Script erkennt das bestehende Repository und aktualisiert es automatisch per `git pull`. `install.sh` erkennt die bestehende Installation und fragt vor dem Überschreiben.
 
 ```bash
-sudo reboot
+curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
 ```
 
-Nach dem Neustart öffnet Chromium automatisch die Noria-Oberfläche im Vollbild.
+Bestehende Konfigurationsdaten (`data/`) und Nutzerdaten bleiben dabei erhalten.
 
 ### Updates einspielen
 
 ```bash
-cd ~/noria
+curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+```
+
+Oder manuell, falls das Repository bereits lokal vorhanden ist:
+
+```bash
+cd /root/noria
 git pull
 sudo bash scripts/update.sh
 ```
@@ -81,26 +75,10 @@ Die folgenden Abschnitte beschreiben die manuelle Installation Schritt für Schr
 
 ### 1.1 Betriebssystem
 
-**Empfohlene Versionen:**
+<!-- TODO: Konkrete OS-Version eintragen (z.B. Raspberry Pi OS Lite 64-bit, Debian Bookworm, August 2024) -->
+<!-- TODO: Installationsweg eintragen (z.B. Raspberry Pi Imager) -->
 
-| Einsatz | OS-Variante |
-|---|---|
-| Bedienung per Browser (anderes Gerät, kein lokaler Bildschirm) | Raspberry Pi OS **Lite** 64-bit, Debian Trixie |
-| Direkt angeschlossener Touchscreen / Kiosk-Modus | Raspberry Pi OS **with Desktop** 64-bit, Debian Trixie |
-
-**Installation via Raspberry Pi Imager** (empfohlen):
-
-1. [Raspberry Pi Imager](https://www.raspberrypi.com/software/) herunterladen und starten
-2. Gerät: **Raspberry Pi 5** (oder entsprechendes Modell) wählen
-3. OS: **Raspberry Pi OS (64-bit)** (with Desktop) oder **Raspberry Pi OS Lite (64-bit)** wählen
-4. SD-Karte auswählen und unter „Einstellungen" (Zahnrad) festlegen:
-   - Hostname (z.B. `noria`)
-   - SSH aktivieren
-   - Benutzer und Passwort setzen
-   - WLAN-Daten (falls gewünscht)
-5. Schreiben → SD-Karte in den Pi einlegen → booten
-
-> **Hinweis zu X11 / Wayland:** Trixie Desktop nutzt standardmäßig Wayland (labwc auf Pi 5). Eine manuelle Auswahl bei der Installation ist nicht nötig — das install.sh-Script erzwingt X11 automatisch via `raspi-config`, was für den Kiosk-Betrieb stabiler ist.
+Empfehlung: Raspberry Pi OS Lite (ohne Desktop), 64-bit.
 
 Nach dem ersten Boot:
 ```bash
@@ -357,101 +335,7 @@ sudo journalctl -u noria-frontend -f
 
 ---
 
-## 5. Kiosk-Modus (direkt angeschlossener Touchscreen)
-
-Der Kiosk-Modus startet Chromium nach dem Boot automatisch im Vollbild und zeigt die Noria-Oberfläche an. Der Benutzer kann den Browser nicht verlassen.
-
-**Voraussetzung:** Raspberry Pi OS **with Desktop** 64-bit (nicht Lite).
-
-Das install.sh-Script richtet den Kiosk-Modus auf Wunsch vollständig automatisch ein (Schritt 9/9). Der folgende Abschnitt beschreibt, was das Script konfiguriert — als Referenz für manuelle Einrichtung oder Fehlersuche.
-
-### 5.1 Architektur
-
-```
-Boot
- └─ lightdm Autologin → Benutzer 'kiosk' (kein Passwort)
-     └─ LXDE Autostart → kiosk-start.sh
-         ├─ wartet bis localhost:8080 antwortet (max. 120s)
-         ├─ xset: Screensaver/DPMS deaktivieren
-         ├─ unclutter: Mauszeiger ausblenden (0.5s Inaktivität)
-         └─ chromium --kiosk http://localhost:8080
-```
-
-Zwei separate Benutzer gewährleisten saubere Rollentrennung:
-- `noria` — System-User (kein Login), betreibt Backend/Frontend als systemd-Services
-- `kiosk` — Display-User (kein Passwort-Login, kein sudo), bekommt den Desktop via lightdm Autologin
-
-### 5.2 Schlüsseldateien
-
-| Datei | Zweck |
-|---|---|
-| `/etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf` | Autologin als `kiosk`-User, DPMS/Screensaver deaktivieren |
-| `/opt/noria/kiosk-start.sh` | Wrapper: wartet auf Frontend, startet Chromium |
-| `/home/kiosk/.config/lxsession/LXDE-pi/autostart` | LXDE startet kiosk-start.sh nach Login |
-| `/home/kiosk/.config/openbox/menu.xml` | Leeres Rechtsklick-Menü (kein Zugriff auf Programme) |
-
-### 5.3 Chromium-Flags im Kiosk-Betrieb
-
-Das kiosk-start.sh-Script startet Chromium mit folgenden Flags:
-
-```bash
-chromium --kiosk \
-    --noerrdialogs \
-    --disable-infobars \
-    --no-first-run \
-    --disable-translate \
-    --disable-features=TranslateUI,Notifications,PasswordManager \
-    --disable-session-crashed-bubble \
-    --check-for-update-interval=31536000 \
-    --disable-pinch \
-    --overscroll-history-navigation=0 \
-    --user-data-dir=/tmp/chromium-kiosk \
-    http://localhost:8080
-```
-
-`--user-data-dir=/tmp/chromium-kiosk` erzeugt bei jedem Start ein frisches Profil. Da `/tmp` beim Neustart geleert wird, erscheint nach einem Stromausfall kein „Browser nicht sauber beendet"-Dialog.
-
-### 5.4 Kiosk-Modus nachträglich einrichten
-
-Falls der Kiosk-Modus bei der Erstinstallation nicht gewählt wurde, install.sh erneut ausführen:
-
-```bash
-sudo bash ~/noria/scripts/install.sh
-```
-
-Das Script erkennt die bestehende Installation, bietet eine Neuinstallation/Reparatur an und durchläuft alle Schritte erneut — bestehende Konfigurationen und Daten bleiben erhalten.
-
-### 5.5 Kiosk-Modus deaktivieren (temporär)
-
-Für Wartungszwecke Autologin deaktivieren:
-
-```bash
-sudo rm /etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf
-sudo reboot
-```
-
-Nach dem Neustart erscheint der normale lightdm-Loginscreen. Zur Wiederherstellung install.sh erneut ausführen.
-
-### 5.6 Fehlersuche
-
-```bash
-# Kiosk-Script-Log (läuft als kiosk-User, Ausgabe in LXDE-Session-Log)
-cat /home/kiosk/.xsession-errors
-
-# Chromium läuft nicht?
-ps aux | grep chromium
-
-# Frontend nicht erreichbar?
-curl -v http://localhost:8080
-sudo systemctl status noria-frontend
-
-# X11 aktiv?
-echo $DISPLAY   # muss :0 oder ähnlich sein
-```
-
----
-
-## 6. API-Key abrufen und im Frontend hinterlegen
+## 5. API-Key abrufen und im Frontend hinterlegen
 
 Nach dem ersten Start des Backends wurde der API-Key automatisch generiert:
 
@@ -468,7 +352,7 @@ Wenn der Key ungültig oder nicht lesbar ist, zeigt das Frontend einen roten Aut
 
 ---
 
-## 7. Berechtigungen prüfen
+## 6. Berechtigungen prüfen
 
 ```bash
 # api_key.txt muss 600 sein (nur Owner lesen/schreiben)
@@ -483,7 +367,7 @@ sudo chown noria:noria /opt/noria/app/data/api_key.txt
 
 ---
 
-## 8. Firewall-Konfiguration
+## 7. Firewall-Konfiguration
 
 **Empfehlung:** Port 8000 (Backend) nur im lokalen Netzwerk erreichbar lassen. Port 8080 (Frontend) kann für alle lokalen Geräte offen sein.
 
@@ -501,7 +385,7 @@ sudo ufw enable
 
 ---
 
-## 9. Reverse-Proxy mit nginx (optional)
+## 8. Reverse-Proxy mit nginx (optional)
 
 Wenn das Frontend über Standard-HTTP-Port 80 erreichbar sein soll oder HTTPS benötigt wird, empfiehlt sich nginx als Reverse-Proxy.
 
@@ -545,7 +429,7 @@ sudo systemctl restart nginx
 
 ---
 
-## 10. TLS/HTTPS-Setup (optional, empfohlen für Fernzugriff)
+## 9. TLS/HTTPS-Setup (optional, empfohlen für Fernzugriff)
 
 ### Option A: Selbstsigniertes Zertifikat (lokales Netzwerk)
 
@@ -579,7 +463,7 @@ sudo certbot --nginx -d <DOMAIN>
 
 ---
 
-## 11. Updates einspielen
+## 10. Updates einspielen
 
 ```bash
 cd ~/noria
@@ -595,7 +479,7 @@ Das Update-Script stoppt die Services graceful, kopiert den neuen Code, aktualis
 
 ---
 
-## 12. Neustart-Verhalten
+## 11. Neustart-Verhalten
 
 Nach einem Systemabsturz oder Stromausfall:
 

@@ -89,20 +89,20 @@ success "Code aktualisiert"
 # Abhängigkeiten aktualisieren
 info "Aktualisiere Python-Pakete..."
 "$VENV_DIR/bin/pip" install --upgrade pip --quiet
-"$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements.txt" --quiet
+"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
 success "Pakete aktualisiert"
 
 # Berechtigungen sicherstellen
 chown -R noria:noria "$APP_DIR"
 
 # Services neu starten
-info "Starte Backend..."
+info "Starte Backend neu..."
 systemctl daemon-reload
-systemctl start noria-backend
+systemctl restart noria-backend
 sleep 5
 
-info "Starte Frontend..."
-systemctl start noria-frontend
+info "Starte Frontend neu..."
+systemctl restart noria-frontend
 sleep 2
 
 # Status

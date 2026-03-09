@@ -3,18 +3,22 @@
 # install.sh – Noria Installations-Script
 # =============================================================================
 #
-# Verwendung (aus dem Repo-Root):
+# Verwendung A – direkt aus dem geklonten Repository:
 #   sudo bash scripts/install.sh
+#
+# Verwendung B – via Bootstrap-Script (empfohlen, Ein-Zeilen-Install):
+#   curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+#   Das Bootstrap-Script klont das Repository und ruft dieses Script auf.
 #
 # Voraussetzungen:
 #   - Raspberry Pi OS with Desktop 64-bit (Debian Bookworm)       ← Standard
 #     ODER Raspberry Pi OS Lite 64-bit (wenn Kiosk-Modus = Nein)
-#   - Python >= 3.11  (sudo apt install python3.11 falls älter)
-#   - Internetverbindung für pip-Pakete
+#   - Python >= 3.11  (in aktuellem Raspberry Pi OS enthalten)
+#   - Internetverbindung
 #   - Script muss mit sudo / als root ausgeführt werden
 #
 # Was dieses Script tut:
-#   1. Systemprüfung  (OS, Python, git)
+#   1. Systemprüfung + Systempakete aktualisieren
 #   2. IP-Adresse + Ventil- + Kiosk-Konfiguration abfragen
 #   3. Zusammenfassung & Bestätigung
 #   4. Systembenutzer anlegen + Systempakete installieren
@@ -94,13 +98,22 @@ echo "  Dienste ein, die bei jedem Systemstart laufen."
 echo
 
 # ── 1. SYSTEMPRÜFUNG ─────────────────────────────────────────────────────────
-section "1 / 9  Systemprüfung"
+section "1 / 9  Systemprüfung & System-Update"
 
 # Root-Rechte prüfen
 if [[ $EUID -ne 0 ]]; then
     die "Dieses Script muss als root ausgeführt werden.\n  Befehl: sudo bash scripts/install.sh"
 fi
 success "Root-Rechte vorhanden"
+
+# Systempakete aktualisieren
+# Wird hier ausgeführt damit install.sh auch ohne Bootstrap-Script vollständig
+# und selbstständig lauffähig ist. Beim Aufruf via bootstrap.sh ist dies der
+# einzige apt-Update-Lauf (bootstrap.sh ruft direkt dieses Script auf).
+info "Aktualisiere Paketliste und Systempakete (kann einige Minuten dauern)..."
+apt-get update -q 2>&1 | tail -1 || true
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q 2>&1 | grep -E "^(upgraded|Inst |Err )" | head -20 || true
+success "Systempakete aktualisiert"
 
 # Betriebssystem prüfen
 if [[ -f /etc/os-release ]]; then
@@ -135,9 +148,11 @@ if [[ -z "$PYTHON_BIN" ]]; then
     die "Python >= 3.11 nicht gefunden.\n  Bitte installieren: sudo apt install python3.11"
 fi
 
-# git prüfen
+# git prüfen (wird für den Bootstrap-Pfad ggf. bereits installiert, zur
+# Sicherheit aber auch hier nochmals geprüft, falls install.sh direkt aufgerufen wird)
 if ! command -v git &>/dev/null; then
-    die "git nicht gefunden.\n  Bitte installieren: sudo apt install git"
+    info "git nicht gefunden – wird installiert..."
+    apt-get install -y git --quiet || die "git-Installation fehlgeschlagen"
 fi
 success "git verfügbar"
 
