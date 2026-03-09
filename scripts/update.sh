@@ -55,10 +55,17 @@ echo
 [[ $EUID -eq 0 ]] || die "Bitte als root ausführen: sudo bash scripts/update.sh"
 [[ -d "$APP_DIR" ]] || die "Keine Installation gefunden unter $APP_DIR.\n  Bitte zuerst scripts/install.sh ausführen."
 
-read -rp "Update durchführen? Services werden kurz gestoppt. [J/n]: " CONFIRM
-case "${CONFIRM,,}" in
-    n|nein) echo "Abgebrochen."; exit 0 ;;
-esac
+# NORIA_BOOTSTRAP=1: vom bootstrap.sh aufgerufen (curl|bash – kein interaktives
+# Terminal). Bestätigungs-Prompt überspringen; der User hat durch das Ausführen
+# von bootstrap.sh bereits explizit ein Update angefordert.
+if [[ "${NORIA_BOOTSTRAP:-0}" == "1" ]]; then
+    info "Automatisches Update via Bootstrap – Bestätigung übersprungen."
+else
+    read -rp "Update durchführen? Services werden kurz gestoppt. [J/n]: " CONFIRM
+    case "${CONFIRM,,}" in
+        n|nein) echo "Abgebrochen."; exit 0 ;;
+    esac
+fi
 
 # Services stoppen
 info "Stoppe Services..."

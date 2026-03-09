@@ -78,8 +78,12 @@ success "git verfügbar ($(git --version))"
 
 # ── 3. Repository klonen oder aktualisieren ───────────────────────────────────
 echo
+# _IS_REINSTALL steuert in Abschnitt 4 ob update.sh oder install.sh aufgerufen wird.
+_IS_REINSTALL=false
+
 if [[ -d "$REPO_DIR/.git" ]]; then
-    # ── Reinstallation: bestehendes Repository aktualisieren ─────────────────
+    # ── Update: bestehendes Repository aktualisieren ─────────────────────────
+    _IS_REINSTALL=true
     info "Bestehendes Repository gefunden: $REPO_DIR"
     info "Aktualisiere Repository (git pull)..."
 
@@ -114,15 +118,37 @@ else
 fi
 echo
 
-# ── 4. install.sh aufrufen ───────────────────────────────────────────────────
+# ── 4. Weiterleitung an install.sh oder update.sh ────────────────────────────
+#
+# Entscheidungslogik:
+#   Erstinstallation  → install.sh  (interaktiv: Hardware-Konfiguration abfragen)
+#   Update / Reinstall → update.sh  (nicht-interaktiv: Code + Pakete + Restart)
+#
+# NORIA_BOOTSTRAP=1 signalisiert update.sh dass es vom Bootstrap aufgerufen
+# wurde und den Bestätigungs-Prompt überspringen soll. Nötig weil beim Aufruf
+# via "curl | sudo bash" stdin kein Terminal ist und read sofort EOF liefert.
+
 INSTALL_SCRIPT="$REPO_DIR/scripts/install.sh"
+UPDATE_SCRIPT="$REPO_DIR/scripts/update.sh"
 
-if [[ ! -f "$INSTALL_SCRIPT" ]]; then
-    die "install.sh nicht gefunden: $INSTALL_SCRIPT\n  Repository möglicherweise unvollständig."
-fi
-
-info "Übergabe an install.sh..."
-echo
 echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo
-exec bash "$INSTALL_SCRIPT"
+
+if [[ "$_IS_REINSTALL" == "true" ]]; then
+    # ── Update-Pfad ──────────────────────────────────────────────────────────
+    if [[ ! -f "$UPDATE_SCRIPT" ]]; then
+        die "update.sh nicht gefunden: $UPDATE_SCRIPT\n  Repository möglicherweise unvollständig."
+    fi
+    info "Bestehende Installation erkannt → Übergabe an update.sh..."
+    echo
+    export NORIA_BOOTSTRAP=1
+    exec bash "$UPDATE_SCRIPT"
+else
+    # ── Erstinstallations-Pfad ───────────────────────────────────────────────
+    if [[ ! -f "$INSTALL_SCRIPT" ]]; then
+        die "install.sh nicht gefunden: $INSTALL_SCRIPT\n  Repository möglicherweise unvollständig."
+    fi
+    info "Erstinstallation → Übergabe an install.sh..."
+    echo
+    exec bash "$INSTALL_SCRIPT"
+fi
