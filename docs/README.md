@@ -56,8 +56,8 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 | Komponente | Anforderung |
 |---|---|
-| Hardware | Raspberry Pi 4B (2 GB RAM) oder Pi 5 (4/8 GB RAM) empfohlen |
-| Betriebssystem | **Ohne Kiosk:** Raspberry Pi OS Lite 64-bit, Debian Trixie · **Mit Kiosk:** Raspberry Pi OS with Desktop 64-bit, Debian Trixie |
+| Hardware | <!-- TODO: Empfohlenes Raspberry Pi-Modell eintragen (z.B. Raspberry Pi 4B 2GB) --> |
+| Betriebssystem | <!-- TODO: Raspberry Pi OS Version eintragen (z.B. Raspberry Pi OS Lite 64-bit, Debian Bookworm) --> |
 | Python | ≥ 3.11 |
 | Speicherplatz | ≥ 1 GB frei (Logs, Daten, Venv) |
 | Netzwerk | Lokales LAN oder direkter Zugriff; kein Internet erforderlich |
@@ -76,6 +76,7 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 ├── pytest.ini                # Test-Konfiguration
 │
 ├── scripts/
+│   ├── bootstrap.sh          # Ein-Zeilen-Bootstrap (klont Repo, ruft install.sh auf)
 │   ├── install.sh            # Installations-Script (einmalig, als root)
 │   └── update.sh             # Update-Script (nach git pull, als root)
 │
@@ -134,46 +135,27 @@ Vollständige Architekturbeschreibung: → [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Produktionsbetrieb (Raspberry Pi)
 
-### OS-Auswahl
-
-- **Kein lokaler Bildschirm** (Bedienung per Browser vom PC/Tablet): → **Raspberry Pi OS Lite 64-bit** (Trixie)
-- **Direkt angeschlossener Touchscreen** (Kiosk-Modus): → **Raspberry Pi OS with Desktop 64-bit** (Trixie)
-
-Installation immer per **Raspberry Pi Imager**. X11 muss nicht manuell ausgewählt werden — das install.sh-Script setzt X11 bei Bedarf automatisch.
-
 ### Schnellinstallation
 
+Ein einziger Befehl — das Bootstrap-Script übernimmt System-Update, Repository-Klon und die komplette Einrichtung:
+
 ```bash
-# System aktualisieren und git installieren
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git
-
-# Repository klonen
-git clone <REPO-URL> ~/noria
-
-# Installations-Script ausführen (einmalig, interaktiv)
-sudo bash ~/noria/scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 ```
 
-Das Script fragt IP-Adresse, Ventilanzahl, GPIO-Pins und optional den Kiosk-Modus ab — für alle anderen Einstellungen einfach Enter drücken. Danach sind beide systemd-Services aktiv und starten bei jedem Neustart automatisch.
+Das Script fragt IP-Adresse, Ventilanzahl und GPIO-Pins ab – für alle anderen Einstellungen einfach Enter drücken. Danach sind beide systemd-Services aktiv und starten bei jedem Neustart automatisch.
 
 **Oberfläche aufrufen:** `http://<PI-IP>:8080`
 
-Bei aktiviertem Kiosk-Modus nach der Installation einmal neu starten:
-
-```bash
-sudo reboot
-```
-
 ### Updates einspielen
 
+Denselben Bootstrap-Befehl erneut ausführen – er erkennt das bestehende Repository und aktualisiert es automatisch:
+
 ```bash
-cd ~/noria
-git pull
-sudo bash scripts/update.sh
+curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 ```
 
-Vollständige Deployment-Anleitung (OS-Installation, Kiosk-Modus, systemd, Firewall, HTTPS): → **[DEPLOYMENT.md](DEPLOYMENT.md)**
+Vollständige Deployment-Anleitung (systemd, Firewall, HTTPS): → **[DEPLOYMENT.md](DEPLOYMENT.md)**
 
 ---
 
@@ -182,7 +164,7 @@ Vollständige Deployment-Anleitung (OS-Installation, Kiosk-Modus, systemd, Firew
 ### 1. Repository klonen und Abhängigkeiten installieren
 
 ```bash
-git clone <REPO-URL> noria
+git clone https://github.com/bensch311/Noria-Irrigation-Control.git noria
 cd noria
 
 python3 -m venv .venv

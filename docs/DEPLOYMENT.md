@@ -17,7 +17,7 @@ Für die meisten Installationen reicht das Bootstrap-Script. Es übernimmt alle 
 ### Ein einziger Befehl
 
 ```bash
-curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 ```
 
 Das war es. Das Script fragt danach interaktiv:
@@ -46,7 +46,7 @@ Nach Abschluss ist die Oberfläche unter `http://<PI-IP>:8080` erreichbar.
 Denselben Befehl erneut ausführen. Das Bootstrap-Script erkennt das bestehende Repository und aktualisiert es automatisch per `git pull`. `install.sh` erkennt die bestehende Installation und fragt vor dem Überschreiben.
 
 ```bash
-curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 ```
 
 Bestehende Konfigurationsdaten (`data/`) und Nutzerdaten bleiben dabei erhalten.
@@ -54,7 +54,7 @@ Bestehende Konfigurationsdaten (`data/`) und Nutzerdaten bleiben dabei erhalten.
 ### Updates einspielen
 
 ```bash
-curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 ```
 
 Oder manuell, falls das Repository bereits lokal vorhanden ist:

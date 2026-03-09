@@ -6,7 +6,7 @@
 # Dieses Script ist der EINZIGE manuelle Schritt bei einer Noria-Installation.
 #
 # Verwendung:
-#   curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 #
 # Was dieses Script tut:
 #   1. Root-Rechte prüfen
@@ -19,7 +19,7 @@
 # ─────────────────────────────────────────────
 # REPO_URL: HTTPS-URL des Noria-GitHub-Repositories.
 #           Format: https://github.com/BENUTZERNAME/REPONAME.git
-REPO_URL="https://github.com/DEIN-GITHUB-BENUTZERNAME/noria.git"
+REPO_URL="https://github.com/bensch311/Noria-Irrigation-Control.git"
 #
 # REPO_DIR: Lokales Verzeichnis in das das Repository geklont wird.
 #           Da dieses Script als root (sudo) läuft, entspricht ~ dem

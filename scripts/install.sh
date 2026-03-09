@@ -7,7 +7,7 @@
 #   sudo bash scripts/install.sh
 #
 # Verwendung B – via Bootstrap-Script (empfohlen, Ein-Zeilen-Install):
-#   curl -fsSL https://github.com/<USER>/noria/releases/latest/download/bootstrap.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/bensch311/Noria-Irrigation-Control/refs/heads/main/scripts/bootstrap.sh | sudo bash
 #   Das Bootstrap-Script klont das Repository und ruft dieses Script auf.
 #
 # Voraussetzungen:
