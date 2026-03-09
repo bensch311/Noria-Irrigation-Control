@@ -721,15 +721,17 @@ systemctl daemon-reload
 systemctl enable noria-backend noria-frontend
 success "Services aktiviert (starten automatisch bei jedem Systemstart)"
 
-info "Starte Backend..."
-systemctl start noria-backend
+info "Starte Backend (neu)..."
+# restart statt start: idempotent – startet frisch bei Erstinstallation,
+# startet neu bei Reinstallation (start wäre bei laufendem Service ein No-Op).
+systemctl restart noria-backend
 
 # Kurz warten damit das Backend hochfahren kann bevor das Frontend startet
 info "Warte auf Backend-Start (5 Sekunden)..."
 sleep 5
 
-info "Starte Frontend..."
-systemctl start noria-frontend
+info "Starte Frontend (neu)..."
+systemctl restart noria-frontend
 
 # Status prüfen
 sleep 2
