@@ -121,12 +121,17 @@ echo
 # ── 4. Weiterleitung an install.sh oder update.sh ────────────────────────────
 #
 # Entscheidungslogik:
-#   Erstinstallation  → install.sh  (interaktiv: Hardware-Konfiguration abfragen)
-#   Update / Reinstall → update.sh  (nicht-interaktiv: Code + Pakete + Restart)
+#   Erstinstallation       → install.sh  (interaktiv: Hardware-Konfiguration)
+#   Bestehende Installation → User-Wahl:
+#       Update        → update.sh   (nicht-interaktiv: Code + Pakete + Restart)
+#       Neuinstallation → install.sh (interaktiv: Hardware-Konfiguration neu)
 #
 # NORIA_BOOTSTRAP=1 signalisiert update.sh dass es vom Bootstrap aufgerufen
 # wurde und den Bestätigungs-Prompt überspringen soll. Nötig weil beim Aufruf
 # via "curl | sudo bash" stdin kein Terminal ist und read sofort EOF liefert.
+#
+# Wenn stdin kein Terminal ist (curl | bash) kann keine interaktive Wahl
+# gestellt werden → sicherer Default: Update.
 
 INSTALL_SCRIPT="$REPO_DIR/scripts/install.sh"
 UPDATE_SCRIPT="$REPO_DIR/scripts/update.sh"
@@ -135,14 +140,59 @@ echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━
 echo
 
 if [[ "$_IS_REINSTALL" == "true" ]]; then
-    # ── Update-Pfad ──────────────────────────────────────────────────────────
-    if [[ ! -f "$UPDATE_SCRIPT" ]]; then
-        die "update.sh nicht gefunden: $UPDATE_SCRIPT\n  Repository möglicherweise unvollständig."
+    # ── Bestehende Installation: Update oder Neuinstallation? ────────────────
+
+    _ACTION="update"  # sicherer Default
+
+    if [[ -t 0 ]]; then
+        # stdin ist ein Terminal → interaktive Wahl möglich
+        echo -e "  ${BOLD}Bestehende Noria-Installation gefunden.${NC}"
+        echo
+        echo "  Was soll gemacht werden?"
+        echo
+        echo -e "  ${BOLD}[1] Update${NC}         – Code und Pakete aktualisieren, Einstellungen"
+        echo    "                     bleiben erhalten. Kein Neueinrichten nötig."
+        echo
+        echo -e "  ${BOLD}[2] Neuinstallation${NC} – Hardware-Konfiguration neu eingeben, Services"
+        echo    "                     werden neu generiert. Benutzerdaten bleiben erhalten."
+        echo
+        while true; do
+            read -rp "  Auswahl [1/2] (Standard: 1 = Update): " _CHOICE
+            _CHOICE="${_CHOICE:-1}"
+            case "$_CHOICE" in
+                1) _ACTION="update";  break ;;
+                2) _ACTION="install"; break ;;
+                *) warn "  Ungültige Eingabe. Bitte 1 oder 2 eingeben." ;;
+            esac
+        done
+    else
+        # stdin ist kein Terminal (curl | bash) → kein read möglich, Default nutzen
+        warn "Kein interaktives Terminal erkannt (curl | bash)."
+        warn "Führe automatisch: Update (Standard)."
+        warn "Für Neuinstallation dieses Script direkt ausführen:"
+        warn "  sudo bash $REPO_DIR/scripts/bootstrap.sh"
+        _ACTION="update"
     fi
-    info "Bestehende Installation erkannt → Übergabe an update.sh..."
+
     echo
-    export NORIA_BOOTSTRAP=1
-    exec bash "$UPDATE_SCRIPT"
+
+    if [[ "$_ACTION" == "update" ]]; then
+        if [[ ! -f "$UPDATE_SCRIPT" ]]; then
+            die "update.sh nicht gefunden: $UPDATE_SCRIPT\n  Repository möglicherweise unvollständig."
+        fi
+        info "Update gewählt → Übergabe an update.sh..."
+        echo
+        export NORIA_BOOTSTRAP=1
+        exec bash "$UPDATE_SCRIPT"
+    else
+        if [[ ! -f "$INSTALL_SCRIPT" ]]; then
+            die "install.sh nicht gefunden: $INSTALL_SCRIPT\n  Repository möglicherweise unvollständig."
+        fi
+        info "Neuinstallation gewählt → Übergabe an install.sh..."
+        echo
+        exec bash "$INSTALL_SCRIPT"
+    fi
+
 else
     # ── Erstinstallations-Pfad ───────────────────────────────────────────────
     if [[ ! -f "$INSTALL_SCRIPT" ]]; then
