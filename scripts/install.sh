@@ -320,6 +320,8 @@ apt-get install -y \
     python3-venv \
     build-essential \
     libsystemd-dev \
+    swig \
+    liblgpio-dev \
     --quiet \
     2>&1 | grep -v "^$" || true
 success "Systempakete installiert"
@@ -578,6 +580,9 @@ cat > "$SYSTEMD_DIR/noria-backend.service" << EOF
 Description=Noria Backend (FastAPI/uvicorn)
 After=network.target
 Wants=network.target
+# Neustart-Limit: max. 5 Neustarts in 60s (verhindert Crash-Schleife)
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=$SYSTEMD_TYPE
@@ -601,11 +606,9 @@ KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=30
 
-# Neustart bei Absturz; max. 5 Neustarts in 60s (verhindert Crash-Schleife)
+# Neustart bei Absturz
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # systemd-Watchdog: Backend sendet WATCHDOG=1 alle 10s.
 # Wenn kein Heartbeat innerhalb 30s → Service-Neustart.
@@ -620,10 +623,14 @@ SyslogIdentifier=noria-backend
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=$DATA_DIR $LOGS_DIR
+# APP_DIR muss beschreibbar sein: rpi-lgpio/lgpio legt temporäre
+# Notification-Pipes (.lgd-nfy*) im WorkingDirectory an.
+ReadWritePaths=$APP_DIR $DATA_DIR $LOGS_DIR
 
-# GPIO-Zugriff auf /dev/gpiomem
-DeviceAllow=/dev/gpiomem rw
+# GPIO-Zugriff: Pi 4 und älter nutzen /dev/gpiomem, Pi 5 (RP1-Chip) nutzt
+# /dev/gpiochip4. Beide werden erlaubt für maximale Kompatibilität.
+DeviceAllow=/dev/gpiochip0 rw
+DeviceAllow=/dev/gpiochip4 rw
 SupplementaryGroups=gpio
 
 [Install]
@@ -641,6 +648,9 @@ cat > "$SYSTEMD_DIR/noria-frontend.service" << EOF
 Description=Noria Frontend (Python Shiny)
 After=network.target noria-backend.service
 Wants=noria-backend.service
+# Neustart-Limit: max. 5 Neustarts in 60s (verhindert Crash-Schleife)
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -657,8 +667,6 @@ KillSignal=SIGTERM
 TimeoutStopSec=15
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 StandardOutput=journal
 StandardError=journal
