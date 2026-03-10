@@ -138,7 +138,9 @@ class RpiGpioValveDriver(BaseValveDriver):
         # und dem ersten output()-Call. Ohne initial= würde lgpio/RPi.GPIO den
         # Pin kurz auf LOW setzen, was bei Active-Low-Boards alle Relais kurz
         # (oder dauerhaft) aktiviert bevor write_closed() greift.
-        initial_closed = GPIO.LOW if self._active_low else GPIO.HIGH
+        # closed = de-energized: active_low=True → HIGH, active_low=False → LOW
+        # (identisch zu _write_closed(), aber als initial= für atomares Setup)
+        initial_closed = GPIO.HIGH if self._active_low else GPIO.LOW
         for zone, pin in sorted(self._pins_by_zone.items()):
             GPIO.setup(int(pin), GPIO.OUT, initial=initial_closed)
 

@@ -169,30 +169,28 @@ class TestRpiGpioValveDriverInit:
 
     def test_all_pins_initialized_to_closed_active_low(self):
         """
-        Mit active_low=True: 'closed' = GPIO LOW (0) → initial=GPIO.LOW.
-        GPIO.setup() muss mit initial=LOW aufgerufen werden – kein separates
-        output()-Call mehr, da initial= Richtung und Wert atomar setzt.
-        Das verhindert den Race zwischen setup() (Pin kurz LOW) und output().
+        Mit active_low=True: 'closed' = GPIO HIGH → initial=GPIO.HIGH.
+        Relais ist de-energized wenn Pin HIGH. GPIO.setup() muss atomar mit
+        initial=HIGH aufgerufen werden, damit der Pin nie LOW geht beim Init.
         """
         driver, gpio = _make_rpi_driver({1: 17, 2: 18}, active_low=True)
         for c in gpio.setup.call_args_list:
             initial = c.kwargs.get("initial")
-            assert initial == gpio.LOW, (
-                f"Pin {c.args[0]}: erwartet initial=LOW ({gpio.LOW}), "
+            assert initial == gpio.HIGH, (
+                f"Pin {c.args[0]}: erwartet initial=HIGH ({gpio.HIGH}), "
                 f"bekommen: {initial}"
             )
-        # output() darf beim Init nicht aufgerufen werden
         gpio.output.assert_not_called()
 
     def test_all_pins_initialized_to_closed_active_high(self):
         """
-        Mit active_low=False: 'closed' = GPIO HIGH (1) → initial=GPIO.HIGH.
+        Mit active_low=False: 'closed' = GPIO LOW → initial=GPIO.LOW.
         """
         driver, gpio = _make_rpi_driver({1: 17, 2: 18}, active_low=False)
         for c in gpio.setup.call_args_list:
             initial = c.kwargs.get("initial")
-            assert initial == gpio.HIGH, (
-                f"Pin {c.args[0]}: erwartet initial=HIGH ({gpio.HIGH}), "
+            assert initial == gpio.LOW, (
+                f"Pin {c.args[0]}: erwartet initial=LOW ({gpio.LOW}), "
                 f"bekommen: {initial}"
             )
         gpio.output.assert_not_called()

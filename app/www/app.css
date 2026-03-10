@@ -59,7 +59,8 @@ body {
 
 /* ---------- NAV ---------- */
 .navbar {
-  background: var(--accent) !important;
+  background: rgb(255, 255, 255) !important;
+  border: 2px solid var(--accent) !important;
   border-radius: var(--radius2) !important;
   margin: 0.6rem 0.6rem 0 !important;
   padding-top: 0.35rem !important;
@@ -80,25 +81,26 @@ body {
   align-self: stretch !important;
   padding-top: 0 !important;
   padding-bottom: 0 !important;
-  color: var(--text_white) !important;
+  color: var(--text) !important;
   font-family: "Fraunces", Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
 
-.navbar .nav-link { color: var(--text_white) !important; font-size:     1rem !important;}
+.navbar .nav-link { color: var(--text) !important; font-size: 1rem !important; font-weight: bold;}
 
 .navbar .nav-link.active,
 .navbar .nav-link:hover {
-  color: var(--text_white) !important;
-  background: var(--accent) !important;
+  color: var(--accent) !important;
+  font-weight: bold;
+
 }
 
 .navbar .navbar-nav { align-items: center; }
 
 /* Uhr-Badge in der Navbar */
 .nav-clock-badge {
-  background:    rgba(255, 255, 255, 0.18) !important;
-  border:        1px solid rgba(255, 255, 255, 0.28) !important;
-  color:         var(--text_white) !important;
+  background:    var(--accent) !important;
+  border:        1px solid rgba(0, 0, 0, 0.28) !important;
+  color:         var(--text) !important;
   border-radius: 999px !important;
   padding:       0.34rem 0.75rem !important;
   font-size:     0.92rem !important;
