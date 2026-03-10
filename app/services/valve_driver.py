@@ -133,10 +133,14 @@ class RpiGpioValveDriver(BaseValveDriver):
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
 
-        # Setup all pins as outputs, default to "closed"
+        # Setup all pins as outputs, initial value = "closed" (sicher/inaktiv).
+        # initial= setzt Richtung UND Wert atomar – kein Race zwischen setup()
+        # und dem ersten output()-Call. Ohne initial= würde lgpio/RPi.GPIO den
+        # Pin kurz auf LOW setzen, was bei Active-Low-Boards alle Relais kurz
+        # (oder dauerhaft) aktiviert bevor write_closed() greift.
+        initial_closed = GPIO.LOW if self._active_low else GPIO.HIGH
         for zone, pin in sorted(self._pins_by_zone.items()):
-            GPIO.setup(int(pin), GPIO.OUT)
-            self._write_closed(int(pin))
+            GPIO.setup(int(pin), GPIO.OUT, initial=initial_closed)
 
         log_event(
             "valve_driver_gpio_setup",

@@ -45,6 +45,10 @@ def _make_rpi_driver(
     gpio_mock = MagicMock()
     gpio_mock.BCM = 11   # typischer Wert – muss nur konsistent sein
     gpio_mock.OUT = 0
+    # HIGH/LOW müssen echte int-Werte sein, damit der initial=-Vergleich
+    # in den Tests zuverlässig funktioniert.
+    gpio_mock.HIGH = 1
+    gpio_mock.LOW = 0
 
     # WICHTIG: Python löst 'import RPi.GPIO as GPIO' intern über
     # sys.modules["RPi"].GPIO auf, NICHT direkt über sys.modules["RPi.GPIO"].
@@ -165,26 +169,33 @@ class TestRpiGpioValveDriverInit:
 
     def test_all_pins_initialized_to_closed_active_low(self):
         """
-        Mit active_low=True: 'closed' = GPIO HIGH (1).
-        Beim Init muss jeder Pin auf HIGH gesetzt werden.
+        Mit active_low=True: 'closed' = GPIO LOW (0) → initial=GPIO.LOW.
+        GPIO.setup() muss mit initial=LOW aufgerufen werden – kein separates
+        output()-Call mehr, da initial= Richtung und Wert atomar setzt.
+        Das verhindert den Race zwischen setup() (Pin kurz LOW) und output().
         """
         driver, gpio = _make_rpi_driver({1: 17, 2: 18}, active_low=True)
-        output_calls = gpio.output.call_args_list
-        # Nur Init-Calls prüfen (zwei Pins → zwei output-Calls beim Setup)
-        init_pins = {c.args[0]: c.args[1] for c in output_calls}
-        assert init_pins[17] == 1  # HIGH = closed bei active_low
-        assert init_pins[18] == 1
+        for c in gpio.setup.call_args_list:
+            initial = c.kwargs.get("initial")
+            assert initial == gpio.LOW, (
+                f"Pin {c.args[0]}: erwartet initial=LOW ({gpio.LOW}), "
+                f"bekommen: {initial}"
+            )
+        # output() darf beim Init nicht aufgerufen werden
+        gpio.output.assert_not_called()
 
     def test_all_pins_initialized_to_closed_active_high(self):
         """
-        Mit active_low=False: 'closed' = GPIO LOW (0).
-        Beim Init muss jeder Pin auf LOW gesetzt werden.
+        Mit active_low=False: 'closed' = GPIO HIGH (1) → initial=GPIO.HIGH.
         """
         driver, gpio = _make_rpi_driver({1: 17, 2: 18}, active_low=False)
-        output_calls = gpio.output.call_args_list
-        init_pins = {c.args[0]: c.args[1] for c in output_calls}
-        assert init_pins[17] == 0
-        assert init_pins[18] == 0
+        for c in gpio.setup.call_args_list:
+            initial = c.kwargs.get("initial")
+            assert initial == gpio.HIGH, (
+                f"Pin {c.args[0]}: erwartet initial=HIGH ({gpio.HIGH}), "
+                f"bekommen: {initial}"
+            )
+        gpio.output.assert_not_called()
 
     def test_driver_name_is_rpi(self):
         driver, _ = _make_rpi_driver({1: 17})
