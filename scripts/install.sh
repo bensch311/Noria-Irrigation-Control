@@ -345,7 +345,7 @@ fi
 # Kiosk-spezifische Pakete und Benutzer
 if [[ "$KIOSK_MODE" == "true" ]]; then
     echo
-    info "Installiere Kiosk-Pakete (chromium, unclutter, curl, x11-xserver-utils)..."
+    info "Installiere Kiosk-Pakete (chromium, rpd-x-core, unclutter, curl, x11-xserver-utils)..."
 
     # Chromium: Paketname variiert je nach Pi OS Version
     # Bookworm: 'chromium', Bullseye: 'chromium-browser'
@@ -362,23 +362,13 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
 
     apt-get install -y \
         "$CHROMIUM_PKG" \
+        rpd-x-core \
         unclutter \
         curl \
         x11-xserver-utils \
         --quiet \
         2>&1 | grep -v "^$" || true
     success "Kiosk-Pakete installiert (Chromium: $CHROMIUM_PKG)"
-
-    # gnome-keyring deinstallieren.
-    # Der Daemon zeigt beim ersten Login eines neuen Users ohne bestehenden
-    # Keyring-Store einen "Passwort festlegen"-Dialog an – auf einem Kiosk
-    # inakzeptabel. Kein Passwort-Tresor wird benötigt.
-    # Deinstallation entfernt auch /etc/xdg/autostart/gnome-keyring-*.desktop.
-    if dpkg -l gnome-keyring 2>/dev/null | grep -q "^ii"; then
-        info "Deinstalliere gnome-keyring (auf Kiosk nicht benötigt)..."
-        apt-get remove -y gnome-keyring --quiet 2>&1 | grep -v "^$" || true
-        success "gnome-keyring deinstalliert"
-    fi
 
     # Chromium-Binary ermitteln
     CHROMIUM_BIN=""
