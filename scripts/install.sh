@@ -418,6 +418,13 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
             fi
         done
         success "Benutzer '$KIOSK_USER' zu Display-Gruppen hinzugefügt"
+
+        # KRITISCH: kiosk-User zur noria-Gruppe hinzufügen.
+        # /opt/noria/ hat chmod 750 (owner: noria:noria). Ohne Gruppen-
+        # mitgliedschaft darf kiosk das Verzeichnis nicht betreten und
+        # kiosk-start.sh nicht ausführen → "Permission denied" beim Start.
+        usermod -aG "$APP_USER" "$KIOSK_USER"
+        success "Benutzer '$KIOSK_USER' zur Gruppe '$APP_USER' hinzugefügt (Zugriff auf $INSTALL_DIR)"
     fi
 fi
 
