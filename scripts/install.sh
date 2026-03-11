@@ -362,13 +362,23 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
 
     apt-get install -y \
         "$CHROMIUM_PKG" \
-        rpd-x-core \
         unclutter \
         curl \
         x11-xserver-utils \
         --quiet \
         2>&1 | grep -v "^$" || true
     success "Kiosk-Pakete installiert (Chromium: $CHROMIUM_PKG)"
+
+    # gnome-keyring deinstallieren.
+    # Der Daemon zeigt beim ersten Login eines neuen Users ohne bestehenden
+    # Keyring-Store einen "Passwort festlegen"-Dialog an – auf einem Kiosk
+    # inakzeptabel. Kein Passwort-Tresor wird benötigt.
+    # Deinstallation entfernt auch /etc/xdg/autostart/gnome-keyring-*.desktop.
+    if dpkg -l gnome-keyring 2>/dev/null | grep -q "^ii"; then
+        info "Deinstalliere gnome-keyring (auf Kiosk nicht benötigt)..."
+        apt-get remove -y gnome-keyring --quiet 2>&1 | grep -v "^$" || true
+        success "gnome-keyring deinstalliert"
+    fi
 
     # Chromium-Binary ermitteln
     CHROMIUM_BIN=""
@@ -1010,23 +1020,6 @@ EOF
     # Alle kiosk-Home-Dateien dem kiosk-User zuweisen
     chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME"
 
-    # ── 9e-2. XDG-Autostart gnome-keyring unterdrücken ────────────────────────
-    # /etc/xdg/autostart/gnome-keyring-*.desktop startet den Keyring-Daemon
-    # via lxsession. Beim ersten Login ohne Keyring-Store erscheint ein
-    # "Passwort festlegen"-Dialog, der den Kiosk blockiert.
-    # User-Override-Dateien mit Hidden=true verhindern den Start.
-    # Zusätzliche Absicherung: --password-store=basic in kiosk-start.sh.
-    info "Unterdrücke XDG-Autostart gnome-keyring für '$KIOSK_USER'..."
-    mkdir -p "$KIOSK_HOME/.config/autostart"
-    for _krd in gnome-keyring-secrets gnome-keyring-ssh gnome-keyring-pkcs11; do
-        {
-            echo '[Desktop Entry]'
-            echo 'Hidden=true'
-        } > "$KIOSK_HOME/.config/autostart/${_krd}.desktop"
-    done
-    chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/autostart"
-    success "XDG-Autostart gnome-keyring deaktiviert (3 Override-Dateien)"
-
     # ── 9f. openbox-Konfiguration (kein Rechtsklick-Desktop-Menü) ─────────────
     # openbox ist der Fenstermanager unter LXDE. Das Rechtsklick-Menü
     # auf dem Desktop würde Zugriff auf Programme ermöglichen.
@@ -1041,13 +1034,42 @@ EOF
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
 </openbox_menu>
 EOF
-        # rc.xml: Desktop-Tastenkürzel deaktivieren
-        # Kopiere Standard-rc.xml und entferne gefährliche Keybindings
+        # rc.xml: Gefährliche Tastenkürzel deaktivieren
+        # Kopiere System-rc.xml als Basis, dann per Python XML-Parser anpassen.
+        # Deaktiviert werden:
+        #   A-F4       → Fenster schließen (würde Chromium-Kiosk beenden)
+        #   W-d / W-D  → Desktop anzeigen
+        #   W-e        → Dateimanager
         if [[ -f /etc/xdg/openbox/rc.xml ]]; then
             cp /etc/xdg/openbox/rc.xml "$OPENBOX_CONFIG_DIR/rc.xml"
-            # Super+D (Desktop anzeigen), Super+E (Dateimanager) entfernen
-            # Dies ist eine konservative Lösung; physische Tastatur im Feld
-            # sowieso abgesteckt.
+            python3 - "$OPENBOX_CONFIG_DIR/rc.xml" << 'RCXML_EOF'
+import sys, xml.etree.ElementTree as ET
+
+RC_FILE = sys.argv[1]
+# Tasten die auf einem Kiosk keine Funktion haben dürfen
+DISABLE_KEYS = {"A-F4", "W-d", "W-D", "W-e"}
+
+ET.register_namespace("", "http://openbox.org/3.4/rc")
+tree = ET.parse(RC_FILE)
+root = tree.getroot()
+ns = {"ob": "http://openbox.org/3.4/rc"}
+
+keyboard = root.find("ob:keyboard", ns)
+if keyboard is not None:
+    for keybind in list(keyboard.findall("ob:keybind", ns)):
+        key = keybind.get("key", "")
+        if key in DISABLE_KEYS:
+            # Alle Actions entfernen und durch No-Op ersetzen
+            for child in list(keybind):
+                keybind.remove(child)
+            noop = ET.SubElement(keybind, "action")
+            noop.set("name", "Execute")
+            cmd = ET.SubElement(noop, "execute")
+            cmd.text = "true"
+
+tree.write(RC_FILE, encoding="unicode", xml_declaration=True)
+RCXML_EOF
+            success "openbox rc.xml: A-F4 / W-d / W-e deaktiviert"
         fi
         chown -R "$KIOSK_USER:$KIOSK_USER" "$OPENBOX_CONFIG_DIR"
         success "openbox konfiguriert (kein Desktop-Kontextmenü)"
