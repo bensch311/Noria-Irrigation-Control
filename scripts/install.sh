@@ -785,14 +785,14 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
     # ── 9a. X11 als Anzeigeserver erzwingen ──────────────────────────────────
     # Pi 5 + Trixie Desktop nutzt standardmäßig labwc (Wayland).
     # Pi 5 + Bookworm Desktop nutzte Wayfire (Wayland).
-    # Für Kiosk-Betrieb mit LXDE ist X11 erforderlich; raspi-config setzt es
-    # systemweit. Auf Pi 4 / anderen Systemen ist dieser Aufruf idempotent.
+    # Für Kiosk-Betrieb mit rpd-x/LXDE ist X11 erforderlich; raspi-config
+    # setzt es systemweit. Auf Pi 4 / anderen Systemen idempotent.
     if command -v raspi-config &>/dev/null; then
-        info "Setze X11 als Anzeigeserver (erforderlich für LXDE-Kiosk)..."
+        info "Setze X11 als Anzeigeserver (erforderlich für rpd-x Kiosk)..."
         if raspi-config nonint do_wayland W1 2>/dev/null; then
-            success "Anzeigeserver: X11 (LXDE-pi Session, wirksam nach Neustart)"
+            success "Anzeigeserver: X11 (wirksam nach Neustart)"
         else
-            warn "raspi-config do_wayland fehlgeschlagen – prüfe manuell:"
+            warn "raspi-config do_wayland fehlgeschlagen – bitte manuell prüfen:"
             warn "  sudo raspi-config → Advanced Options → Wayland → X11"
         fi
     else
@@ -802,29 +802,51 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
 
     # ── 9b. lightdm Autologin konfigurieren ──────────────────────────────────
     # Der kiosk-User loggt sich nach dem Boot automatisch ein.
-    # KRITISCH: autologin-session muss explizit gesetzt sein.
-    # Ohne autologin-session wählt lightdm für einen neuen User ohne Session-
-    # Historie die System-Standardsession – auf Pi 5 + Trixie ist das labwc
-    # (Wayland). Damit würde der kiosk-User in den normalen Wayland-Desktop
-    # landen und der LXDE-Autostart wird nie ausgeführt.
-    # xserver-command deaktiviert den DPMS-Screensaver auf Anzeige-Ebene.
+    # KRITISCH: autologin-session muss explizit auf einen in /usr/share/xsessions/
+    # vorhandenen Namen gesetzt werden. Ohne gültigen Session-Namen fällt lightdm
+    # auf die System-Standardsession zurück – auf Pi 5 + Trixie ist das labwc
+    # (Wayland), womit der LXDE-Autostart nie ausgeführt wird.
+    #
+    # Session-Namens-Entwicklung im Raspberry Pi OS:
+    #   Bullseye/Bookworm: LXDE-pi   (/usr/share/xsessions/LXDE-pi.desktop)
+    #   Trixie:            rpd-x      (/usr/share/xsessions/rpd-x.desktop)
+    # → Dynamisch ermitteln, Fallback-Kette: rpd-x → LXDE-pi → LXDE
+    XSESSION_DIR="/usr/share/xsessions"
+    KIOSK_SESSION=""
+    for candidate in rpd-x LXDE-pi LXDE; do
+        if [[ -f "$XSESSION_DIR/${candidate}.desktop" ]]; then
+            KIOSK_SESSION="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$KIOSK_SESSION" ]]; then
+        warn "Keine bekannte Desktop-Session in $XSESSION_DIR gefunden."
+        warn "Verfügbare Sessions: $(ls "$XSESSION_DIR" 2>/dev/null | tr '\n' ' ')"
+        warn "Kiosk-Autologin-Session wird NICHT gesetzt – Kiosk startet möglicherweise nicht."
+        warn "Nach der Installation manuell prüfen:"
+        warn "  ls /usr/share/xsessions/   # → Session-Name ohne .desktop"
+        warn "  sudo nano /etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf"
+        warn "  autologin-session=<NAME>  # korrekte Session eintragen, dann: sudo reboot"
+    else
+        info "Desktop-Session erkannt: $KIOSK_SESSION"
+    fi
+
     if command -v lightdm &>/dev/null || dpkg -l lightdm 2>/dev/null | grep -q "^ii"; then
         info "Konfiguriere lightdm Autologin für Benutzer '$KIOSK_USER'..."
         mkdir -p /etc/lightdm/lightdm.conf.d
         cat > /etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf << EOF
 # Noria Kiosk – lightdm Autologin
 # Generiert von scripts/install.sh – nicht manuell editieren.
+# Session-Name automatisch ermittelt: $KIOSK_SESSION
 [Seat:*]
 autologin-user=$KIOSK_USER
 autologin-user-timeout=0
-# Session explizit setzen: verhindert dass lightdm für den neuen kiosk-User
-# auf die Wayland-Standardsession (labwc) zurückfällt (Pi 5 + Trixie).
-autologin-session=LXDE-pi
-user-session=LXDE-pi
+autologin-session=$KIOSK_SESSION
+user-session=$KIOSK_SESSION
 # Screensaver und DPMS auf X-Server-Ebene deaktivieren
 xserver-command=X -s 0 -dpms
 EOF
-        success "lightdm Autologin konfiguriert (Session: LXDE-pi)"
+        success "lightdm Autologin konfiguriert (Session: ${KIOSK_SESSION:-<nicht erkannt>})"
     else
         warn "lightdm nicht gefunden – Autologin nicht konfiguriert"
         warn "  Bitte Raspberry Pi OS with Desktop (64-bit) verwenden"
@@ -852,9 +874,9 @@ EOF
 FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
 LOG_PREFIX="[noria-kiosk]"
 
-# DISPLAY explizit setzen – wird von LXDE normalerweise geerbt, aber als
-# Absicherung explizit exportiert damit xset/unclutter/Chromium zuverlässig
-# wissen, welchen X-Server sie ansprechen sollen.
+# DISPLAY explizit setzen – wird von rpd-x/LXDE normalerweise geerbt, aber
+# als Absicherung exportiert damit xset/unclutter/Chromium zuverlässig den
+# korrekten X-Server ansprechen.
 export DISPLAY="\${DISPLAY:-:0}"
 
 echo "\$LOG_PREFIX Starte – warte auf Noria-Frontend..."
@@ -907,16 +929,17 @@ KIOSK_SCRIPT_EOF
     chown "$KIOSK_USER:$KIOSK_USER" "$INSTALL_DIR/kiosk-start.sh"
     success "Kiosk-Wrapper-Script erstellt: $INSTALL_DIR/kiosk-start.sh"
 
-    # ── 9d. LXDE Autostart konfigurieren ─────────────────────────────────────
-    # LXDE liest ~/.config/lxsession/LXDE-pi/autostart nach dem Login.
-    # @-Präfix: LXDE startet den Prozess neu falls er beendet wird.
-    # openbox-Anweisungen deaktivieren Desktop-Elemente die den Kiosk stören.
-    #
-    # Beide Session-Namen werden geschrieben:
-    #   LXDE-pi  → Standard bei Raspberry Pi OS (do_wayland W1 auf Bookworm)
-    #   LXDE     → Fallback, falls raspi-config auf Trixie den Namen ohne -pi setzt
-    info "Konfiguriere LXDE Autostart für '$KIOSK_USER'..."
-    AUTOSTART_CONTENT="# Noria Kiosk – LXDE Autostart
+    # ── 9d. lxsession Autostart konfigurieren ────────────────────────────────
+    # rpd-x (Trixie) und LXDE-pi (Bookworm) lesen beide ihre Autostart-Datei
+    # aus ~/.config/lxsession/<SESSION>/autostart. Da der Session-Name sich
+    # zwischen Pi OS-Versionen geändert hat, werden alle drei Varianten
+    # geschrieben damit das Script auf jeder Version korrekt funktioniert:
+    #   LXDE-pi  → Bullseye / Bookworm
+    #   rpd-x    → Trixie (Raspberry Pi Desktop for X)
+    #   LXDE     → generischer Fallback
+    # @-Präfix: lxsession startet den Prozess neu falls er beendet wird.
+    info "Konfiguriere lxsession Autostart für '$KIOSK_USER'..."
+    AUTOSTART_CONTENT="# Noria Kiosk – lxsession Autostart
 # Generiert von scripts/install.sh
 # Desktop-Elemente deaktivieren
 @xset s off
@@ -925,13 +948,11 @@ KIOSK_SCRIPT_EOF
 # Kiosk-Browser starten (wird bei Absturz automatisch neu gestartet)
 @$INSTALL_DIR/kiosk-start.sh"
 
-    mkdir -p "$KIOSK_HOME/.config/lxsession/LXDE-pi"
-    echo "$AUTOSTART_CONTENT" > "$KIOSK_HOME/.config/lxsession/LXDE-pi/autostart"
-
-    mkdir -p "$KIOSK_HOME/.config/lxsession/LXDE"
-    echo "$AUTOSTART_CONTENT" > "$KIOSK_HOME/.config/lxsession/LXDE/autostart"
-
-    success "LXDE Autostart konfiguriert (LXDE-pi + LXDE)"
+    for SESSION_DIR in LXDE-pi rpd-x LXDE; do
+        mkdir -p "$KIOSK_HOME/.config/lxsession/$SESSION_DIR"
+        printf '%s\n' "$AUTOSTART_CONTENT" > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/autostart"
+    done
+    success "lxsession Autostart konfiguriert (LXDE-pi, rpd-x, LXDE)"
 
     # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
@@ -1042,6 +1063,7 @@ echo
 if [[ "$KIOSK_OK" == "true" ]]; then
     echo -e "  ${BOLD}Kiosk-Modus:${NC}"
     echo "  + Autologin konfiguriert (Benutzer: $KIOSK_USER)"
+    echo "  + Desktop-Session: ${KIOSK_SESSION:-<nicht ermittelt>}"
     echo "  + Chromium startet automatisch nach dem Boot im Vollbild"
     echo "  + Anzeigeserver: X11 (Wayland deaktiviert)"
     echo "  + Kiosk-Script: $INSTALL_DIR/kiosk-start.sh"
