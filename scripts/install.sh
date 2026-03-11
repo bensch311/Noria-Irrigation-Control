@@ -833,6 +833,8 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
 
     if command -v lightdm &>/dev/null || dpkg -l lightdm 2>/dev/null | grep -q "^ii"; then
         info "Konfiguriere lightdm Autologin für Benutzer '$KIOSK_USER'..."
+
+        # ── Drop-in-Config (conf.d) ───────────────────────────────────────────
         mkdir -p /etc/lightdm/lightdm.conf.d
         cat > /etc/lightdm/lightdm.conf.d/50-noria-kiosk.conf << EOF
 # Noria Kiosk – lightdm Autologin
@@ -846,7 +848,25 @@ user-session=$KIOSK_SESSION
 # Screensaver und DPMS auf X-Server-Ebene deaktivieren
 xserver-command=X -s 0 -dpms
 EOF
-        success "lightdm Autologin konfiguriert (Session: ${KIOSK_SESSION:-<nicht erkannt>})"
+
+        # ── lightdm.conf direkt patchen ───────────────────────────────────────
+        # Raspberry Pi OS schreibt bei der Ersteinrichtung und via raspi-config
+        # den Hauptbenutzer (z.B. 'benny') direkt in /etc/lightdm/lightdm.conf.
+        # lightdm wertet lightdm.conf NACH den conf.d-Dateien aus; der dort
+        # hartcodierte autologin-user überschreibt deshalb unsere conf.d-Datei.
+        # Lösung: lightdm.conf zusätzlich direkt patchen.
+        LIGHTDM_CONF="/etc/lightdm/lightdm.conf"
+        if [[ -f "$LIGHTDM_CONF" ]]; then
+            sed -i "s|^autologin-user=.*|autologin-user=$KIOSK_USER|g"        "$LIGHTDM_CONF"
+            sed -i "s|^autologin-session=.*|autologin-session=$KIOSK_SESSION|g" "$LIGHTDM_CONF"
+            sed -i "s|^user-session=.*|user-session=$KIOSK_SESSION|g"           "$LIGHTDM_CONF"
+            sed -i "s|^#autologin-user-timeout=.*|autologin-user-timeout=0|g"   "$LIGHTDM_CONF"
+            success "lightdm.conf gepatcht (autologin-user=$KIOSK_USER)"
+        else
+            warn "lightdm.conf nicht gefunden – nur conf.d-Datei geschrieben"
+        fi
+
+        success "lightdm Autologin vollständig konfiguriert (Session: ${KIOSK_SESSION:-<nicht erkannt>})"
     else
         warn "lightdm nicht gefunden – Autologin nicht konfiguriert"
         warn "  Bitte Raspberry Pi OS with Desktop (64-bit) verwenden"
