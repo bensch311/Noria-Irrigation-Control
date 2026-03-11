@@ -418,13 +418,6 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
             fi
         done
         success "Benutzer '$KIOSK_USER' zu Display-Gruppen hinzugefügt"
-
-        # KRITISCH: kiosk-User zur noria-Gruppe hinzufügen.
-        # /opt/noria/ hat chmod 750 (owner: noria:noria). Ohne Gruppen-
-        # mitgliedschaft darf kiosk das Verzeichnis nicht betreten und
-        # kiosk-start.sh nicht ausführen → "Permission denied" beim Start.
-        usermod -aG "$APP_USER" "$KIOSK_USER"
-        success "Benutzer '$KIOSK_USER' zur Gruppe '$APP_USER' hinzugefügt (Zugriff auf $INSTALL_DIR)"
     fi
 fi
 
@@ -980,6 +973,28 @@ KIOSK_SCRIPT_EOF
         printf '%s\n' "$AUTOSTART_CONTENT" > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/autostart"
     done
     success "lxsession Autostart konfiguriert (LXDE-pi, rpd-x, LXDE)"
+
+    # ── 9d-2. lxsession desktop.conf – Keyring und ssh-agent deaktivieren ──────
+    # lxsession liest beim Start ~/.config/lxsession/<SESSION>/desktop.conf und
+    # überschreibt damit die System-Defaults aus /etc/xdg/lxsession/rpd-x/.
+    # Die System-Config startet per keyring/command=ssh-agent den gnome-keyring-
+    # daemon, der beim ersten Login des kiosk-Users einen "Neuen Schlüsselbund
+    # erstellen"-Dialog zeigt und ein Passwort verlangt.
+    # Auf einem Kiosk ist jede Passwortabfrage inakzeptabel → deaktivieren.
+    # Alle drei SESSION_DIR-Varianten werden analog zur autostart-Datei befüllt.
+    info "Erstelle lxsession desktop.conf für '$KIOSK_USER' (Keyring deaktiviert)..."
+    DESKTOP_CONF_CONTENT="# Noria Kiosk – lxsession desktop.conf
+# Generiert von scripts/install.sh
+# Überschreibt System-Defaults: Keyring und ssh-agent deaktiviert.
+# Auf einem Kiosk darf keine Passwortabfrage erscheinen.
+[Session]
+# Leer = kein Keyring-Manager, kein gnome-keyring-daemon, keine Passwortabfrage
+keyring/command="
+
+    for SESSION_DIR in LXDE-pi rpd-x LXDE; do
+        printf '%s\n' "$DESKTOP_CONF_CONTENT" > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/desktop.conf"
+    done
+    success "lxsession desktop.conf erstellt (Keyring-Dialog unterdrückt)"
 
     # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
