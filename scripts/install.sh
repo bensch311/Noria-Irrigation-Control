@@ -941,6 +941,7 @@ exec ${CHROMIUM_BIN} \\
     --check-for-update-interval=31536000 \\
     --disable-pinch \\
     --overscroll-history-navigation=0 \\
+    --password-store=basic \\
     --user-data-dir=/tmp/chromium-kiosk \\
     "\$FRONTEND_URL"
 KIOSK_SCRIPT_EOF
@@ -1012,6 +1013,20 @@ DCONF_EOF
     # kein alter Dialog-Zustand gespeichert bleibt.
     rm -rf "$KIOSK_HOME/.local/share/keyrings/"
     success "Keyring-Store geleert"
+
+    # ── 9b-3. XDG-Autostart gnome-keyring unterdrücken ───────────────────────
+    # /etc/xdg/autostart/gnome-keyring-*.desktop startet den Keyring-Daemon
+    # systemweit via lxsession. User-Override-Dateien mit Hidden=true in
+    # ~/.config/autostart/ verhindern dass lxsession diese Einträge ausführt.
+    # --password-store=basic in kiosk-start.sh verhindert zusätzlich dass
+    # Chromium selbst einen Keyring-Zugriff auslöst (Doppelabsicherung).
+    info "Unterdrücke XDG-Autostart gnome-keyring für '$KIOSK_USER'..."
+    mkdir -p "$KIOSK_HOME/.config/autostart"
+    for keyring_desktop in gnome-keyring-secrets gnome-keyring-ssh gnome-keyring-pkcs11; do
+        printf '[Desktop Entry]\nHidden=true\n' \
+            > "$KIOSK_HOME/.config/autostart/${keyring_desktop}.desktop"
+    done
+    success "XDG-Autostart gnome-keyring deaktiviert (3 Override-Dateien)"
 
     # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
