@@ -369,6 +369,17 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
         2>&1 | grep -v "^$" || true
     success "Kiosk-Pakete installiert (Chromium: $CHROMIUM_PKG)"
 
+    # gnome-keyring deinstallieren.
+    # Der Daemon zeigt beim ersten Login eines neuen Users ohne bestehenden
+    # Keyring-Store einen "Passwort festlegen"-Dialog an – auf einem Kiosk
+    # inakzeptabel. Kein Passwort-Tresor wird benötigt.
+    # Deinstallation entfernt auch /etc/xdg/autostart/gnome-keyring-*.desktop.
+    if dpkg -l gnome-keyring 2>/dev/null | grep -q "^ii"; then
+        info "Deinstalliere gnome-keyring (auf Kiosk nicht benötigt)..."
+        apt-get remove -y gnome-keyring --quiet 2>&1 | grep -v "^$" || true
+        success "gnome-keyring deinstalliert"
+    fi
+
     # Chromium-Binary ermitteln
     CHROMIUM_BIN=""
     for bin in chromium chromium-browser; do
@@ -974,59 +985,6 @@ KIOSK_SCRIPT_EOF
         printf '%s\n' "$AUTOSTART_CONTENT" > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/autostart"
     done
     success "lxsession Autostart konfiguriert (LXDE-pi, rpd-x, LXDE)"
-
-    # ── 9d-2. lxsession desktop.conf – Keyring deaktivieren ─────────────────
-    # lxsession liest ~/.config/lxsession/<SESSION>/desktop.conf und
-    # überschreibt damit System-Defaults aus /etc/xdg/lxsession/rpd-x/.
-    # Ohne User-desktop.conf startet lxsession den gnome-keyring-daemon
-    # (keyring/command=ssh-agent) – dieser würde aber von PAM abgefangen
-    # (siehe 9b-2 unten). Dennoch als zusätzliche Absicherung setzen.
-    info "Erstelle lxsession desktop.conf für '$KIOSK_USER' (Keyring deaktiviert)..."
-    for SESSION_DIR in LXDE-pi rpd-x LXDE; do
-        cat > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/desktop.conf" << 'DCONF_EOF'
-# Noria Kiosk – lxsession desktop.conf
-# Generiert von scripts/install.sh
-# Keyring-Manager deaktiviert: kein gnome-keyring-daemon, keine Passwortabfrage.
-[Session]
-keyring/command=
-DCONF_EOF
-    done
-    success "lxsession desktop.conf erstellt (Keyring via lxsession deaktiviert)"
-
-    # ── 9b-2. PAM gnome-keyring Autostart deaktivieren ───────────────────────
-    # pam_gnome_keyring.so auto_start in /etc/pam.d/lightdm startet den
-    # Keyring-Daemon direkt beim PAM-Login – noch bevor lxsession läuft.
-    # Das löst beim ersten Login eines neuen Users ohne bestehenden Keyring
-    # einen "Neuen Schlüsselbund erstellen"-Dialog aus.
-    # Auf einem Kiosk ist jede Passwortabfrage inakzeptabel → auskommentieren.
-    PAM_LIGHTDM="/etc/pam.d/lightdm"
-    if [[ -f "$PAM_LIGHTDM" ]]; then
-        if grep -q "pam_gnome_keyring" "$PAM_LIGHTDM"; then
-            sed -i '/^[^#].*optional.*pam_gnome_keyring/s/^/# /' "$PAM_LIGHTDM"
-            sed -i '/^-[^#].*optional.*pam_gnome_keyring/s/^/# /' "$PAM_LIGHTDM"
-            success "PAM gnome-keyring Autostart deaktiviert ($PAM_LIGHTDM)"
-        else
-            info "PAM gnome-keyring bereits deaktiviert oder nicht vorhanden"
-        fi
-    fi
-    # Eventuell bestehenden Keyring-Store des kiosk-Users löschen damit
-    # kein alter Dialog-Zustand gespeichert bleibt.
-    rm -rf "$KIOSK_HOME/.local/share/keyrings/"
-    success "Keyring-Store geleert"
-
-    # ── 9b-3. XDG-Autostart gnome-keyring unterdrücken ───────────────────────
-    # /etc/xdg/autostart/gnome-keyring-*.desktop startet den Keyring-Daemon
-    # systemweit via lxsession. User-Override-Dateien mit Hidden=true in
-    # ~/.config/autostart/ verhindern dass lxsession diese Einträge ausführt.
-    # --password-store=basic in kiosk-start.sh verhindert zusätzlich dass
-    # Chromium selbst einen Keyring-Zugriff auslöst (Doppelabsicherung).
-    info "Unterdrücke XDG-Autostart gnome-keyring für '$KIOSK_USER'..."
-    mkdir -p "$KIOSK_HOME/.config/autostart"
-    for keyring_desktop in gnome-keyring-secrets gnome-keyring-ssh gnome-keyring-pkcs11; do
-        printf '[Desktop Entry]\nHidden=true\n' \
-            > "$KIOSK_HOME/.config/autostart/${keyring_desktop}.desktop"
-    done
-    success "XDG-Autostart gnome-keyring deaktiviert (3 Override-Dateien)"
 
     # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
