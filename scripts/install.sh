@@ -974,27 +974,44 @@ KIOSK_SCRIPT_EOF
     done
     success "lxsession Autostart konfiguriert (LXDE-pi, rpd-x, LXDE)"
 
-    # ── 9d-2. lxsession desktop.conf – Keyring und ssh-agent deaktivieren ──────
-    # lxsession liest beim Start ~/.config/lxsession/<SESSION>/desktop.conf und
-    # überschreibt damit die System-Defaults aus /etc/xdg/lxsession/rpd-x/.
-    # Die System-Config startet per keyring/command=ssh-agent den gnome-keyring-
-    # daemon, der beim ersten Login des kiosk-Users einen "Neuen Schlüsselbund
-    # erstellen"-Dialog zeigt und ein Passwort verlangt.
-    # Auf einem Kiosk ist jede Passwortabfrage inakzeptabel → deaktivieren.
-    # Alle drei SESSION_DIR-Varianten werden analog zur autostart-Datei befüllt.
+    # ── 9d-2. lxsession desktop.conf – Keyring deaktivieren ─────────────────
+    # lxsession liest ~/.config/lxsession/<SESSION>/desktop.conf und
+    # überschreibt damit System-Defaults aus /etc/xdg/lxsession/rpd-x/.
+    # Ohne User-desktop.conf startet lxsession den gnome-keyring-daemon
+    # (keyring/command=ssh-agent) – dieser würde aber von PAM abgefangen
+    # (siehe 9b-2 unten). Dennoch als zusätzliche Absicherung setzen.
     info "Erstelle lxsession desktop.conf für '$KIOSK_USER' (Keyring deaktiviert)..."
-    DESKTOP_CONF_CONTENT="# Noria Kiosk – lxsession desktop.conf
-# Generiert von scripts/install.sh
-# Überschreibt System-Defaults: Keyring und ssh-agent deaktiviert.
-# Auf einem Kiosk darf keine Passwortabfrage erscheinen.
-[Session]
-# Leer = kein Keyring-Manager, kein gnome-keyring-daemon, keine Passwortabfrage
-keyring/command="
-
     for SESSION_DIR in LXDE-pi rpd-x LXDE; do
-        printf '%s\n' "$DESKTOP_CONF_CONTENT" > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/desktop.conf"
+        cat > "$KIOSK_HOME/.config/lxsession/$SESSION_DIR/desktop.conf" << 'DCONF_EOF'
+# Noria Kiosk – lxsession desktop.conf
+# Generiert von scripts/install.sh
+# Keyring-Manager deaktiviert: kein gnome-keyring-daemon, keine Passwortabfrage.
+[Session]
+keyring/command=
+DCONF_EOF
     done
-    success "lxsession desktop.conf erstellt (Keyring-Dialog unterdrückt)"
+    success "lxsession desktop.conf erstellt (Keyring via lxsession deaktiviert)"
+
+    # ── 9b-2. PAM gnome-keyring Autostart deaktivieren ───────────────────────
+    # pam_gnome_keyring.so auto_start in /etc/pam.d/lightdm startet den
+    # Keyring-Daemon direkt beim PAM-Login – noch bevor lxsession läuft.
+    # Das löst beim ersten Login eines neuen Users ohne bestehenden Keyring
+    # einen "Neuen Schlüsselbund erstellen"-Dialog aus.
+    # Auf einem Kiosk ist jede Passwortabfrage inakzeptabel → auskommentieren.
+    PAM_LIGHTDM="/etc/pam.d/lightdm"
+    if [[ -f "$PAM_LIGHTDM" ]]; then
+        if grep -q "pam_gnome_keyring" "$PAM_LIGHTDM"; then
+            sed -i '/^[^#].*optional.*pam_gnome_keyring/s/^/# /' "$PAM_LIGHTDM"
+            sed -i '/^-[^#].*optional.*pam_gnome_keyring/s/^/# /' "$PAM_LIGHTDM"
+            success "PAM gnome-keyring Autostart deaktiviert ($PAM_LIGHTDM)"
+        else
+            info "PAM gnome-keyring bereits deaktiviert oder nicht vorhanden"
+        fi
+    fi
+    # Eventuell bestehenden Keyring-Store des kiosk-Users löschen damit
+    # kein alter Dialog-Zustand gespeichert bleibt.
+    rm -rf "$KIOSK_HOME/.local/share/keyrings/"
+    success "Keyring-Store geleert"
 
     # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
