@@ -881,9 +881,15 @@ EOF
     # --user-data-dir=/tmp/chromium-kiosk:
     #   Frisches Profil bei jedem Start → kein "Browser ist abgestürzt"-Dialog.
     #   /tmp wird bei Neustart geleert → kein Aufräumen nötig.
+    #   WICHTIG: Da das Profil-Verzeichnis /tmp ist, wird die persistente
+    #   ~/.config/chromium/Default/Preferences NICHT gelesen. Alle benötigten
+    #   Chromium-Einstellungen werden deshalb im Script vor dem Start direkt
+    #   in /tmp/chromium-kiosk/Default/Preferences geschrieben.
     #
-    # --disable-features=TranslateUI,Notifications:
-    #   Kein "Seite übersetzen?"-Popup, keine Browser-Benachrichtigungen.
+    # --disable-features=TranslateUI,Translate,Notifications:
+    #   Kein "Seite übersetzen?"-Popup.
+    #   TranslateUI = alter Feature-Name (Chromium < v91)
+    #   Translate   = aktueller Feature-Name (Chromium ≥ v91 / Raspberry Pi OS Trixie)
     info "Erstelle Kiosk-Wrapper-Script /opt/noria/kiosk-start.sh..."
     cat > "$INSTALL_DIR/kiosk-start.sh" << KIOSK_SCRIPT_EOF
 #!/usr/bin/env bash
@@ -923,6 +929,32 @@ xset s noblank    2>/dev/null || true
 # Maus-Cursor nach 0.5s Inaktivität ausblenden
 unclutter -idle 0.5 -root &
 
+# Chromium-Profil vorbereiten:
+# /tmp wird bei jedem Neustart geleert → Preferences müssen jedes Mal neu
+# gesetzt werden, bevor Chromium startet. Anderenfalls würde Chromium ein
+# komplett leeres Profil lesen und alle Dialoge (Übersetzen, Willkommen usw.)
+# wieder anzeigen.
+mkdir -p /tmp/chromium-kiosk/Default
+cat > /tmp/chromium-kiosk/Default/Preferences << 'PREFS_EOF'
+{
+   "browser": {
+      "has_seen_welcome_page": true,
+      "show_home_button": false
+   },
+   "profile": {
+      "exit_type": "Normal",
+      "exited_cleanly": true
+   },
+   "translate": {
+      "enabled": false
+   },
+   "session": {
+      "restore_on_startup": 4
+   }
+}
+PREFS_EOF
+echo "\$LOG_PREFIX Chromium-Profil vorbereitet (Übersetzungs-Prompt deaktiviert)"
+
 # Chromium im Kiosk-Modus starten
 # --kiosk:                  Vollbild, kein Schliessen, keine Adressleiste
 # --noerrdialogs:           Keine Absturz-Dialoge
@@ -931,13 +963,17 @@ unclutter -idle 0.5 -root &
 # --disable-pinch:          Touch-Zoom deaktiviert
 # --overscroll-history-navigation=0: Kein Zurück/Vor durch Wischen
 # --user-data-dir:          Frisches Profil pro Start (kein Absturz-Banner)
+# --disable-features=TranslateUI,Translate:
+#   Kein "Seite übersetzen?"-Popup.
+#   TranslateUI = alter Feature-Name (Chromium < v91)
+#   Translate   = aktueller Feature-Name (Chromium ≥ v91 / Pi OS Trixie)
+#   Doppelt gesetzt für maximale Kompatibilität.
 exec ${CHROMIUM_BIN} \\
     --kiosk \\
     --noerrdialogs \\
     --disable-infobars \\
     --no-first-run \\
-    --disable-translate \\
-    --disable-features=TranslateUI,Notifications,PasswordManager \\
+    --disable-features=TranslateUI,Translate,Notifications,PasswordManager \\
     --disable-session-crashed-bubble \\
     --check-for-update-interval=31536000 \\
     --disable-pinch \\
@@ -980,9 +1016,13 @@ KIOSK_SCRIPT_EOF
     # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
     # beendet" an und blockiert. exit_type=Normal und exited_cleanly=true
     # unterdrücken diesen Dialog.
-    # Hinweis: --user-data-dir=/tmp/chromium-kiosk im Start-Script macht
-    # dies im Normalbetrieb überflüssig, aber als Fallback trotzdem sinnvoll.
-    info "Erstelle Chromium-Profil-Vorlage (kein Absturz-Dialog)..."
+    #
+    # HINWEIS: Da kiosk-start.sh mit --user-data-dir=/tmp/chromium-kiosk
+    # gestartet wird, wird DIESES Profil-Verzeichnis von Chromium NICHT gelesen.
+    # Die effektiven Einstellungen werden deshalb im kiosk-start.sh-Script direkt
+    # in /tmp/chromium-kiosk/Default/Preferences geschrieben (s.o.).
+    # Dieses Profil hier dient nur als Fallback falls user-data-dir geändert wird.
+    info "Erstelle Chromium-Profil-Vorlage (Fallback-Profil)..."
     CHROMIUM_PROFILE_DIR="$KIOSK_HOME/.config/chromium/Default"
     mkdir -p "$CHROMIUM_PROFILE_DIR"
     # Nur anlegen wenn nicht vorhanden (vorhandene Einstellungen erhalten)
@@ -997,12 +1037,15 @@ KIOSK_SCRIPT_EOF
       "exit_type": "Normal",
       "exited_cleanly": true
    },
+   "translate": {
+      "enabled": false
+   },
    "session": {
       "restore_on_startup": 4
    }
 }
 EOF
-        success "Chromium-Profil erstellt (kein Absturz-Banner)"
+        success "Chromium-Fallback-Profil erstellt"
     else
         info "Chromium-Profil bereits vorhanden – nicht überschrieben"
     fi
@@ -1010,13 +1053,20 @@ EOF
     # Alle kiosk-Home-Dateien dem kiosk-User zuweisen
     chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME"
 
-    # ── 9f. openbox-Konfiguration (kein Rechtsklick-Desktop-Menü) ─────────────
-    # openbox ist der Fenstermanager unter LXDE. Das Rechtsklick-Menü
+    # ── 9f. openbox-Konfiguration (kein Rechtsklick-Desktop-Menü, keine Tasten) ──
+    # openbox ist der Fenstermanager unter LXDE/rpd-x. Das Rechtsklick-Menü
     # auf dem Desktop würde Zugriff auf Programme ermöglichen.
+    #
+    # WICHTIG: rc.xml wird vollständig aus einem eigenen Template geschrieben,
+    # NICHT durch Patching der System-rc.xml. Das Patching via Python ElementTree
+    # ist unzuverlässig, weil ET beim Zurückschreiben von XML mit Default-Namespace
+    # (xmlns="http://openbox.org/3.4/rc") Namespace-Prefixe wie ns0: einfügen kann,
+    # was die Datei für openbox unlesbar macht und das Patching still fehlschlägt.
     OPENBOX_CONFIG_DIR="$KIOSK_HOME/.config/openbox"
     if [[ -d /etc/xdg/openbox ]]; then
-        info "Konfiguriere openbox (kein Desktop-Kontextmenü)..."
+        info "Konfiguriere openbox (Tastensperren + kein Desktop-Kontextmenü)..."
         mkdir -p "$OPENBOX_CONFIG_DIR"
+
         # Leere menu.xml → kein Rechtsklick-Menü
         cat > "$OPENBOX_CONFIG_DIR/menu.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1024,45 +1074,190 @@ EOF
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
 </openbox_menu>
 EOF
-        # rc.xml: Gefährliche Tastenkürzel deaktivieren
-        # Kopiere System-rc.xml als Basis, dann per Python XML-Parser anpassen.
-        # Deaktiviert werden:
-        #   A-F4       → Fenster schließen (würde Chromium-Kiosk beenden)
+
+        # Vollständige rc.xml aus eigenem Template.
+        # Gesperrte Tasten im Kiosk-Betrieb:
+        #   A-F4       → Fenster schließen  (würde Chromium beenden)
         #   W-d / W-D  → Desktop anzeigen
-        #   W-e        → Dateimanager
-        if [[ -f /etc/xdg/openbox/rc.xml ]]; then
-            cp /etc/xdg/openbox/rc.xml "$OPENBOX_CONFIG_DIR/rc.xml"
-            python3 - "$OPENBOX_CONFIG_DIR/rc.xml" << 'RCXML_EOF'
-import sys, xml.etree.ElementTree as ET
+        #   W-e        → Dateimanager öffnen
+        #   C-A-t      → Terminal öffnen
+        #   C-A-F2..F6 → Wechsel zu virtuellen Terminals
+        #   A-Tab      → Fensterwechsel (nur ein Fenster im Kiosk sinnvoll)
+        cat > "$OPENBOX_CONFIG_DIR/rc.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Noria Kiosk – openbox-Konfiguration
+  Generiert von scripts/install.sh – nicht manuell editieren.
+-->
+<openbox_config xmlns="http://openbox.org/3.4/rc"
+                xmlns:xi="http://www.w3.org/2001/XInclude">
 
-RC_FILE = sys.argv[1]
-# Tasten die auf einem Kiosk keine Funktion haben dürfen
-DISABLE_KEYS = {"A-F4", "W-d", "W-D", "W-e"}
+  <resistance>
+    <strength>10</strength>
+    <screen_edge_strength>20</screen_edge_strength>
+  </resistance>
 
-ET.register_namespace("", "http://openbox.org/3.4/rc")
-tree = ET.parse(RC_FILE)
-root = tree.getroot()
-ns = {"ob": "http://openbox.org/3.4/rc"}
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>no</followMouse>
+    <focusLast>yes</focusLast>
+    <underMouse>no</underMouse>
+    <focusDelay>200</focusDelay>
+    <raiseOnFocus>no</raiseOnFocus>
+  </focus>
 
-keyboard = root.find("ob:keyboard", ns)
-if keyboard is not None:
-    for keybind in list(keyboard.findall("ob:keybind", ns)):
-        key = keybind.get("key", "")
-        if key in DISABLE_KEYS:
-            # Alle Actions entfernen und durch No-Op ersetzen
-            for child in list(keybind):
-                keybind.remove(child)
-            noop = ET.SubElement(keybind, "action")
-            noop.set("name", "Execute")
-            cmd = ET.SubElement(noop, "execute")
-            cmd.text = "true"
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+    <monitor>Primary</monitor>
+    <primaryMonitor>1</primaryMonitor>
+  </placement>
 
-tree.write(RC_FILE, encoding="unicode", xml_declaration=True)
-RCXML_EOF
-            success "openbox rc.xml: A-F4 / W-d / W-e deaktiviert"
-        fi
+  <theme>
+    <font place="ActiveWindow">
+      <name>Sans</name>
+      <size>9</size>
+    </font>
+    <font place="InactiveWindow">
+      <name>Sans</name>
+      <size>9</size>
+    </font>
+  </theme>
+
+  <desktops>
+    <number>1</number>
+    <firstdesk>1</firstdesk>
+    <names><name>Desktop</name></names>
+    <popupTime>0</popupTime>
+  </desktops>
+
+  <resize>
+    <drawContents>yes</drawContents>
+    <popupShow>NonPixel</popupShow>
+    <popupPosition>Center</popupPosition>
+    <popupFixedPosition>
+      <x>10</x>
+      <y>10</y>
+    </popupFixedPosition>
+  </resize>
+
+  <applications>
+    <!-- Chromium immer vollständig maximiert und ohne Fensterrahmen starten -->
+    <application class="Chromium-browser" type="normal">
+      <maximized>yes</maximized>
+      <decor>no</decor>
+    </application>
+    <application class="chromium" type="normal">
+      <maximized>yes</maximized>
+      <decor>no</decor>
+    </application>
+  </applications>
+
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!--   GESPERRTE TASTEN – kein Benutzer-Zugriff im Kiosk   -->
+    <!-- ══════════════════════════════════════════════════════ -->
+
+    <!-- Alt+F4: Fenster schließen → No-Op -->
+    <keybind key="A-F4">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+    <!-- Super+D / Super+d: Desktop anzeigen → No-Op -->
+    <keybind key="W-d">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="W-D">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+    <!-- Super+E: Dateimanager → No-Op -->
+    <keybind key="W-e">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+    <!-- Ctrl+Alt+T: Terminal → No-Op -->
+    <keybind key="C-A-t">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+    <!-- Ctrl+Alt+F2..F6: Wechsel zu virtuellen Terminals → No-Op -->
+    <keybind key="C-A-F2">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="C-A-F3">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="C-A-F4">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="C-A-F5">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="C-A-F6">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+    <!-- Alt+Tab / Alt+Shift+Tab: Fensterwechsel → No-Op -->
+    <keybind key="A-Tab">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+    <keybind key="A-S-Tab">
+      <action name="Execute"><execute>true</execute></action>
+    </keybind>
+
+  </keyboard>
+
+  <mouse>
+    <dragThreshold>1</dragThreshold>
+    <doubleClickTime>200</doubleClickTime>
+    <screenEdgeWarpTime>0</screenEdgeWarpTime>
+    <screenEdgeWarpMouse>false</screenEdgeWarpMouse>
+
+    <context name="Frame">
+      <mousebind button="A-Left" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="A-Left" action="Drag">
+        <action name="Move"/>
+      </mousebind>
+      <mousebind button="A-Right" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+        <action name="Unshade"/>
+      </mousebind>
+      <mousebind button="A-Right" action="Drag">
+        <action name="Resize"/>
+      </mousebind>
+    </context>
+
+    <context name="Desktop">
+      <!-- Kein Rechtsklick-Kontextmenü auf dem Desktop -->
+    </context>
+
+    <context name="Root">
+      <!-- Kein Rechtsklick-Kontextmenü -->
+    </context>
+
+  </mouse>
+
+  <menu>
+    <hideDelay>200</hideDelay>
+    <middle>no</middle>
+    <submenuShowDelay>100</submenuShowDelay>
+    <submenuHideDelay>400</submenuHideDelay>
+    <applicationIcons>yes</applicationIcons>
+    <manageDesktops>no</manageDesktops>
+  </menu>
+
+</openbox_config>
+EOF
+        success "openbox rc.xml geschrieben: A-F4, C-A-t, A-Tab und weitere Tasten gesperrt"
         chown -R "$KIOSK_USER:$KIOSK_USER" "$OPENBOX_CONFIG_DIR"
-        success "openbox konfiguriert (kein Desktop-Kontextmenü)"
+        success "openbox vollständig konfiguriert (kein Desktop-Kontextmenü)"
     fi
 
     KIOSK_OK=true
