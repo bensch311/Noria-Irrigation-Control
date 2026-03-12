@@ -1747,6 +1747,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             )
 
             @render.download(
+                label="Logs herunterladen",
                 filename=lambda: (
                     f"noria-logs-{datetime.datetime.now().strftime('%Y-%m-%d')}.zip"
                 ),
@@ -1787,13 +1788,6 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         duration=5,
                     )
                     yield b""
-
-            ui.download_button(
-                "_download_logs",
-                label="Logs herunterladen",
-                icon=icon("download"),
-                class_="btn-outline-secondary",
-            )
 
         # ----- Speichern -----------------------------------------------------
         @reactive.effect
