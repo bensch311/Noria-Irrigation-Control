@@ -1040,61 +1040,14 @@ EOF
     done
     success "lxsession Autostart konfiguriert (LXDE-pi, rpd-x, LXDE)"
 
-    # ── 9e. Chromium-Profil vorbereiten (kein "Browser abgestürzt"-Dialog) ────
-    # Chromium zeigt nach einem harten Stromausfall "Browser nicht sauber
-    # beendet" an und blockiert. exit_type=Normal und exited_cleanly=true
-    # unterdrücken diesen Dialog.
-    #
-    # HINWEIS: Da kiosk-start.sh mit --user-data-dir=/tmp/chromium-kiosk
-    # gestartet wird, wird DIESES Profil-Verzeichnis von Chromium NICHT gelesen.
-    # Die effektiven Einstellungen werden deshalb im kiosk-start.sh-Script direkt
-    # in /tmp/chromium-kiosk/Default/Preferences geschrieben (s.o.).
-    # Dieses Profil hier dient nur als Fallback falls user-data-dir geändert wird.
-    info "Erstelle Chromium-Profil-Vorlage (Fallback-Profil)..."
-    CHROMIUM_PROFILE_DIR="$KIOSK_HOME/.config/chromium/Default"
-    mkdir -p "$CHROMIUM_PROFILE_DIR"
-    # Nur anlegen wenn nicht vorhanden (vorhandene Einstellungen erhalten)
-    if [[ ! -f "$CHROMIUM_PROFILE_DIR/Preferences" ]]; then
-        cat > "$CHROMIUM_PROFILE_DIR/Preferences" << 'EOF'
-{
-   "browser": {
-      "has_seen_welcome_page": true,
-      "show_home_button": false
-   },
-   "profile": {
-      "exit_type": "Normal",
-      "exited_cleanly": true
-   },
-   "translate": {
-      "enabled": false
-   },
-   "session": {
-      "restore_on_startup": 4
-   }
-}
-EOF
-        success "Chromium-Fallback-Profil erstellt"
-    else
-        info "Chromium-Profil bereits vorhanden – nicht überschrieben"
-    fi
-
     # Alle kiosk-Home-Dateien dem kiosk-User zuweisen
     chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME"
 
     # ── 9f. openbox-Konfiguration (kein Rechtsklick-Desktop-Menü, keine Tasten) ──
-    # openbox ist der Fenstermanager unter LXDE/rpd-x. Das Rechtsklick-Menü
-    # auf dem Desktop würde Zugriff auf Programme ermöglichen.
-    #
-    # WICHTIG: rc.xml wird vollständig aus einem eigenen Template geschrieben,
-    # NICHT durch Patching der System-rc.xml. Das Patching via Python ElementTree
-    # ist unzuverlässig, weil ET beim Zurückschreiben von XML mit Default-Namespace
-    # (xmlns="http://openbox.org/3.4/rc") Namespace-Prefixe wie ns0: einfügen kann,
-    # was die Datei für openbox unlesbar macht und das Patching still fehlschlägt.
+    # openbox ist der Fenstermanager unter LXDE/rpd-x.
+    # rc.xml wird vollständig aus eigenem Template geschrieben (nicht aus
+    # /etc/xdg/openbox/ kopiert, da dieses Verzeichnis versionsabhängig fehlen kann).
     OPENBOX_CONFIG_DIR="$KIOSK_HOME/.config/openbox"
-    # Guard [[ -d /etc/xdg/openbox ]] entfernt: openbox wird durch rpd-x-core
-    # immer mitinstalliert; das Config-Verzeichnis /etc/xdg/openbox ist auf
-    # manchen Pi-OS-Versionen nicht vorhanden, obwohl openbox läuft. Die
-    # Benutzerkonfiguration in ~/.config/openbox/ schreiben wir daher immer.
     info "Konfiguriere openbox (Tastensperren + kein Desktop-Kontextmenü)..."
     mkdir -p "$OPENBOX_CONFIG_DIR"
 
