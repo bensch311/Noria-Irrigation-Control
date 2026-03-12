@@ -38,7 +38,7 @@ set -uo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
+BLUE='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'  # No Color
 
@@ -345,7 +345,7 @@ fi
 # Kiosk-spezifische Pakete und Benutzer
 if [[ "$KIOSK_MODE" == "true" ]]; then
     echo
-    info "Installiere Kiosk-Pakete (chromium, rpd-x-core, unclutter, curl, x11-xserver-utils)..."
+    info "Installiere Kiosk-Pakete (chromium, rpd-x-core, unclutter, xbindkeys, curl, x11-xserver-utils)..."
 
     # Chromium: Paketname variiert je nach Pi OS Version
     # Bookworm: 'chromium', Bullseye: 'chromium-browser'
@@ -364,6 +364,7 @@ if [[ "$KIOSK_MODE" == "true" ]]; then
         "$CHROMIUM_PKG" \
         rpd-x-core \
         unclutter \
+        xbindkeys \
         curl \
         x11-xserver-utils \
         --quiet \
@@ -997,12 +998,39 @@ KIOSK_SCRIPT_EOF
     #   LXDE     → generischer Fallback
     # @-Präfix: lxsession startet den Prozess neu falls er beendet wird.
     info "Konfiguriere lxsession Autostart für '$KIOSK_USER'..."
+
+    # xbindkeys-Konfiguration schreiben – BEVOR der Autostart die Datei referenziert.
+    # xbindkeys arbeitet auf X11-Ebene, unabhängig vom Fenstermanager.
+    # Es fängt Alt+F4 systemweit ab und ersetzt es durch einen No-Op (true).
+    # Das ist die zweite Sicherheitsstufe gegen ungewolltes Schliessen von Chromium,
+    # zusätzlich zur openbox rc.xml-Sperre (9f).
+    XBINDKEYS_RC="$KIOSK_HOME/.config/xbindkeysrc"
+    cat > "$XBINDKEYS_RC" << 'EOF'
+# Noria Kiosk – xbindkeys-Konfiguration
+# Generiert von scripts/install.sh – nicht manuell editieren.
+# Fängt Tastenkombinationen auf X11-Ebene ab (vor dem Fenstermanager).
+
+# Alt+F4: Fenster schliessen → No-Op (Chromium-Kiosk darf nicht beendet werden)
+"true"
+  alt + F4
+EOF
+    chown "$KIOSK_USER:$KIOSK_USER" "$XBINDKEYS_RC"
+    success "xbindkeys-Konfiguration geschrieben: $XBINDKEYS_RC"
+
+    # Autostart-Inhalt.
+    # Reihenfolge ist wichtig:
+    #   1. xset – Screensaver/DPMS deaktivieren (X11-Server-Einstellungen)
+    #   2. xbindkeys – Tasten sperren, bevor Chromium startet
+    #   3. kiosk-start.sh – Chromium starten (startet bei Absturz automatisch neu)
+    # @-Präfix: lxsession startet den Prozess neu falls er beendet wird.
     AUTOSTART_CONTENT="# Noria Kiosk – lxsession Autostart
 # Generiert von scripts/install.sh
 # Desktop-Elemente deaktivieren
 @xset s off
 @xset -dpms
 @xset s noblank
+# Alt+F4 und weitere Tasten auf X11-Ebene sperren (Schicht 2, unabh. von openbox)
+@xbindkeys --file $KIOSK_HOME/.config/xbindkeysrc
 # Kiosk-Browser starten (wird bei Absturz automatisch neu gestartet)
 @$INSTALL_DIR/kiosk-start.sh"
 
@@ -1063,27 +1091,35 @@ EOF
     # (xmlns="http://openbox.org/3.4/rc") Namespace-Prefixe wie ns0: einfügen kann,
     # was die Datei für openbox unlesbar macht und das Patching still fehlschlägt.
     OPENBOX_CONFIG_DIR="$KIOSK_HOME/.config/openbox"
-    if [[ -d /etc/xdg/openbox ]]; then
-        info "Konfiguriere openbox (Tastensperren + kein Desktop-Kontextmenü)..."
-        mkdir -p "$OPENBOX_CONFIG_DIR"
+    # Guard [[ -d /etc/xdg/openbox ]] entfernt: openbox wird durch rpd-x-core
+    # immer mitinstalliert; das Config-Verzeichnis /etc/xdg/openbox ist auf
+    # manchen Pi-OS-Versionen nicht vorhanden, obwohl openbox läuft. Die
+    # Benutzerkonfiguration in ~/.config/openbox/ schreiben wir daher immer.
+    info "Konfiguriere openbox (Tastensperren + kein Desktop-Kontextmenü)..."
+    mkdir -p "$OPENBOX_CONFIG_DIR"
 
-        # Leere menu.xml → kein Rechtsklick-Menü
-        cat > "$OPENBOX_CONFIG_DIR/menu.xml" << 'EOF'
+    # Leere menu.xml → kein Rechtsklick-Menü
+    cat > "$OPENBOX_CONFIG_DIR/menu.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Noria Kiosk: Rechtsklick-Menü deaktiviert -->
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
 </openbox_menu>
 EOF
 
-        # Vollständige rc.xml aus eigenem Template.
-        # Gesperrte Tasten im Kiosk-Betrieb:
-        #   A-F4       → Fenster schließen  (würde Chromium beenden)
-        #   W-d / W-D  → Desktop anzeigen
-        #   W-e        → Dateimanager öffnen
-        #   C-A-t      → Terminal öffnen
-        #   C-A-F2..F6 → Wechsel zu virtuellen Terminals
-        #   A-Tab      → Fensterwechsel (nur ein Fenster im Kiosk sinnvoll)
-        cat > "$OPENBOX_CONFIG_DIR/rc.xml" << 'EOF'
+    # Vollständige rc.xml aus eigenem Template.
+    # Gesperrte Tasten im Kiosk-Betrieb:
+    #   A-F4       → Fenster schließen  (würde Chromium beenden)
+    #   W-d / W-D  → Desktop anzeigen
+    #   W-e        → Dateimanager öffnen
+    #   C-A-t      → Terminal öffnen
+    #   C-A-F2..F6 → Wechsel zu virtuellen Terminals
+    #   A-Tab      → Fensterwechsel (nur ein Fenster im Kiosk sinnvoll)
+    #
+    # <closable>no</closable>: openbox sendet bei A-F4 ein WM_DELETE_WINDOW
+    # an das Fenster. Mit closable=no wird dieses Ereignis für Chromium
+    # komplett unterdrückt – dritte Sicherheitsstufe hinter xbindkeys und
+    # dem Keybind-No-Op weiter oben.
+    cat > "$OPENBOX_CONFIG_DIR/rc.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Noria Kiosk – openbox-Konfiguration
@@ -1142,14 +1178,16 @@ EOF
   </resize>
 
   <applications>
-    <!-- Chromium immer vollständig maximiert und ohne Fensterrahmen starten -->
+    <!-- Chromium immer vollständig maximiert, ohne Fensterrahmen und nicht schliessbar -->
     <application class="Chromium-browser" type="normal">
       <maximized>yes</maximized>
       <decor>no</decor>
+      <closable>no</closable>
     </application>
     <application class="chromium" type="normal">
       <maximized>yes</maximized>
       <decor>no</decor>
+      <closable>no</closable>
     </application>
   </applications>
 
@@ -1255,10 +1293,9 @@ EOF
 
 </openbox_config>
 EOF
-        success "openbox rc.xml geschrieben: A-F4, C-A-t, A-Tab und weitere Tasten gesperrt"
-        chown -R "$KIOSK_USER:$KIOSK_USER" "$OPENBOX_CONFIG_DIR"
-        success "openbox vollständig konfiguriert (kein Desktop-Kontextmenü)"
-    fi
+    success "openbox rc.xml geschrieben: A-F4, C-A-t, A-Tab und weitere Tasten gesperrt"
+    chown -R "$KIOSK_USER:$KIOSK_USER" "$OPENBOX_CONFIG_DIR"
+    success "openbox vollständig konfiguriert (kein Desktop-Kontextmenü)"
 
     KIOSK_OK=true
     success "Kiosk-Modus vollständig konfiguriert"
