@@ -93,6 +93,7 @@ HTTP-Status ist immer `200`. Das `ok`-Feld ist das eigentliche Gesundheitssignal
   "ok": true,
   "service": "irrigation",
   "version": 1,
+  "app_version": "0.10.0",
   "ts": "2025-03-05T09:00:00+01:00",
   "running_zones": [1, 3],
   "queue_length": 2,
@@ -102,6 +103,8 @@ HTTP-Status ist immer `200`. Das `ok`-Feld ist das eigentliche Gesundheitssignal
   "hw_fault_reason": "",
   "hw_fault_zone": null,
   "hw_fault_since": "",
+  "unclean_restart": false,
+  "restart_detected_at": "",
   "valves": {
     "valve_driver": "rpi",
     "configured_driver_mode": "rpi",
@@ -119,16 +122,43 @@ HTTP-Status ist immer `200`. Das `ok`-Feld ist das eigentliche Gesundheitssignal
 | Feld | Beschreibung |
 |---|---|
 | `ok` | `false` wenn `hw_faulted=true`, sonst `true` |
+| `app_version` | Noria Software-Version (SemVer) |
 | `hw_faulted` | `true` = Hardware-Fault aktiv, Start gesperrt |
 | `hw_fault_reason` | Ursache des Faults (z.B. GPIO-Fehlermeldung) |
 | `hw_fault_zone` | Zone die den Fault ausgelöst hat |
 | `hw_fault_since` | Zeitstempel des Fault-Beginns |
+| `unclean_restart` | `true` = letzter Shutdown nicht sauber (Stromausfall/Crash) |
+| `restart_detected_at` | ISO-8601-Zeitstempel des erkannten Neustarts (`""` wenn sauber) |
 | `missing_zones` | Zonen ohne GPIO-Pin-Konfiguration (nur bei `driver=rpi`) |
 | `gpio_config_valid` | `false` wenn Pins fehlen oder ungültig sind |
 
 **curl:**
 ```bash
 curl http://localhost:8000/health
+```
+
+---
+
+### POST /system/ack-restart
+
+Neustart-Hinweis quittieren. **API-Key erforderlich.**
+
+Setzt `unclean_restart=false` zurück, nachdem der Bediener den Hinweis zur Kenntnis
+genommen hat. Das Frontend-Modal schließt sich beim nächsten Poll automatisch.
+
+Idempotent: mehrfache Aufrufe sind harmlos.
+
+**Request:** kein Body erforderlich.
+
+**Response:**
+```json
+{"ok": true}
+```
+
+**curl:**
+```bash
+curl -X POST http://localhost:8000/system/ack-restart \
+  -H "X-API-Key: <key>"
 ```
 
 ---

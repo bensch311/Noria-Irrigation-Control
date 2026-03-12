@@ -7,7 +7,7 @@ Dieses Modul instanziiert die FastAPI-App und konfiguriert:
   - CORS (CORSMiddleware)
   - Security-Header (SecurityHeadersMiddleware)
   - Exception-Handler (errors.py)
-  - Alle API-Router (health, queue, schedule, control, history, settings)
+  - Alle API-Router (health, system, queue, schedule, control, history, settings)
 
 Der Lifecycle (Startup/Shutdown) wird vollständig in core/lifecycle.py verwaltet.
 Die App wird von uvicorn gestartet, typischerweise via systemd-Service.
@@ -34,6 +34,7 @@ from core.limiter import limiter
 from core.config import ALLOWED_ORIGINS
 from api.errors import register_error_handlers
 from api.routes_health import router as health_router
+from api.routes_system import router as system_router
 from api.routes_queue import router as queue_router
 from api.routes_schedule import router as schedule_router
 from api.routes_control import router as control_router
@@ -107,6 +108,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 register_error_handlers(app)
 
 app.include_router(health_router)
+app.include_router(system_router)
 app.include_router(queue_router)
 app.include_router(schedule_router)
 app.include_router(control_router)

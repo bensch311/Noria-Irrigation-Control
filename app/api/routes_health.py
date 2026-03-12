@@ -15,12 +15,14 @@ Response-Felder:
   ok                  – False wenn hw_faulted=True, sonst True
   service             – immer "irrigation"
   version             – API-Version (int)
-  app_version         – Noria Software-Version (SemVer-String, z.B. "0.9.0")
+  app_version         – Noria Software-Version (SemVer-String, z.B. "0.10.0")
   ts                  – aktueller ISO-8601-Zeitstempel
   running_zones       – sortierte Liste aktiver Zonen
   queue_length        – Anzahl Items in der Queue
   hw_faulted          – True wenn Hardware-Fault aktiv (Start gesperrt)
   hw_fault_*          – Fault-Details (reason, zone, since)
+  unclean_restart     – True wenn letzter Shutdown nicht sauber war (Stromausfall/Crash)
+  restart_detected_at – ISO-8601-Zeitstempel des erkannten Neustarts ("" wenn sauber)
   valves.*            – Treiber-Konfiguration und GPIO-Validierung
 """
 from fastapi import APIRouter
@@ -61,6 +63,10 @@ def health():
         hw_fault_zone = getattr(state, "hw_fault_zone", None)
         hw_fault_since = str(getattr(state, "hw_fault_since", ""))
 
+        # Neustart-Erkennung: gesetzt wenn letzter Shutdown nicht sauber war
+        unclean_restart = bool(getattr(state, "unclean_restart", False))
+        restart_detected_at = str(getattr(state, "restart_detected_at", ""))
+
     configured_zones = sorted([int(z) for z in pins_by_zone.keys() if int(z) >= 1])
     required_zones = list(range(1, max_valves + 1))
     missing_zones = [z for z in required_zones if z not in set(configured_zones)]
@@ -87,6 +93,10 @@ def health():
         "hw_fault_reason": hw_fault_reason,
         "hw_fault_zone": hw_fault_zone,
         "hw_fault_since": hw_fault_since,
+        # Neustart-Erkennung: Frontend zeigt Modal wenn unclean_restart=True.
+        # Wird über POST /system/ack-restart quittiert.
+        "unclean_restart": unclean_restart,
+        "restart_detected_at": restart_detected_at,
         "valves": {
             "valve_driver": driver_name,
             "configured_driver_mode": mode,

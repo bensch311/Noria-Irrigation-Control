@@ -117,6 +117,7 @@ class RunState:
       - Device-Konfiguration:  max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
       - User-Settings:         max_history_items, navbar_title, accent_color, …
       - Hard-Limits:           hard_max_runtime_s, hard_max_concurrent_valves
+      - Neustart-Erkennung:    unclean_restart, restart_detected_at
       - Verlauf:               run_history
     """
 
@@ -183,6 +184,14 @@ class RunState:
     # Diese Limits überschreiben User-Eingaben im Route-Handler.
     hard_max_runtime_s: int = 60 * 60           # maximale Einzellaufzeit in Sekunden
     hard_max_concurrent_valves: int = 2         # maximale parallele Ventile (Hardware-Limit)
+
+    # ── Neustart-Erkennung (Sentinel-File-Muster) ─────────────────────────────
+    # unclean_restart=True: letzter Shutdown war nicht sauber (Stromausfall/SIGKILL/OOM).
+    # Wird beim Startup gesetzt wenn running.lock noch existiert (→ kein sauberer Shutdown).
+    # Wird über POST /system/ack-restart quittiert (setzt beide Felder zurück).
+    # Rein in-memory: überlebt keinen weiteren Neustart (dann wird neu geprüft).
+    unclean_restart: bool = False
+    restart_detected_at: str = ""     # ISO-8601-Zeitstempel des erkannten Neustarts
 
     # ── Verlauf ───────────────────────────────────────────────────────────────
     run_history: List[HistoryItem] | None = None

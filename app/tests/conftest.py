@@ -196,6 +196,7 @@ def app():
     """
     from api.errors import register_error_handlers
     from api.routes_health import router as health_router
+    from api.routes_system import router as system_router
     from api.routes_queue import router as queue_router
     from api.routes_schedule import router as schedule_router
     from api.routes_control import router as control_router
@@ -223,6 +224,7 @@ def app():
 
     register_error_handlers(_app)
     _app.include_router(health_router)
+    _app.include_router(system_router)
     _app.include_router(queue_router)
     _app.include_router(schedule_router)
     _app.include_router(control_router)

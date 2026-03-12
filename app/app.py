@@ -199,12 +199,23 @@ def _bump_history():  _history_trigger.set(_history_trigger.get() + 1)
 
 # --- Backend-Health ----------------------------------------------------------
 
-def _ping_health() -> bool:
+def _ping_health() -> tuple[bool, dict]:
+    """Fragt /health ab. Gibt (is_ok, health_data) zurück.
+
+    is_ok:       True wenn Backend erreichbar und ok=True
+    health_data: vollständiger Response-Body, {} bei Fehler oder HTTP != 200
+
+    Ein einzelner Request pro Poll-Zyklus – wird von _health_poll() ausgewertet
+    um gleichzeitig Backend-Erreichbarkeit UND Neustart-Erkennung zu prüfen.
+    """
     try:
         r = _session.get(BASE_URL + "/health", timeout=HEALTH_TIMEOUT_S)
-        return r.status_code == 200 and bool(r.json().get("ok", False))
+        if r.status_code != 200:
+            return False, {}
+        data = r.json()
+        return bool(data.get("ok", False)), data
     except Exception:
-        return False
+        return False, {}
 
 def _show_backend_modal():
     if _backend_modal_open.get():
@@ -225,6 +236,57 @@ def _show_backend_modal():
             # Ein OK-Button waere irrefuehrend, weil er das Modal nur client-
             # seitig schliessen wuerde und _health_poll es sofort wieder oeffnen.
             footer=None,
+        )
+    )
+
+
+def _show_restart_modal(health_data: dict):
+    """Zeigt das Neustart-Erkennungs-Modal einmalig an.
+
+    Wird von _health_poll() aufgerufen wenn unclean_restart=True im ersten
+    erfolgreichen /health-Response erkannt wird.
+    Der Bediener bestätigt mit 'Verstanden' → _h_ack_restart() → ACK an Backend.
+    """
+    detected_at = health_data.get("restart_detected_at", "")
+    ui.modal_show(
+        ui.modal(
+            ui.div(
+                ui.tags.p(
+                    "Noria wurde unerwartet neu gestartet "
+                    "(z.\u00a0B. durch einen Stromausfall oder Systemabsturz). "
+                    "Laufende Bewaesserungen wurden dabei unterbrochen.",
+                ),
+                ui.tags.p(
+                    "Alle Ventile wurden beim Neustart automatisch geschlossen. "
+                    "Bitte pruefen Sie, ob alle Zonen korrekt bewaessert wurden "
+                    "und starten Sie ausstehende Bewässerungen ggf. manuell.",
+                    class_="text-muted small",
+                ),
+                *(
+                    [ui.tags.p(
+                        ui.tags.b("Erkannt: "),
+                        detected_at.replace("T", " ")[:19],
+                        class_="text-muted small font-monospace",
+                    )]
+                    if detected_at else []
+                ),
+            ),
+            title=ui.div(
+                ui.tags.i(class_="bi bi-lightning-fill me-2", style="color:#f59e0b;"),
+                "Unerwarteter Neustart erkannt",
+            ),
+            footer=ui.div(
+                ui.input_action_button(
+                    "btn_ack_restart",
+                    ui.div(
+                        ui.tags.i(class_="bi bi-check2 me-1"),
+                        "Verstanden",
+                    ),
+                    class_="btn btn-primary",
+                ),
+            ),
+            easy_close=False,
+            size="m",
         )
     )
 
@@ -300,6 +362,10 @@ _last_applied_dur_unit: reactive.Value = reactive.Value({})
 # Verhindert dass modal_show() bei jedem Poll-Zyklus erneut aufgerufen
 # wird und das Modal flackert. Übergang False→True öffnet, True→False schließt.
 _fault_modal_open: reactive.Value = reactive.Value(False)
+# Zustandsvariable für das Neustart-Erkennungs-Modal.
+# Verhindert wiederholtes Öffnen bei jedem Poll-Zyklus nach erkanntem unclean Restart.
+# Übergang False→True öffnet das Modal (in _health_poll), True bleibt bis ACK.
+_restart_modal_open: reactive.Value = reactive.Value(False)
 # Wird auf True gesetzt sobald Settings einmalig aus dem Backend geladen wurden.
 # Verhindert dass txt_navbar_title und clr_accent_color bei jedem Poll
 # den User-Input ueberschreiben.
@@ -308,13 +374,22 @@ _settings_initialized: reactive.Value = reactive.Value(False)
 @reactive.effect
 def _health_poll():
     reactive.invalidate_later(POLL_STATUS_S)
-    ok = _ping_health()
+    ok, health_data = _ping_health()
     if ok:
         _backend_fail_streak.set(0)
         _backend_ok.set(True)
         if _backend_modal_open.get():
             _backend_modal_open.set(False)
             ui.modal_remove()
+        # Neustart-Erkennung: Modal nur beim Übergang False→True öffnen.
+        # Kein Öffnen wenn das Backend-Modal noch aktiv ist (Modalkonflikt vermeiden).
+        if (
+            health_data.get("unclean_restart")
+            and not _restart_modal_open.get()
+            and not _backend_modal_open.get()
+        ):
+            _restart_modal_open.set(True)
+            _show_restart_modal(health_data)
     else:
         streak = _backend_fail_streak.get() + 1
         _backend_fail_streak.set(streak)
@@ -343,6 +418,22 @@ def _h_reload_key():
         ui.notification_show("API-Key scheint weiterhin falsch.", type="error", duration=4)
     else:
         ui.notification_show("Backend nicht erreichbar oder anderer Fehler.", type="warning", duration=4)
+
+
+@reactive.effect
+@reactive.event(input.btn_ack_restart)
+def _h_ack_restart():
+    """Quittiert den Neustart-Hinweis: sendet ACK an Backend und schliesst Modal."""
+    rv = _post("/system/ack-restart")
+    if rv and rv.ok:
+        _restart_modal_open.set(False)
+        ui.modal_remove()
+    else:
+        ui.notification_show(
+            "Quittierung fehlgeschlagen – bitte erneut versuchen.",
+            type="error",
+            duration=4,
+        )
 
 # =============================================================================
 # NAVBAR

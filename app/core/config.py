@@ -84,6 +84,12 @@ RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
 # Niemals in git einchecken – siehe .gitignore.
 API_KEY_FILE = os.path.join(DATA_DIR, "api_key.txt")
 
+# Sentinel-File für Neustart-Erkennung (Stromausfall / Crash-Detection).
+# Wird beim Startup angelegt und beim Shutdown als ERSTES gelöscht.
+# Existiert die Datei beim nächsten Start noch → unclean shutdown erkannt.
+# Muster: PostgreSQL WAL, SQLite lock-File, Redis RDB.
+RUNNING_LOCK_FILE = os.path.join(DATA_DIR, "running.lock")
+
 # ---------------------------------------------------------------------------
 # CORS: Erlaubte Origins für Browser-seitige Cross-Origin-Requests.
 #

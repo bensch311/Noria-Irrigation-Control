@@ -10,21 +10,31 @@ Startup-Reihenfolge (kritisch – nicht umstellen!):
   2. State initialisieren           (Defaults setzen)
   3. Konfigurationen laden          (device_config, user_settings, runtime_state)
   4. Persistierte Daten laden       (schedules, queue, history)
-  5. IO-Worker starten              (MUSS vor Hardware-Ops starten)
-  6. Fail-Safe close_all            (Ventile nach Absturz/Stromausfall schließen)
-  7. Runtime-State zurücksetzen     (active_runs leeren, paused=False)
-  8. Background-Threads starten     (timer_loop, scheduler_loop, persistence_loop)
-  9. Watchdog-Thread starten        (systemd WATCHDOG=1)
- 10. READY=1 an systemd senden
+  5. Sentinel-Check                 (running.lock → unclean_restart erkennen)
+  6. IO-Worker starten              (MUSS vor Hardware-Ops starten)
+  7. Fail-Safe close_all            (Ventile nach Absturz/Stromausfall schließen)
+  8. Runtime-State zurücksetzen     (active_runs leeren, paused=False)
+  9. Background-Threads starten     (timer_loop, scheduler_loop, persistence_loop)
+ 10. Watchdog-Thread starten        (systemd WATCHDOG=1)
+ 11. running.lock anlegen           (signalisiert: Service läuft sauber)
+ 12. READY=1 an systemd senden
 
 Shutdown-Reihenfolge:
-  1. STOPPING=1 an systemd senden
-  2. shutdown_event setzen           (alle Threads terminieren)
-  3. Fail-Safe close_all             (Ventile bei Shutdown schließen)
-  4. Dirty-State flushen             (letzte Saves für schedules/queue/history)
-  5. Background-Threads joinen       (max. 2s pro Thread)
-  6. IO-Worker stoppen               (ZULETZT – nach allen anderen Threads)
-  7. GPIO-Cleanup                    (Pins auf Input zurücksetzen)
+  1. running.lock löschen           (SOFORT – vor STOPPING=1; sichert saubere Erkennung)
+  2. STOPPING=1 an systemd senden
+  3. shutdown_event setzen           (alle Threads terminieren)
+  4. Fail-Safe close_all             (Ventile bei Shutdown schließen)
+  5. Dirty-State flushen             (letzte Saves für schedules/queue/history)
+  6. Background-Threads joinen       (max. 2s pro Thread)
+  7. IO-Worker stoppen               (ZULETZT – nach allen anderen Threads)
+  8. GPIO-Cleanup                    (Pins auf Input zurücksetzen)
+
+Sentinel-File-Muster (Neustart-Erkennung):
+  running.lock wird beim Start angelegt und beim Shutdown als ERSTES gelöscht.
+  Existiert die Datei beim nächsten Startup → letzter Shutdown war nicht sauber
+  (Stromausfall, SIGKILL, OOM-Kill). Der State-Wert unclean_restart wird gesetzt
+  und über POST /system/ack-restart quittiert. Muster analog zu PostgreSQL WAL,
+  SQLite lock-File und Redis RDB-Prüfung.
 
 systemd-Integration:
   Nutzt sd_notify() für READY=1, STOPPING=1 und WATCHDOG=1.
@@ -32,13 +42,20 @@ systemd-Integration:
   Erforderliche .service-Einstellungen: Type=notify, WatchdogSec=30.
 """
 
+import os
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime
 from fastapi import FastAPI
 
 from core.state import state, state_lock, shutdown_event, threads
 from core.logging import log_event, logger
-from core.config import DEFAULT_PARALLEL_ENABLED, MAX_CONCURRENT_VALVES
+from core.config import (
+    DEFAULT_PARALLEL_ENABLED,
+    MAX_CONCURRENT_VALVES,
+    RUNNING_LOCK_FILE,
+    TZ,
+)
 
 from services.persistence import (
     load_schedules_from_disk, load_queue_from_disk, load_history_from_disk,
@@ -100,13 +117,97 @@ def _watchdog_loop(shutdown_ev: threading.Event, interval_s: float = 10.0) -> No
     log_event("watchdog_loop_stopped", source="system")
 
 
+# ---------------------------------------------------------------------------
+# Sentinel-File-Hilfsfunktionen (Neustart-Erkennung)
+#
+# Muster: running.lock liegt in data/. Beim Start prüfen ob sie existiert
+# (= unclean shutdown). Beim Start anlegen, beim Shutdown sofort löschen.
+# ---------------------------------------------------------------------------
+
+def _check_sentinel_file() -> None:
+    """Prüft ob running.lock existiert – signalisiert unclean Shutdown.
+
+    Setzt state.unclean_restart=True wenn die Datei existiert (Stromausfall,
+    SIGKILL, OOM-Kill). Bei sauberem ersten Start ist die Datei nicht vorhanden.
+
+    Muss NACH den load_*_from_disk()-Aufrufen und VOR dem State-Reset aufgerufen
+    werden, damit das Flag beim Start korrekt gesetzt ist.
+    """
+    lock_exists = os.path.exists(RUNNING_LOCK_FILE)
+    now_str = datetime.now(TZ).isoformat(timespec="seconds")
+
+    with state_lock:
+        if lock_exists:
+            state.unclean_restart = True
+            state.restart_detected_at = now_str
+        else:
+            state.unclean_restart = False
+            state.restart_detected_at = ""
+
+    if lock_exists:
+        log_event(
+            "unclean_restart_detected",
+            source="system",
+            detected_at=now_str,
+        )
+    else:
+        log_event("clean_restart_detected", source="system")
+
+
+def _create_running_lock() -> None:
+    """Legt running.lock an – signalisiert dass der Service sauber läuft.
+
+    Wird kurz VOR READY=1 aufgerufen, nach Fail-Safe close_all und
+    State-Reset. Schreib-Fehler werden geloggt aber nicht als fatal behandelt
+    (der Service startet trotzdem; Neustart-Erkennung funktioniert nur nicht).
+    """
+    try:
+        with open(RUNNING_LOCK_FILE, "w", encoding="utf-8") as f:
+            f.write(datetime.now(TZ).isoformat(timespec="seconds"))
+        log_event("running_lock_created", source="system")
+    except Exception as e:
+        logger.exception("running.lock konnte nicht angelegt werden")
+        log_event(
+            "running_lock_create_failed",
+            level="error",
+            source="system",
+            error=repr(e),
+        )
+
+
+def _delete_running_lock() -> None:
+    """Löscht running.lock – signalisiert sauberen Shutdown.
+
+    Wird als ALLERERSTE Aktion im Shutdown aufgerufen, damit auch bei sehr
+    kurzen Shutdown-Fenstern (z.B. systemd TimeoutStopSec) die Datei weg ist,
+    bevor der Prozess beendet wird.
+
+    Best-effort: Fehler werden geloggt aber nicht weiter propagiert.
+    """
+    try:
+        if os.path.exists(RUNNING_LOCK_FILE):
+            os.remove(RUNNING_LOCK_FILE)
+            log_event("running_lock_deleted", source="system")
+    except Exception as e:
+        logger.exception("running.lock konnte nicht gelöscht werden")
+        log_event(
+            "running_lock_delete_failed",
+            level="error",
+            source="system",
+            error=repr(e),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # =========================================================================
     # STARTUP
+    # =========================================================================
 
-    # Sicherheit: API-Key laden/generieren (vor allem anderen)
+    # 1. Sicherheit: API-Key laden/generieren (vor allem anderen)
     load_or_create_api_key()
 
+    # 2. State initialisieren (Defaults setzen)
     with state_lock:
         state.queue = state.queue or []
         state.schedules = state.schedules or []
@@ -121,6 +222,7 @@ async def lifespan(app: FastAPI):
 
         state.paused = False
 
+    # 3. + 4. Konfigurationen und persistierte Daten laden
     load_device_config_from_disk()   # Admin hardware config (read-only)
     load_user_settings_from_disk()   # user editable settings
     load_runtime_state_from_disk()   # persisted runtime toggles
@@ -128,12 +230,17 @@ async def lifespan(app: FastAPI):
     load_queue_from_disk()
     load_history_from_disk()
 
-    # IO-Worker ZUERST starten (vor Hardware-Operationen!)
+    # 5. Sentinel-Check: Stromausfall / Crash-Erkennung
+    # Muss NACH load_*_from_disk() (DATA_DIR ist dann garantiert vorhanden)
+    # und VOR dem State-Reset aufgerufen werden.
+    _check_sentinel_file()
+
+    # 6. IO-Worker ZUERST starten (vor Hardware-Operationen!)
     io_worker = get_io_worker()
     io_worker.start()
     log_event("lifecycle_io_worker_started", source="system")
 
-    # FAIL-SAFE: after a crash/power loss, valves might be physically open.
+    # 7. FAIL-SAFE: after a crash/power loss, valves might be physically open.
     # Always try to close everything on startup (best effort).
     try:
         cmd = IOCommand(action="close_all")
@@ -161,7 +268,8 @@ async def lifespan(app: FastAPI):
             error=repr(e),
         )
 
-    # Reset runtime-only state (safety-first). Persisted queue/schedules/history remain.
+    # 8. Reset runtime-only state (safety-first). Persisted queue/schedules/history remain.
+    # unclean_restart bleibt erhalten – wird erst durch ACK zurückgesetzt.
     with state_lock:
         state.active_runs = {}
         state.paused = False
@@ -172,12 +280,13 @@ async def lifespan(app: FastAPI):
     shutdown_event.clear()
     threads.clear()
 
+    # 9. Background-Threads starten
     for fn, name in [(timer_loop, "timer_loop"), (scheduler_loop, "scheduler_loop"), (persistence_loop, "persistence_loop")]:
         th = threading.Thread(target=fn, daemon=True, name=name)
         th.start()
         threads.append(th)
 
-    # Watchdog-Thread: sendet periodisch WATCHDOG=1 an systemd.
+    # 10. Watchdog-Thread: sendet periodisch WATCHDOG=1 an systemd.
     # Läuft als Daemon-Thread, terminiert sauber wenn shutdown_event gesetzt wird.
     th_wd = threading.Thread(
         target=_watchdog_loop,
@@ -188,20 +297,33 @@ async def lifespan(app: FastAPI):
     th_wd.start()
     threads.append(th_wd)
 
+    # 11. running.lock anlegen (nach allem anderen, kurz vor READY=1)
+    # Ab diesem Punkt gilt: wenn der Prozess ohne sauberen Shutdown stirbt,
+    # wird beim nächsten Start unclean_restart erkannt.
+    _create_running_lock()
+
     log_event("service_start", source="system", version="v1", persistence=True)
 
-    # systemd signalisieren: Service ist bereit (Type=notify in .service-Datei)
+    # 12. systemd signalisieren: Service ist bereit (Type=notify in .service-Datei)
     _sd_notify("READY=1")
 
     yield
 
+    # =========================================================================
     # SHUTDOWN
-    # systemd signalisieren: Graceful Shutdown beginnt (stoppt Watchdog-Timer in systemd)
+    # =========================================================================
+
+    # 1. running.lock SOFORT löschen – allererste Shutdown-Aktion.
+    # Selbst bei sehr kurzem TimeoutStopSec ist die Datei damit garantiert weg,
+    # bevor der Prozess beendet wird → nächster Start erkennt sauberen Shutdown.
+    _delete_running_lock()
+
+    # 2. systemd signalisieren: Graceful Shutdown beginnt
     _sd_notify("STOPPING=1")
 
     shutdown_event.set()
 
-    # Best-effort: try to close everything on shutdown as well.
+    # 3. Best-effort: try to close everything on shutdown as well.
     try:
         cmd = IOCommand(action="close_all")
         result = io_worker.send_command(cmd, timeout_s=10.0)
@@ -228,6 +350,7 @@ async def lifespan(app: FastAPI):
             error=repr(e),
         )
 
+    # 4. Dirty-State flushen
     try:
         with state_lock:
             do_sched = bool(state.schedules_dirty)
@@ -245,13 +368,14 @@ async def lifespan(app: FastAPI):
         logger.exception("shutdown flush failed")
         log_event("shutdown_flush_error", level="error", source="system")
 
+    # 5. Background-Threads joinen
     for th in threads:
         try:
             th.join(timeout=2.0)
         except Exception:
             pass
 
-    # IO-Worker ZULETZT stoppen (nach allen anderen Threads)
+    # 6. IO-Worker ZULETZT stoppen (nach allen anderen Threads)
     try:
         io_worker.shutdown(timeout_s=5.0)
         log_event("lifecycle_io_worker_stopped", source="system")
@@ -264,7 +388,7 @@ async def lifespan(app: FastAPI):
             error=repr(e)
         )
 
-    # GPIO-Cleanup nach IO-Worker-Shutdown: Pins auf Input zurücksetzen.
+    # 7. GPIO-Cleanup nach IO-Worker-Shutdown: Pins auf Input zurücksetzen.
     # Reihenfolge ist sicherheitskritisch: close_all() (oben) → io_worker.shutdown() → cleanup().
     # SimValveDriver.cleanup() ist ein No-Op.
     try:

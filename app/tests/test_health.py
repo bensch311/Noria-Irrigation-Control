@@ -2,7 +2,8 @@
 Tests für api/routes_health.py
 
 Getestet werden:
-  GET /health – Basis-Response, Ventilstatus, Queue-Info, GPIO-Validierung
+  GET /health – Basis-Response, Ventilstatus, Queue-Info, GPIO-Validierung,
+                hw_fault-Felder, Neustart-Erkennungs-Felder
 """
 
 import pytest
@@ -29,6 +30,9 @@ def test_health_basic_structure(client):
     assert "hw_fault_reason" in data
     assert "hw_fault_zone" in data
     assert "hw_fault_since" in data
+    # Neustart-Erkennungs-Felder müssen immer vorhanden sein
+    assert "unclean_restart" in data
+    assert "restart_detected_at" in data
 
 
 def test_health_idle_running_zones_empty(client):
@@ -148,3 +152,57 @@ def test_health_ok_recovers_after_fault_cleared(client):
         state.hw_fault_since = ""
 
     assert client.get("/health").json()["ok"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Neustart-Erkennungs-Felder (unclean_restart, restart_detected_at)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_health_unclean_restart_default_false(client):
+    """Im Normalbetrieb: unclean_restart=False, restart_detected_at=''."""
+    resp = client.get("/health")
+    data = resp.json()
+    assert data["unclean_restart"] is False
+    assert data["restart_detected_at"] == ""
+
+
+def test_health_unclean_restart_set_true(client):
+    """Wenn unclean_restart gesetzt: korrekte Werte im Response."""
+    with state_lock:
+        state.unclean_restart = True
+        state.restart_detected_at = "2024-06-01T08:00:00+02:00"
+
+    data = client.get("/health").json()
+    assert data["unclean_restart"] is True
+    assert data["restart_detected_at"] == "2024-06-01T08:00:00+02:00"
+
+
+def test_health_unclean_restart_does_not_affect_ok(client):
+    """unclean_restart beeinflusst ok NICHT – ok hängt nur von hw_faulted ab."""
+    with state_lock:
+        state.unclean_restart = True
+        state.hw_faulted = False
+
+    data = client.get("/health").json()
+    # ok=True obwohl unclean_restart=True: nur hw_faulted entscheidet über ok
+    assert data["ok"] is True
+    assert data["unclean_restart"] is True
+
+
+def test_health_unclean_restart_cleared_after_ack(client):
+    """Nach POST /system/ack-restart: unclean_restart=False im nächsten /health."""
+    with state_lock:
+        state.unclean_restart = True
+        state.restart_detected_at = "2024-06-01T08:00:00+02:00"
+
+    # Vor ACK: Flag gesetzt
+    assert client.get("/health").json()["unclean_restart"] is True
+
+    # ACK senden
+    ack_resp = client.post("/system/ack-restart")
+    assert ack_resp.status_code == 200
+
+    # Nach ACK: Flag gelöscht
+    data = client.get("/health").json()
+    assert data["unclean_restart"] is False
+    assert data["restart_detected_at"] == ""

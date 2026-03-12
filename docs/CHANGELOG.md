@@ -13,6 +13,40 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [0.10.0] – Neustart-Erkennung (Stromausfall-Detection)
+
+### Added
+- **Sentinel-File-Muster** (`data/running.lock`): Backend legt beim Start eine Lock-Datei
+  an und löscht sie beim sauberen Shutdown als allererste Aktion. Existiert die Datei beim
+  nächsten Start noch → unclean shutdown erkannt (Stromausfall, SIGKILL, OOM-Kill).
+  Muster analog zu PostgreSQL WAL, SQLite lock-File, Redis RDB-Prüfung.
+- **Neuer Endpunkt** `POST /system/ack-restart` (in `api/routes_system.py`):
+  Quittiert den Neustart-Hinweis; setzt `state.unclean_restart=False` zurück.
+  Idempotent, erfordert API-Key-Authentifizierung.
+- **Neue Datei** `api/routes_system.py`: Grundlage für weitere System-Endpunkte.
+- **Neue `/health`-Felder**: `unclean_restart` (bool) und `restart_detected_at` (ISO-8601-String)
+  für Monitoring und Frontend-Integration.
+- **Neustart-Modal im Frontend** (`app.py`): erscheint einmalig nach Backend-Neustart
+  mit unclean-Flag; Bediener bestätigt mit „Verstanden" → ACK an Backend → Modal schließt sich.
+  Modal erscheint nicht erneut bis zum nächsten unclean Restart.
+- **Neue State-Felder** in `RunState`: `unclean_restart: bool`, `restart_detected_at: str`.
+
+### Changed
+- `core/lifecycle.py`: Startup-Sequenz um Sentinel-Check (Schritt 5) und Lock-Anlegen
+  (Schritt 11) erweitert. Shutdown-Sequenz: Lock-Löschen als allererste Aktion vor `STOPPING=1`.
+- `api/routes_health.py`: Response um `unclean_restart` und `restart_detected_at` ergänzt.
+- `core/config.py`: Neue Konstante `RUNNING_LOCK_FILE` (`data/running.lock`).
+- `main.py`: `system_router` importiert und registriert.
+- `tests/conftest.py`: `system_router` in `app`-Fixture aufgenommen.
+- `app.py`: `_ping_health()` gibt nun `tuple[bool, dict]` zurück (kein zweiter HTTP-Request
+  pro Poll-Zyklus).
+
+### Infrastructure
+- Test-Suite: neue Testdatei `tests/test_system.py` (8 Tests für `/system/ack-restart`)
+- Erweiterte Tests in `tests/test_health.py` für neue Health-Response-Felder
+
+---
+
 ## [0.9.0] – Feature Complete / Pre-Production
 
 ### Added
@@ -40,7 +74,7 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 ## Versionshistorie (Zukunft)
 
 ```
-[0.9.x]  Bugfixes aus Field Testing
+[0.10.x] Bugfixes aus Field Testing
 [1.0.0]  Production Release – nach abgeschlossener Field Testing Checkliste
 [1.1.0]  Erstes Feature-Release (z.B. Wetterintegration, Prometheus Monitoring)
 [2.0.0]  Breaking Change (z.B. Datenbankumstieg, inkompatibles Datenformat)

@@ -15,7 +15,7 @@ Das System besteht aus zwei unabhängigen Prozessen, die über HTTP kommuniziere
 │  uvicorn (ASGI)                                                     │
 │  ├── FastAPI App (main.py)                                          │
 │  │   ├── Middleware-Stack (Security → CORS → RateLimit)             │
-│  │   └── Router (health, control, queue, schedule, history, settings│
+│  │   └── Router (health, system, control, queue, schedule, history, settings│
 │  │                                                                  │
 │  ├── timer_loop          (Thread – schließt Ventile nach Ablauf)    │
 │  ├── scheduler_loop      (Thread – prüft Zeitpläne, startet Queue)  │
@@ -195,7 +195,21 @@ Die Zone bleibt in `active_runs` mit `end_time = jetzt - 1s`. Der `timer_loop` s
 
 ### Fail-Safe `close_all()` bei Startup und Shutdown
 
-Beim Startup (Schritt 6 der Startup-Sequenz) und beim Shutdown wird `close_all()` via IO-Worker ausgeführt. Damit werden Ventile geschlossen, die durch einen vorherigen Absturz offen geblieben sein könnten.
+Beim Startup (Schritt 7 der Startup-Sequenz) und beim Shutdown wird `close_all()` via IO-Worker ausgeführt. Damit werden Ventile geschlossen, die durch einen vorherigen Absturz offen geblieben sein könnten.
+
+### Sentinel-File-Muster (Neustart-Erkennung)
+
+`data/running.lock` wird beim Start als **Schritt 11** angelegt (nach Fail-Safe close_all und State-Reset, kurz vor `READY=1`). Beim Shutdown wird sie als **allererste Aktion** (Schritt 1) gelöscht, noch vor `STOPPING=1`.
+
+**Erkennung:** Existiert die Datei beim nächsten Startup noch, wurde der letzte Shutdown nicht sauber durchgeführt (Stromausfall, SIGKILL, OOM-Kill). In diesem Fall setzt `_check_sentinel_file()` `state.unclean_restart = True`.
+
+**ACK-Flow:**
+1. Backend setzt `state.unclean_restart = True` bei unclean Startup
+2. Frontend erkennt `unclean_restart=True` im `/health`-Response → zeigt Modal einmalig
+3. Bediener bestätigt → Frontend ruft `POST /system/ack-restart` auf
+4. Backend setzt Flag zurück → nächster `/health`-Poll zeigt `unclean_restart=False`
+
+Das Flag ist **rein in-memory**: es wird nicht persistiert und bei jedem Neustart neu aus der Lock-Datei bestimmt. Muster analog zu PostgreSQL WAL, SQLite lock-File, Redis RDB-Prüfung.
 
 ---
 
@@ -320,6 +334,10 @@ RunState
 │   ├── schedules_dirty: bool
 │   ├── queue_dirty: bool
 │   └── history_dirty: bool
+│
+├── Neustart-Erkennung
+│   ├── unclean_restart: bool
+│   └── restart_detected_at: str
 │
 └── Verlauf
     └── run_history: List[HistoryItem]
