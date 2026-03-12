@@ -163,6 +163,30 @@ curl -X POST http://localhost:8000/system/ack-restart \
 
 ---
 
+### GET /system/logs/download
+
+Alle Log-Dateien als ZIP-Archiv herunterladen. **API-Key erforderlich.**
+
+Packt `irrigation.jsonl` sowie alle rotierten Backups (`.1`–`.10`) in-memory
+in eine ZIP und liefert sie als Download. Enthält das Log-Verzeichnis keine
+Dateien, wird eine leere ZIP zurückgegeben.
+
+Rate-Limit: 5 Anfragen/Minute (I/O-intensiv).
+
+**Request:** kein Body erforderlich.
+
+**Response:** `application/zip`
+
+Dateiname: `noria-logs-YYYY-MM-DD.zip`
+
+**curl:**
+```bash
+curl -OJ http://localhost:8000/system/logs/download \
+  -H "X-API-Key: <key>"
+```
+
+---
+
 ### GET /status
 
 Vollständiger Systemzustand. **API-Key erforderlich.**

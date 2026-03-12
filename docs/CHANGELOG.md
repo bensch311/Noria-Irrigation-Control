@@ -13,6 +13,24 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [0.10.1] – Log-Download
+
+### Added
+- **Log-Download**: Neuer Endpunkt `GET /system/logs/download` liefert alle
+  vorhandenen Log-Dateien (`irrigation.jsonl` + rotierte Backups `.1`–`.10`)
+  als ZIP-Archiv in-memory – kein temporäres File auf Disk.
+  Dateiname: `noria-logs-YYYY-MM-DD.zip`. Zugriff wird geloggt (`log_download_requested`).
+- **Frontend**: Neue Card „Diagnose-Logs" in den Einstellungen (unterhalb
+  Systeminfo) mit „Logs herunterladen"-Button. `@render.download` leitet die
+  ZIP über den authentifizierten `_session`-Request an den Browser weiter.
+
+### Changed
+- `api/routes_system.py`: neuer Endpunkt, rate-limitiert auf 5/min.
+- `app.py`: neue `_download_logs`-Funktion und Card im Settings-Tab.
+- `version.py`: Bump `0.10.0 → 0.10.1`
+
+---
+
 ## [0.10.0] – Neustart-Erkennung (Stromausfall-Detection)
 
 ### Added

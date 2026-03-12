@@ -1737,6 +1737,64 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ),
                 )
 
+        # ----- Log-Download --------------------------------------------------
+        with ui.card(class_="mt-3"):
+            ui.card_header("Diagnose-Logs")
+            ui.p(
+                "Lädt alle vorhandenen Log-Dateien als ZIP-Archiv herunter "
+                "(aktuell + rotierte Backups, max. ~110 MB).",
+                class_="text-muted small mb-3",
+            )
+
+            @render.download(
+                filename=lambda: (
+                    f"noria-logs-{datetime.datetime.now().strftime('%Y-%m-%d')}.zip"
+                ),
+                media_type="application/zip",
+            )
+            def _download_logs():
+                """Ruft GET /system/logs/download ab und reicht die ZIP durch.
+
+                Das Backend zippt alle Log-Dateien in-memory und liefert sie
+                als StreamingResponse. Shiny empfängt den Response-Body und
+                reicht ihn 1:1 an den Browser weiter. So bleibt die Auth
+                beim Backend (X-API-Key) und der Download wird geloggt.
+
+                Bei Fehler (Backend nicht erreichbar, kein Key) wird eine
+                leere Datei zurückgegeben und eine Fehlermeldung angezeigt.
+                """
+                try:
+                    r = _session.get(
+                        BASE_URL + "/system/logs/download",
+                        timeout=30.0,   # ZIP-Erstellung kann einen Moment dauern
+                        stream=True,
+                    )
+                    r = _wrap_auth(r)
+                    if r is None or not r.ok:
+                        ui.notification_show(
+                            "Log-Download fehlgeschlagen – Backend nicht erreichbar"
+                            " oder kein API-Key.",
+                            type="error",
+                            duration=5,
+                        )
+                        yield b""
+                        return
+                    yield r.content
+                except Exception:
+                    ui.notification_show(
+                        "Log-Download fehlgeschlagen – Verbindungsfehler.",
+                        type="error",
+                        duration=5,
+                    )
+                    yield b""
+
+            ui.download_button(
+                "_download_logs",
+                label="Logs herunterladen",
+                icon=icon("download"),
+                class_="btn-outline-secondary",
+            )
+
         # ----- Speichern -----------------------------------------------------
         @reactive.effect
         @reactive.event(input.btn_save_settings)
