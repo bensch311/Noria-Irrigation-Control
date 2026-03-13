@@ -379,3 +379,89 @@ def test_system_info_wrong_api_key(client):
     """Mit falschem API-Key: 401 Unauthorized."""
     resp = client.get("/system/info", headers={"X-API-Key": "falsch"})
     assert resp.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _collect_wlan_details – Unit-Tests (Locale-Bug-Regression)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from api.routes_system import _collect_wlan_details
+
+
+def _make_nmcli_mock(stdout: str, returncode: int = 0):
+    """Hilfsfunktion: erstellt einen subprocess.run-Mock mit vorgegebenem stdout."""
+    mock = MagicMock()
+    mock.returncode = returncode
+    mock.stdout = stdout
+    return mock
+
+
+def test_wlan_details_parses_yes_line(monkeypatch):
+    """Normale englische Ausgabe: 'yes' wird korrekt geparst."""
+    fake = _make_nmcli_mock("no:AndereSSID:30\nyes:MeinNetz:72\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_wlan_details("wlan0")
+    assert result["ssid"] == "MeinNetz"
+    assert result["signal_pct"] == 72
+
+
+def test_wlan_details_locale_ja_would_fail_without_fix(monkeypatch):
+    """Regression: 'ja' (deutsche Locale ohne LC_ALL=C) darf nicht matchen.
+
+    Dieser Test stellt sicher, dass wir LC_ALL=C setzen und daher 'yes'
+    erwarten – 'ja' im Output bedeutet nmcli wurde OHNE unsere Locale-
+    Überschreibung aufgerufen (sollte im produktiven Code nicht vorkommen).
+    """
+    # Simuliert nmcli-Ausgabe mit deutscher Locale (ohne unseren Fix)
+    fake = _make_nmcli_mock("nein:AndereSSID:30\nja:MeinNetz:72\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_wlan_details("wlan0")
+    # "ja" soll NICHT matchen – das ist korrekt mit LC_ALL=C
+    assert result["ssid"] is None
+    assert result["signal_pct"] is None
+
+
+def test_wlan_details_ssid_with_colon(monkeypatch):
+    """Regression: SSID mit Doppelpunkt (z.B. 'Fritzbox:5G') wird korrekt geparst.
+
+    nmcli -t (terse mode) escaped Doppelpunkte innerhalb von Feldwerten als \\:.
+    Die SSID "Fritzbox:5G" erscheint in der Ausgabe als "yes:Fritzbox\\:5G:65".
+    """
+    fake = _make_nmcli_mock("yes:Fritzbox\\:5G:65\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_wlan_details("wlan0")
+    assert result["ssid"] == "Fritzbox:5G"
+    assert result["signal_pct"] == 65
+
+
+def test_wlan_details_nmcli_fails(monkeypatch):
+    """nmcli returncode != 0 → None-Werte, kein Crash."""
+    fake = _make_nmcli_mock("", returncode=1)
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_wlan_details("wlan0")
+    assert result["ssid"] is None
+    assert result["signal_pct"] is None
+
+
+def test_wlan_details_nmcli_not_found(monkeypatch):
+    """nmcli nicht installiert (FileNotFoundError) → None-Werte, kein Crash."""
+    def raise_fnf(*a, **kw):
+        raise FileNotFoundError("nmcli not found")
+    monkeypatch.setattr("api.routes_system.subprocess.run", raise_fnf)
+    result = _collect_wlan_details("wlan0")
+    assert result["ssid"] is None
+    assert result["signal_pct"] is None
+
+
+def test_wlan_details_lc_all_c_is_set(monkeypatch):
+    """LC_ALL=C und LANG=C müssen im subprocess.run-env gesetzt sein."""
+    captured_env = {}
+
+    def capture(*args, **kwargs):
+        captured_env.update(kwargs.get("env", {}))
+        return _make_nmcli_mock("yes:TestNetz:80\n")
+
+    monkeypatch.setattr("api.routes_system.subprocess.run", capture)
+    _collect_wlan_details("wlan0")
+    assert captured_env.get("LC_ALL") == "C"
+    assert captured_env.get("LANG") == "C"

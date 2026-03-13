@@ -37,6 +37,7 @@ Hintergrund (System-Info):
 """
 
 import io
+import re
 import shutil
 import subprocess
 import time
@@ -184,22 +185,36 @@ def _collect_wlan_details(iface_name: str) -> dict:
     nmcli-Ausgabe (terse, -t):
       active:ssid:signal
       yes:MeinNetzwerk:72
+
+    Wichtig:
+      LC_ALL=C erzwingt englische Ausgabe – ohne dies gibt nmcli auf
+      deutschen Systemen "ja" statt "yes" aus, was den Match zerstört.
+
+      split(":", 2) mit maxsplit=2 verhindert, dass SSIDs mit Doppelpunkt
+      (z.B. "Fritzbox:5G") die Feldindizes verschieben.
     """
+    import os as _os
     try:
+        env = {**_os.environ, "LC_ALL": "C", "LANG": "C"}
         result = subprocess.run(
             ["nmcli", "-t", "-f", "active,ssid,signal", "dev", "wifi"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=3, env=env,
         )
         if result.returncode != 0:
             return {"ssid": None, "signal_pct": None}
         for line in result.stdout.splitlines():
-            parts = line.split(":")
+            # nmcli -t escaped Doppelpunkte in Feldwerten als \: (terse mode).
+            # re.split auf unescapte : stellt sicher dass SSIDs mit Doppelpunkt
+            # (z.B. "Fritzbox:5G" → "yes:Fritzbox\:5G:65") korrekt geparst werden.
+            parts = re.split(r'(?<!\\):', line, maxsplit=2)
             if len(parts) >= 3 and parts[0] == "yes":
+                # \: im SSID-Teil zurück zu : übersetzen
+                ssid = parts[1].replace(r'\:', ':') or None
                 try:
                     signal = int(parts[2])
                 except ValueError:
                     signal = None
-                return {"ssid": parts[1] or None, "signal_pct": signal}
+                return {"ssid": ssid, "signal_pct": signal}
     except Exception:
         pass
     return {"ssid": None, "signal_pct": None}
