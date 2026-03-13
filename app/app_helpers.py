@@ -7,7 +7,8 @@ Unit-Tests importiert werden, ohne eine Shiny-Session zu benötigen.
 
 Enthält:
   - Konfiguration laden (_load_frontend_config, _read_max_valves_from_device_config)
-  - Formatierungsfunktionen (fmt_mmss, fmt_duration, fmt_weekdays)
+  - Formatierungsfunktionen (fmt_mmss, fmt_duration, fmt_weekdays,
+                              fmt_uptime, fmt_disk, fmt_signal)
   - HTTP-Hilfsfunktion (_json_or_none)
   - Konstanten (WEEKDAY_CHOICES)
 
@@ -71,7 +72,7 @@ def _read_max_valves_from_device_config(fallback: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Formatierungsfunktionen
+# Formatierungsfunktionen – Zeit und Dauer
 # ---------------------------------------------------------------------------
 
 def fmt_mmss(total_s: int) -> str:
@@ -97,6 +98,87 @@ def fmt_weekdays(weekdays: list[int]) -> str:
     Unbekannte Indizes werden als Zahl ausgegeben.
     """
     return ", ".join(WEEKDAY_CHOICES.get(str(w), str(w)) for w in sorted(weekdays))
+
+
+def fmt_uptime(seconds: float | int) -> str:
+    """Formatiert Uptime-Sekunden als lesbaren String.
+
+    Beispiele:
+      fmt_uptime(45)      → "0 Min"
+      fmt_uptime(90)      → "1 Min"
+      fmt_uptime(3600)    → "1 Std"
+      fmt_uptime(86400)   → "1 Tag"
+      fmt_uptime(90061)   → "1 Tag 1 Std 1 Min"
+      fmt_uptime(172800)  → "2 Tage"
+    """
+    total_s = max(0, int(seconds))
+    days,    remainder = divmod(total_s, 86400)
+    hours,   remainder = divmod(remainder, 3600)
+    minutes, _         = divmod(remainder, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} {'Tag' if days == 1 else 'Tage'}")
+    if hours:
+        parts.append(f"{hours} Std")
+    if minutes or not parts:
+        parts.append(f"{minutes} Min")
+
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Formatierungsfunktionen – Systemmetriken
+# ---------------------------------------------------------------------------
+
+def fmt_disk(free_gb: float | None, total_gb: float | None,
+             used_pct: float | None) -> str:
+    """Formatiert Disk-Nutzung als lesbaren String.
+
+    Beispiele:
+      fmt_disk(12.3, 29.8, 58.7) → "12,3 GB frei / 29,8 GB (59 %)"
+      fmt_disk(None, None, None) → "–"
+    """
+    if free_gb is None or total_gb is None or used_pct is None:
+        return "–"
+    return f"{free_gb:,.1f} GB frei / {total_gb:,.1f} GB ({used_pct:.0f} %)".replace(",", "\u202f")
+
+
+def fmt_memory(used_mb: int | None, total_mb: int | None,
+               used_pct: float | None) -> str:
+    """Formatiert RAM-Nutzung als lesbaren String.
+
+    Beispiele:
+      fmt_memory(312, 1024, 30.5) → "312 MB / 1024 MB (31 %)"
+      fmt_memory(None, None, None) → "–"
+    """
+    if used_mb is None or total_mb is None or used_pct is None:
+        return "–"
+    return f"{used_mb} MB / {total_mb} MB ({used_pct:.0f} %)"
+
+
+def fmt_signal(signal_pct: int | None) -> str:
+    """Formatiert WLAN-Signalstärke als lesbaren String mit Qualitätsstufe.
+
+    Qualitätsstufen:
+      0–33 %   → Schwach
+      34–66 %  → Mittel
+      67–100 % → Gut
+
+    Beispiele:
+      fmt_signal(75)  → "Gut (75 %)"
+      fmt_signal(20)  → "Schwach (20 %)"
+      fmt_signal(None) → "–"
+    """
+    if signal_pct is None:
+        return "–"
+    if signal_pct >= 67:
+        label = "Gut"
+    elif signal_pct >= 34:
+        label = "Mittel"
+    else:
+        label = "Schwach"
+    return f"{label} ({signal_pct} %)"
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,10 @@ Getestet:
   fmt_mmss()                            – Sekunden → "M:SS"-String
   fmt_duration()                        – Dauer-Formatierung (Sek/Min)
   fmt_weekdays()                        – Wochentags-Liste → lesbarer String
+  fmt_uptime()                          – Uptime-Sekunden → lesbarer String
+  fmt_disk()                            – Disk-Nutzung → lesbarer String
+  fmt_memory()                          – RAM-Nutzung → lesbarer String
+  fmt_signal()                          – WLAN-Signal → lesbarer String mit Qualität
   _json_or_none()                       – sichere JSON-Extraktion aus Response/None
   _load_frontend_config()               – Config-Laden mit Fallback bei fehlendem File
   _read_max_valves_from_device_config() – MAX_VALVES aus device_config.json
@@ -122,6 +126,178 @@ class TestFmtWeekdays:
         """Unbekannter Index → Zahl als Fallback."""
         result = h.fmt_weekdays([99])
         assert "99" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fmt_uptime
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtUptime:
+    """fmt_uptime(seconds) → lesbarer Uptime-String"""
+
+    def test_zero_seconds(self):
+        assert h.fmt_uptime(0) == "0 Min"
+
+    def test_under_one_minute(self):
+        """Weniger als 60s → '0 Min' (Minuten-Granularität)."""
+        assert h.fmt_uptime(45) == "0 Min"
+
+    def test_exactly_one_minute(self):
+        assert h.fmt_uptime(60) == "1 Min"
+
+    def test_90_seconds(self):
+        assert h.fmt_uptime(90) == "1 Min"
+
+    def test_exactly_one_hour(self):
+        assert h.fmt_uptime(3600) == "1 Std"
+
+    def test_one_hour_30_min(self):
+        assert h.fmt_uptime(5400) == "1 Std 30 Min"
+
+    def test_exactly_one_day(self):
+        assert h.fmt_uptime(86400) == "1 Tag"
+
+    def test_singular_tag(self):
+        """1 Tag (nicht 'Tage')."""
+        result = h.fmt_uptime(86400)
+        assert "Tag" in result
+        assert "Tage" not in result
+
+    def test_plural_tage(self):
+        """2 Tage (nicht 'Tag')."""
+        result = h.fmt_uptime(172800)
+        assert "2 Tage" in result
+
+    def test_full_components(self):
+        """1 Tag + 1 Std + 1 Min → alle drei Parts."""
+        result = h.fmt_uptime(86400 + 3600 + 60)
+        assert "1 Tag" in result
+        assert "1 Std" in result
+        assert "1 Min" in result
+
+    def test_no_minutes_if_zero_and_hours_present(self):
+        """Wenn Stunden vorhanden aber Minuten = 0: keine '0 Min' ausgeben."""
+        result = h.fmt_uptime(7200)  # genau 2 Stunden
+        assert "Min" not in result
+
+    def test_no_hours_if_zero_and_days_present(self):
+        """Wenn Tage vorhanden aber Stunden = 0: keine '0 Std' ausgeben."""
+        result = h.fmt_uptime(86400 + 30)  # 1 Tag + 30 Sek
+        assert "Std" not in result
+
+    def test_negative_clamped_to_zero(self):
+        assert h.fmt_uptime(-100) == "0 Min"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fmt_disk
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtDisk:
+    """fmt_disk(free_gb, total_gb, used_pct) → lesbarer String"""
+
+    def test_all_none_returns_dash(self):
+        assert h.fmt_disk(None, None, None) == "–"
+
+    def test_partial_none_returns_dash(self):
+        assert h.fmt_disk(10.0, None, 50.0) == "–"
+
+    def test_valid_values(self):
+        result = h.fmt_disk(12.3, 29.8, 58.7)
+        assert "12" in result
+        assert "29" in result
+        assert "59" in result  # gerundete Prozentangabe
+        assert "GB" in result
+
+    def test_full_disk_zero_free(self):
+        result = h.fmt_disk(0.0, 16.0, 100.0)
+        assert "100" in result
+        assert "GB" in result
+
+    def test_contains_frei(self):
+        result = h.fmt_disk(5.0, 16.0, 68.75)
+        assert "frei" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fmt_memory
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtMemory:
+    """fmt_memory(used_mb, total_mb, used_pct) → lesbarer String"""
+
+    def test_all_none_returns_dash(self):
+        assert h.fmt_memory(None, None, None) == "–"
+
+    def test_partial_none_returns_dash(self):
+        assert h.fmt_memory(512, None, 50.0) == "–"
+
+    def test_valid_values(self):
+        result = h.fmt_memory(312, 1024, 30.5)
+        assert "312" in result
+        assert "1024" in result
+        assert "31" in result  # gerundete Prozentangabe
+        assert "MB" in result
+
+    def test_full_ram(self):
+        result = h.fmt_memory(1024, 1024, 100.0)
+        assert "100" in result
+
+    def test_zero_used(self):
+        result = h.fmt_memory(0, 1024, 0.0)
+        assert "0" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fmt_signal
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtSignal:
+    """fmt_signal(signal_pct) → Qualitätsstufe + Prozentzahl"""
+
+    def test_none_returns_dash(self):
+        assert h.fmt_signal(None) == "–"
+
+    def test_strong_signal(self):
+        result = h.fmt_signal(75)
+        assert "Gut" in result
+        assert "75" in result
+
+    def test_medium_signal(self):
+        result = h.fmt_signal(50)
+        assert "Mittel" in result
+        assert "50" in result
+
+    def test_weak_signal(self):
+        result = h.fmt_signal(20)
+        assert "Schwach" in result
+        assert "20" in result
+
+    def test_boundary_gut_67(self):
+        """Genau 67 % → Gut."""
+        assert "Gut" in h.fmt_signal(67)
+
+    def test_boundary_mittel_66(self):
+        """66 % → noch Mittel."""
+        assert "Mittel" in h.fmt_signal(66)
+
+    def test_boundary_mittel_34(self):
+        """34 % → noch Mittel."""
+        assert "Mittel" in h.fmt_signal(34)
+
+    def test_boundary_schwach_33(self):
+        """33 % → Schwach."""
+        assert "Schwach" in h.fmt_signal(33)
+
+    def test_zero_signal(self):
+        result = h.fmt_signal(0)
+        assert "Schwach" in result
+        assert "0" in result
+
+    def test_100_signal(self):
+        result = h.fmt_signal(100)
+        assert "Gut" in result
+        assert "100" in result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

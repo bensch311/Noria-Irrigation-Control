@@ -163,6 +163,65 @@ curl -X POST http://localhost:8000/system/ack-restart \
 
 ---
 
+### GET /system/info
+
+Betriebssystem-Metriken des Raspberry Pi. **API-Key erforderlich.**
+
+Alle Felder sind best-effort: schlägt eine Metrik fehl (z.B. auf
+Windows-Entwicklungsmaschinen), ist das Feld `null` statt eines HTTP-Fehlers.
+
+**Response:**
+```json
+{
+  "disk": {
+    "total_gb": 29.8,
+    "free_gb":  12.3,
+    "used_pct": 58.7
+  },
+  "memory": {
+    "total_mb": 3891,
+    "used_mb":  512,
+    "used_pct": 13.2
+  },
+  "uptime_s": 90061,
+  "network": [
+    {
+      "name":   "eth0",
+      "type":   "LAN",
+      "is_up":  true,
+      "ip":     "192.168.1.42"
+    },
+    {
+      "name":       "wlan0",
+      "type":       "WLAN",
+      "is_up":      true,
+      "ip":         "192.168.1.43",
+      "ssid":       "MeinNetzwerk",
+      "signal_pct": 72
+    }
+  ]
+}
+```
+
+| Feld | Beschreibung |
+|---|---|
+| `disk.free_gb` | Freier Speicherplatz auf `/` in GB |
+| `disk.used_pct` | Belegung in Prozent |
+| `memory.used_pct` | RAM-Auslastung in Prozent |
+| `uptime_s` | Sekunden seit letztem Systemboot |
+| `network[].type` | `"LAN"` oder `"WLAN"` |
+| `network[].is_up` | `true` = Interface verbunden |
+| `network[].ssid` | Nur bei WLAN: aktuelle SSID |
+| `network[].signal_pct` | Nur bei WLAN: Signalstärke 0–100 % |
+
+**curl:**
+```bash
+curl http://localhost:8000/system/info \
+  -H "X-API-Key: <key>"
+```
+
+---
+
 ### GET /system/logs/download
 
 Alle Log-Dateien als ZIP-Archiv herunterladen. **API-Key erforderlich.**

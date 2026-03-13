@@ -2,7 +2,9 @@
 Tests für api/routes_system.py
 
 Getestet werden:
-  POST /system/ack-restart – Neustart-Quittierung, Auth, Idempotenz
+  POST /system/ack-restart   – Neustart-Quittierung, Auth, Idempotenz
+  GET  /system/logs/download – ZIP-Download, Inhalt, Auth
+  GET  /system/info          – OS-Metriken, Struktur, Fehlertoleranz, Auth
 """
 
 import pytest
@@ -230,4 +232,150 @@ def test_download_logs_wrong_api_key(client):
         "/system/logs/download",
         headers={"X-API-Key": "completely_wrong_key"},
     )
+    assert resp.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /system/info
+# ─────────────────────────────────────────────────────────────────────────────
+
+from unittest.mock import patch, MagicMock
+
+
+def test_system_info_returns_200(client):
+    """Endpunkt liefert HTTP 200."""
+    resp = client.get("/system/info")
+    assert resp.status_code == 200
+
+
+def test_system_info_response_structure(client):
+    """Response enthält alle erwarteten Top-Level-Schlüssel."""
+    resp = client.get("/system/info")
+    data = resp.json()
+    assert "disk"     in data
+    assert "memory"   in data
+    assert "uptime_s" in data
+    assert "network"  in data
+
+
+def test_system_info_disk_structure(client):
+    """disk-Objekt hat die erwarteten Felder."""
+    resp = client.get("/system/info")
+    disk = resp.json()["disk"]
+    assert "total_gb" in disk
+    assert "free_gb"  in disk
+    assert "used_pct" in disk
+
+
+def test_system_info_memory_structure(client):
+    """memory-Objekt hat die erwarteten Felder."""
+    resp = client.get("/system/info")
+    mem = resp.json()["memory"]
+    assert "total_mb" in mem
+    assert "used_mb"  in mem
+    assert "used_pct" in mem
+
+
+def test_system_info_network_is_list(client):
+    """network ist eine Liste."""
+    resp = client.get("/system/info")
+    assert isinstance(resp.json()["network"], list)
+
+
+def test_system_info_network_entry_structure(client):
+    """Wenn Interfaces vorhanden: jeder Eintrag hat name, type, is_up, ip."""
+    resp = client.get("/system/info")
+    for iface in resp.json()["network"]:
+        assert "name"  in iface
+        assert "type"  in iface
+        assert "is_up" in iface
+        assert "ip"    in iface
+
+
+def test_system_info_uptime_is_non_negative(client):
+    """uptime_s ist None oder eine nicht-negative Zahl."""
+    resp = client.get("/system/info")
+    uptime = resp.json()["uptime_s"]
+    if uptime is not None:
+        assert uptime >= 0
+
+
+def test_system_info_disk_used_pct_range(client):
+    """disk.used_pct ist None oder liegt zwischen 0 und 100."""
+    resp = client.get("/system/info")
+    pct = resp.json()["disk"].get("used_pct")
+    if pct is not None:
+        assert 0 <= pct <= 100
+
+
+def test_system_info_memory_used_pct_range(client):
+    """memory.used_pct ist None oder liegt zwischen 0 und 100."""
+    resp = client.get("/system/info")
+    pct = resp.json()["memory"].get("used_pct")
+    if pct is not None:
+        assert 0 <= pct <= 100
+
+
+def test_system_info_disk_error_returns_null_fields(client):
+    """Bei psutil-/shutil-Fehler: disk-Felder sind null, kein HTTP-Fehler."""
+    with patch("api.routes_system._collect_disk", return_value={
+        "total_gb": None, "free_gb": None, "used_pct": None
+    }):
+        resp = client.get("/system/info")
+    assert resp.status_code == 200
+    disk = resp.json()["disk"]
+    assert disk["total_gb"] is None
+    assert disk["free_gb"]  is None
+    assert disk["used_pct"] is None
+
+
+def test_system_info_memory_error_returns_null_fields(client):
+    """Bei psutil-Fehler: memory-Felder sind null, kein HTTP-Fehler."""
+    with patch("api.routes_system._collect_memory", return_value={
+        "total_mb": None, "used_mb": None, "used_pct": None
+    }):
+        resp = client.get("/system/info")
+    assert resp.status_code == 200
+    mem = resp.json()["memory"]
+    assert mem["total_mb"] is None
+
+
+def test_system_info_uptime_error_returns_null(client):
+    """Bei psutil-Fehler: uptime_s ist null, kein HTTP-Fehler."""
+    with patch("api.routes_system._collect_uptime", return_value=None):
+        resp = client.get("/system/info")
+    assert resp.status_code == 200
+    assert resp.json()["uptime_s"] is None
+
+
+def test_system_info_network_error_returns_empty_list(client):
+    """Bei psutil-Fehler: network ist leere Liste, kein HTTP-Fehler."""
+    with patch("api.routes_system._collect_network", return_value=[]):
+        resp = client.get("/system/info")
+    assert resp.status_code == 200
+    assert resp.json()["network"] == []
+
+
+def test_system_info_wlan_entry_has_ssid_and_signal(client):
+    """WLAN-Interface-Eintrag enthält ssid und signal_pct."""
+    fake_network = [{
+        "name": "wlan0", "type": "WLAN", "is_up": True,
+        "ip": "192.168.1.50", "ssid": "TestNetz", "signal_pct": 72,
+    }]
+    with patch("api.routes_system._collect_network", return_value=fake_network):
+        resp = client.get("/system/info")
+    iface = resp.json()["network"][0]
+    assert iface["ssid"]       == "TestNetz"
+    assert iface["signal_pct"] == 72
+
+
+def test_system_info_requires_api_key(client):
+    """Ohne API-Key: 401 Unauthorized."""
+    resp = client.get("/system/info", headers={"X-API-Key": ""})
+    assert resp.status_code == 401
+
+
+def test_system_info_wrong_api_key(client):
+    """Mit falschem API-Key: 401 Unauthorized."""
+    resp = client.get("/system/info", headers={"X-API-Key": "falsch"})
     assert resp.status_code == 401

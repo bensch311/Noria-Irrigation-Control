@@ -13,6 +13,27 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [0.10.2] – System-Monitoring
+
+### Added
+- **`GET /system/info`**: Neuer Endpunkt liefert OS-Metriken (Disk, RAM,
+  Uptime, Netzwerk-Interfaces mit LAN/WLAN-Typ, SSID und Signalstärke).
+  Alle Felder best-effort: Fehler → `null`, kein HTTP-500.
+- **Systeminfo-Card** (Frontend): zwei Abschnitte „Konfiguration" und
+  „System" mit Uptime, RAM-Nutzung, Speicherplatz, Netzwerk-Status,
+  WLAN-SSID und Signalqualität.
+- **`app_helpers.py`**: neue Formatter `fmt_uptime()`, `fmt_disk()`,
+  `fmt_memory()`, `fmt_signal()` – pure functions, vollständig getestet.
+- **`psutil==6.1.1`** in `requirements.txt` ergänzt.
+
+### Changed
+- `api/routes_system.py`: neuer Endpunkt `GET /system/info`.
+- `app.py`: neue `_sysinfo_data()` reactive.calc (Slow-Poll),
+  Import der neuen Formatter.
+- `version.py`: Bump `0.10.1 → 0.10.2`
+
+---
+
 ## [0.10.1] – Log-Download
 
 ### Added

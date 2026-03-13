@@ -36,6 +36,10 @@ from app_helpers import (
     fmt_mmss,
     fmt_duration,
     fmt_weekdays,
+    fmt_uptime,
+    fmt_disk,
+    fmt_memory,
+    fmt_signal,
     _json_or_none,
 )
 
@@ -355,6 +359,16 @@ def _settings_data() -> dict:
     reactive.invalidate_later(POLL_SLOW_S)
     _status_trigger.get()
     return _json_or_none(_get("/settings")) or {}
+
+@reactive.calc
+def _sysinfo_data() -> dict:
+    """Gecachter /system/info-Fetch. Langsamer Poll genuegt.
+
+    Liefert OS-Metriken (Disk, RAM, Uptime, Netzwerk) vom Backend.
+    Bei Verbindungsfehler: leeres Dict – Anzeige zeigt '–' als Fallback.
+    """
+    reactive.invalidate_later(POLL_SLOW_S)
+    return _json_or_none(_get("/system/info")) or {}
 
 # Letzter angewendeter dur/unit-Wert – verhindert Reset der Slider bei jedem Poll
 _last_applied_dur_unit: reactive.Value = reactive.Value({})
@@ -1705,19 +1719,84 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
             @render.ui
             def _settings_sysinfo():
-                d = _settings_data()
-                backend_max    = d.get("max_valves",    "?") if d else "?"
-                valve_driver   = d.get("valve_driver",  "?") if d else "?"
-                rows = [
+                d  = _settings_data()
+                si = _sysinfo_data()
+
+                backend_max  = d.get("max_valves",   "?") if d else "?"
+                valve_driver = d.get("valve_driver", "?") if d else "?"
+
+                # --- OS-Metriken aus /system/info ----------------------------
+                disk   = si.get("disk",   {}) or {}
+                mem    = si.get("memory", {}) or {}
+                net    = si.get("network", []) or []
+
+                disk_str   = fmt_disk(
+                    disk.get("free_gb"), disk.get("total_gb"), disk.get("used_pct")
+                )
+                mem_str    = fmt_memory(
+                    mem.get("used_mb"), mem.get("total_mb"), mem.get("used_pct")
+                )
+                uptime_raw = si.get("uptime_s")
+                uptime_str = fmt_uptime(uptime_raw) if uptime_raw is not None else "–"
+
+                # --- Netzwerk-Zeilen aufbauen --------------------------------
+                net_rows: list[tuple[str, str]] = []
+                if not net:
+                    net_rows.append(("Netzwerk", "–"))
+                for iface in net:
+                    label    = iface.get("type", "Netzwerk")
+                    name     = iface.get("name", "")
+                    is_up    = iface.get("is_up", False)
+                    ip       = iface.get("ip") or ""
+                    status   = "verbunden" if is_up else "getrennt"
+                    ip_part  = f" · {ip}" if ip and is_up else ""
+                    value    = f"{name}: {status}{ip_part}"
+                    net_rows.append((label, value))
+
+                    if iface.get("type") == "WLAN" and is_up:
+                        ssid   = iface.get("ssid") or "–"
+                        signal = fmt_signal(iface.get("signal_pct"))
+                        net_rows.append(("WLAN SSID",   ssid))
+                        net_rows.append(("WLAN Signal", signal))
+
+                # --- Alle Zeilen zusammenbauen --------------------------------
+                config_rows = [
                     ("Version",              __version__),
                     ("Backend-URL",          BASE_URL),
-                    ("Ventile (Frontend)",    str(ANZAHL_VENTILE)),
-                    ("Ventile (Backend)",     str(backend_max)),
-                    ("Treiber",               valve_driver),
-                    ("Status-Poll",           f"{POLL_STATUS_S} s"),
-                    ("Slow-Poll",             f"{POLL_SLOW_S} s"),
+                    ("Ventile (Frontend)",   str(ANZAHL_VENTILE)),
+                    ("Ventile (Backend)",    str(backend_max)),
+                    ("Treiber",              valve_driver),
+                    ("Status-Poll",          f"{POLL_STATUS_S} s"),
+                    ("Slow-Poll",            f"{POLL_SLOW_S} s"),
                     ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
                 ]
+                sys_rows = [
+                    ("Uptime",       uptime_str),
+                    ("RAM",          mem_str),
+                    ("Speicherplatz", disk_str),
+                    *net_rows,
+                ]
+
+                def _make_rows(rows: list[tuple[str, str]]):
+                    return [
+                        ui.tags.tr(
+                            ui.tags.td(lbl, class_="text-muted small pe-3",
+                                       style="white-space:nowrap;width:1%;"),
+                            ui.tags.td(val, class_="small fw-semibold"),
+                        )
+                        for lbl, val in rows
+                    ]
+
+                def _section_header(title: str):
+                    return ui.tags.tr(
+                        ui.tags.td(
+                            title,
+                            colspan="2",
+                            class_="text-uppercase small fw-bold pt-3 pb-1",
+                            style="color:var(--bs-secondary);letter-spacing:.05em;",
+                        )
+                    )
+
                 return ui.div(
                     ui.tags.img(
                         src="noria-logo-animated-light.svg",
@@ -1725,14 +1804,12 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         style="height:56px; display:block; margin-bottom:1.25rem;",
                     ),
                     ui.tags.table(
-                        ui.tags.tbody(*[
-                            ui.tags.tr(
-                                ui.tags.td(label, class_="text-muted small pe-3",
-                                           style="white-space:nowrap;width:1%;"),
-                                ui.tags.td(value, class_="small fw-semibold"),
-                            )
-                            for label, value in rows
-                        ]),
+                        ui.tags.tbody(
+                            _section_header("Konfiguration"),
+                            *_make_rows(config_rows),
+                            _section_header("System"),
+                            *_make_rows(sys_rows),
+                        ),
                         class_="table table-sm",
                     ),
                 )

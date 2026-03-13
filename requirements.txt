@@ -11,9 +11,9 @@ faicons==0.2.2
 requests==2.32.5
 
 # ── Raspberry Pi (nur auf dem Pi, auf Dev-Maschine weglassen) ────────────────
-# rpi-lgpio ist ein Drop-in-Ersatz für RPi.GPIO mit Pi 5 (RP1-Chip) Support.
-# Benötigt: swig + liblgpio-dev (werden in install.sh via apt installiert).
-rpi-lgpio
+RPi.GPIO
+
+psutil==6.1.1          # Disk-, RAM-, Uptime- und Netzwerk-Metriken
 
 # ── Zeitzonen (für zoneinfo auf Systemen ohne IANA-DB, z.B. Windows) ─────────
 tzdata==2025.3

@@ -21,7 +21,7 @@ Vor jedem Release:
 APP_NAME = "Noria"
 
 # Versionstupel für programmatische Vergleiche (z.B. >= (1, 1, 0))
-__version_info__: tuple[int, int, int] = (0, 10, 1)
+__version_info__: tuple[int, int, int] = (0, 10, 2)
 
 # Versionsstring für Anzeige, Logging und API-Responses
 __version__: str = ".".join(str(x) for x in __version_info__)
