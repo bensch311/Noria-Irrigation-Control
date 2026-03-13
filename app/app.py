@@ -1761,7 +1761,6 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
                 # --- Alle Zeilen zusammenbauen --------------------------------
                 config_rows = [
-                    ("Version",              __version__),
                     ("Backend-URL",          BASE_URL),
                     ("Ventile (Frontend)",   str(ANZAHL_VENTILE)),
                     ("Ventile (Backend)",    str(backend_max)),
@@ -1801,7 +1800,12 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ui.tags.img(
                         src="noria-logo-animated-light.svg",
                         alt="Noria",
-                        style="height:56px; display:block; margin-bottom:1.25rem;",
+                        style="height:56px; display:block; margin-bottom:0.5rem;",
+                    ),
+                    ui.tags.p(
+                        __version__,
+                        class_="text-muted small mb-3",
+                        style="margin-top:0;",
                     ),
                     ui.tags.table(
                         ui.tags.tbody(
