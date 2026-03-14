@@ -69,13 +69,17 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         hard_max_min = int(getattr(state, "hard_max_runtime_s", 3600)) // 60
 
     clamped_slider_max = min(req.slider_max_minutes, hard_max_min)
+    # default_duration ist der Startwert der Laufzeit-Slider und darf nie
+    # oberhalb von slider_max_minutes liegen (das wäre ein ungültiger Zustand:
+    # Defaultwert außerhalb des darstellbaren Slider-Bereichs).
+    clamped_default_dur = min(req.default_duration, clamped_slider_max)
 
     with state_lock:
-        state.max_history_items = req.max_history_items
-        state.navbar_title      = req.navbar_title
-        state.accent_color      = req.accent_color
-        state.default_duration  = req.default_duration
-        state.default_time_unit = req.default_time_unit
+        state.max_history_items  = req.max_history_items
+        state.navbar_title       = req.navbar_title
+        state.accent_color       = req.accent_color
+        state.default_duration   = clamped_default_dur
+        state.default_time_unit  = req.default_time_unit
         state.slider_max_minutes = clamped_slider_max
 
     save_user_settings_to_disk()
@@ -86,17 +90,17 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         max_history_items=req.max_history_items,
         navbar_title=req.navbar_title,
         accent_color=req.accent_color,
-        default_duration=req.default_duration,
+        default_duration=clamped_default_dur,
         default_time_unit=req.default_time_unit,
         slider_max_minutes=clamped_slider_max,
     )
 
     return {
-        "ok":                True,
-        "max_history_items": req.max_history_items,
-        "navbar_title":      req.navbar_title,
-        "accent_color":      req.accent_color,
-        "default_duration":  req.default_duration,
-        "default_time_unit": req.default_time_unit,
+        "ok":                 True,
+        "max_history_items":  req.max_history_items,
+        "navbar_title":       req.navbar_title,
+        "accent_color":       req.accent_color,
+        "default_duration":   clamped_default_dur,
+        "default_time_unit":  req.default_time_unit,
         "slider_max_minutes": clamped_slider_max,
     }

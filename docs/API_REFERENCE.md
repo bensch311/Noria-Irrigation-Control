@@ -749,11 +749,24 @@ Benutzereinstellungen abrufen.
   "accent_color": "#82372a",
   "default_duration": 5,
   "default_time_unit": "Minuten",
-  "max_valves": 6
+  "slider_max_minutes": 60,
+  "max_valves": 6,
+  "valve_driver": "sim",
+  "hard_max_runtime_s": 3600
 }
 ```
 
-`max_valves` ist readonly (kommt aus `device_config.json`).
+| Feld | Typ | Beschreibung |
+|---|---|---|
+| `max_history_items` | int | Max. Einträge im Verlauf |
+| `navbar_title` | str | Angezeigter Titel in der Navigationsleiste |
+| `accent_color` | str | Akzentfarbe als Hex-String (`#rrggbb`) |
+| `default_duration` | int | Startwert der Laufzeit-Slider (1–`slider_max_minutes`) |
+| `default_time_unit` | str | `"Minuten"` \| `"Sekunden"` |
+| `slider_max_minutes` | int | Maximalwert der Laufzeit-Slider in Minuten (1–`hard_max_runtime_s // 60`) |
+| `max_valves` | int | **readonly** – konfigurierte Ventilanzahl aus `device_config.json` |
+| `valve_driver` | str | **readonly** – aktiver Treiber (`"sim"` \| `"rpi"`) |
+| `hard_max_runtime_s` | int | **readonly** – Hardware-Limit in Sekunden aus `device_config.json` |
 
 ---
 
@@ -768,11 +781,25 @@ Benutzereinstellungen aktualisieren. Wird sofort atomar auf Disk geschrieben.
   "navbar_title": "Hof Müller Bewässerung",
   "accent_color": "#1a7a4a",
   "default_duration": 10,
-  "default_time_unit": "Minuten"
+  "default_time_unit": "Minuten",
+  "slider_max_minutes": 60
 }
 ```
 
-**Response (200):** `{"ok": true}`
+| Feld | Pflicht | Validierung | Beschreibung |
+|---|---|---|---|
+| `max_history_items` | ja | 1–500 | Max. Einträge im Verlauf |
+| `navbar_title` | nein | 1–50 Zeichen | Navbar-Titel |
+| `accent_color` | nein | `#rrggbb` | Akzentfarbe |
+| `default_duration` | nein | 1–1440, ≤ `slider_max_minutes` | Startwert der Laufzeit-Slider |
+| `default_time_unit` | nein | `"Minuten"` \| `"Sekunden"` | Standard-Zeiteinheit |
+| `slider_max_minutes` | nein | 1–1440, ≤ `hard_max_runtime_s // 60` | Maximalwert der Laufzeit-Slider |
+
+Werte die ihre dynamische Grenze überschreiten werden **still gekappt** (kein 422):
+- `slider_max_minutes` → gekappt auf `hard_max_runtime_s // 60`
+- `default_duration` → gekappt auf (gecapptes) `slider_max_minutes`
+
+**Response (200):** Spiegelt die tatsächlich gespeicherten (ggf. gecappten) Werte zurück.
 
 ---
 

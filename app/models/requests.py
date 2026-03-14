@@ -91,7 +91,9 @@ class SettingsUpdateRequest(BaseModel):
     max_history_items   : Anzahl Verlaufseintraege (1–500).
     navbar_title        : Angezeigter Titel in der Navigationsleiste (1–50 Zeichen).
     accent_color        : Akzentfarbe als Hex-String, z.B. "#82372a".
-    default_duration    : Standardwert der Dauer-Slider (1–120).
+    default_duration    : Standardwert der Dauer-Slider (1–1440).
+                          Muss ≤ slider_max_minutes sein – wird im Route-Handler
+                          dynamisch gegen den gecappten slider_max_minutes geprüft.
     default_time_unit   : Standard-Zeiteinheit fuer Dauer-Radiobuttons.
     slider_max_minutes  : Maximaler Anzeigewert der Laufzeit-Slider in Minuten (1–1440).
                           Darf hard_max_runtime_s // 60 nicht übersteigen –
@@ -103,7 +105,10 @@ class SettingsUpdateRequest(BaseModel):
     max_history_items: int = Field(..., ge=1, le=500)
     navbar_title: str = Field("Bewaesserungscomputer", min_length=1, max_length=50)
     accent_color: str = Field("#82372a")
-    default_duration: int = Field(5, ge=1, le=120)
+    # le=1440 statt le=120: default_duration muss ≤ slider_max_minutes sein; da
+    # slider_max_minutes bis 1440 gehen kann, braucht default_duration denselben
+    # absoluten Pydantic-Cap. Die Prüfung ≤ slider_max_minutes folgt im Route-Handler.
+    default_duration: int = Field(5, ge=1, le=1440)
     default_time_unit: Literal["Sekunden", "Minuten"] = "Minuten"
     # 1440 = 24 h als absoluter Pydantic-Cap; dynamische Prüfung gegen
     # hard_max_runtime_s // 60 erfolgt im Route-Handler.

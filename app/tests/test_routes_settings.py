@@ -272,14 +272,57 @@ def test_post_settings_duration_zero_rejected(client):
     resp = client.post("/settings", json=_full_payload(default_duration=0))
     assert resp.status_code == 422
 
-def test_post_settings_duration_over_cap_rejected(client):
-    resp = client.post("/settings", json=_full_payload(default_duration=121))
+def test_post_settings_duration_over_pydantic_cap_rejected(client):
+    """1441 überschreitet den Pydantic-Absolutcap von 1440."""
+    resp = client.post("/settings", json=_full_payload(default_duration=1441))
     assert resp.status_code == 422
 
 def test_post_settings_duration_boundary_ok(client):
+    with state_lock:
+        state.hard_max_runtime_s = 3600      # slider_max darf bis 60 gehen
     with patch("api.routes_settings.save_user_settings_to_disk"):
         assert client.post("/settings", json=_full_payload(default_duration=1)).status_code == 200
-        assert client.post("/settings", json=_full_payload(default_duration=120)).status_code == 200
+        assert client.post("/settings", json=_full_payload(default_duration=60)).status_code == 200
+
+def test_post_settings_duration_clamped_to_slider_max(client):
+    """default_duration wird auf slider_max_minutes gekappt, kein 422."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600   # slider_max_minutes max 60
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(
+            slider_max_minutes=30,
+            default_duration=60,        # > slider_max → wird gekappt
+        ))
+    assert resp.status_code == 200
+    assert resp.json()["default_duration"] == 30
+    with state_lock:
+        assert state.default_duration == 30
+
+def test_post_settings_duration_clamped_transitively_by_hard_limit(client):
+    """slider_max wird durch hard_limit auf 30 gekappt;
+    default_duration wird daraufhin auch auf 30 gekappt."""
+    with state_lock:
+        state.hard_max_runtime_s = 1800   # hard limit = 30 min
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(
+            slider_max_minutes=60,   # wird auf 30 gekappt
+            default_duration=45,     # > gecappter slider_max (30) → wird gekappt
+        ))
+    assert resp.status_code == 200
+    assert resp.json()["slider_max_minutes"] == 30
+    assert resp.json()["default_duration"]   == 30
+
+def test_post_settings_duration_at_slider_max_ok(client):
+    """default_duration exakt gleich slider_max_minutes → kein Kappen."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(
+            slider_max_minutes=45,
+            default_duration=45,
+        ))
+    assert resp.status_code == 200
+    assert resp.json()["default_duration"] == 45
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1676,31 +1676,36 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 with ui.div(class_="settings-section"):
                     ui.p("Ventilsteuerung – Standardwerte", class_="settings-section-title")
 
-                    # Maximaler Slider-Wert: wird beim ersten Settings-Poll
-                    # auf hard_max_runtime_s // 60 begrenzt und als max= gesetzt.
+                    # Label zeigt die gültige Bereichsangabe dynamisch nach dem
+                    # ersten Settings-Poll. Nur Text – kein Input-Reset-Risiko.
                     @render.ui
                     def _slider_max_label():
                         d = _settings_data()
-                        hard_max_s = d.get("hard_max_runtime_s", 3600) if d else 3600
+                        hard_max_s   = d.get("hard_max_runtime_s", 3600) if d else 3600
                         hard_max_min = max(1, hard_max_s // 60)
                         return ui.p(
                             f"Max. Laufzeit-Slider in Minuten (1\u2013{hard_max_min})",
                             class_="fw-semibold mb-1",
                         )
 
+                    # Statisches Widget mit sicheren Fallback-Werten.
+                    # max= und value= werden einmalig in _sync_settings_to_ui (Block A)
+                    # via ui.update_slider() auf die Backend-Werte gesetzt.
+                    # Kein render.ui → kein Poll-Reset.
+                    ui.input_slider("sld_slider_max_minutes", None, min=1, max=60, value=60, step=1)
+
                     @render.ui
-                    def _slider_max_input():
+                    def _slider_default_label():
                         d = _settings_data()
-                        hard_max_s   = d.get("hard_max_runtime_s", 3600) if d else 3600
-                        hard_max_min = max(1, hard_max_s // 60)
-                        current      = min(d.get("slider_max_minutes", hard_max_min) if d else hard_max_min, hard_max_min)
-                        return ui.input_slider(
-                            "sld_slider_max_minutes", None,
-                            min=1, max=hard_max_min, value=current, step=1,
+                        slider_max = max(1, d.get("slider_max_minutes", 60) if d else 60)
+                        return ui.p(
+                            f"Standard-Laufzeit (1\u2013{slider_max})",
+                            class_="fw-semibold mt-3 mb-1",
                         )
 
-                    ui.p("Standard-Laufzeit (1–120)", class_="fw-semibold mt-3 mb-1")
-                    ui.input_slider("sld_default_duration", None, min=1, max=120, value=5, step=1)
+                    # Statisches Widget – max= und value= werden in Block A gesetzt,
+                    # value= zusätzlich in Block B bei Wertänderung (ohne max= anzutasten).
+                    ui.input_slider("sld_default_duration", None, min=1, max=60, value=5, step=1)
 
                     ui.p("Zeiteinheit", class_="fw-semibold mt-2 mb-1")
                     ui.input_radio_buttons(
@@ -1924,9 +1929,12 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 ui.notification_show(
                     "Einstellungen gespeichert.", type="message", duration=3,
                 )
-                # Flag zurücksetzen → nächster Poll lädt txt + color neu aus Backend
-                # (stellt sicher dass gespeicherter Wert korrekt angezeigt wird)
+                # Beide Flags zurücksetzen, damit der nächste Poll-Zyklus
+                # Block A (Settings-Tab-Slider) UND Block B (alle anderen Tabs)
+                # garantiert durchläuft – unabhängig davon ob sich der gespeicherte
+                # Wert numerisch verändert hat.
                 _settings_initialized.set(False)
+                _last_applied_dur_unit.set({})
                 _bump_status()
             elif rv and rv.status_code == 422:
                 ui.notification_show(
@@ -1944,12 +1952,16 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
             A) Nur einmalig beim ersten Load + nach erfolgreichem Save:
                txt_navbar_title, clr_accent_color, sld_max_history,
-               sld_default_duration, rb_default_time_unit, sld_slider_max_minutes
+               sld_slider_max_minutes (inkl. max=), sld_default_duration (inkl. max=),
+               rb_default_time_unit
                → _settings_initialized verhindert, dass der User-Input
                  bei jedem 5s-Poll überschrieben wird.
+               → Beide Slider sind statische Widgets; max= und value= werden hier
+                 genau einmal gesetzt. Kein render.ui = kein Poll-Reset.
 
             B) Andere Tabs (Ventile/Queue/Schedule-Slider+Radio):
                Nur bei tatsächlicher Wertänderung (_last_applied_dur_unit).
+               Aktualisiert nur value= von sld_default_duration, nicht max=.
             """
             d = _settings_data()
             if not d:
@@ -1969,39 +1981,49 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 color = d.get("accent_color", ACCENT_COLOR_DEFAULT)
                 _apply_color_picker(color)
 
-                # slider_max_minutes: Wert aus Backend laden. Das Slider-Widget
-                # selbst wird als render.ui() aufgebaut und trägt sein max=
-                # bereits aus hard_max_runtime_s. Hier nur den aktuellen Wert
-                # aktualisieren falls der Slider bereits im DOM ist.
-                slider_max = d.get("slider_max_minutes")
-                if slider_max is not None:
-                    try:
-                        ui.update_slider("sld_slider_max_minutes", value=int(slider_max))
-                    except Exception:
-                        pass  # Widget noch nicht gerendert – render.ui() setzt den Wert initial korrekt
+                # sld_slider_max_minutes: max= auf Hardware-Limit, value= auf
+                # gespeicherten Wert setzen. Einmalig – kein Poll-Reset.
+                hard_max_s   = d.get("hard_max_runtime_s", 3600)
+                hard_max_min = max(1, hard_max_s // 60)
+                slider_max   = min(max(1, int(d.get("slider_max_minutes", hard_max_min))), hard_max_min)
+                ui.update_slider("sld_slider_max_minutes", min=1, max=hard_max_min, value=slider_max)
+
+                # sld_default_duration: max= auf slider_max_minutes, value= auf
+                # gespeicherten Wert (bereits serverseitig gegen slider_max gekappt).
+                default_dur = min(max(1, int(d.get("default_duration", 5))), slider_max)
+                ui.update_slider("sld_default_duration", min=1, max=slider_max, value=default_dur)
 
             # B) Slider/Radios in allen Tabs: nur bei Wertänderung ───────────
-            dur  = int(d.get("default_duration", 5))
-            unit = d.get("default_time_unit", "Minuten")
+            dur        = int(d.get("default_duration", 5))
+            unit       = d.get("default_time_unit", "Minuten")
+            slider_max = max(1, int(d.get("slider_max_minutes", 60)))
             last = _last_applied_dur_unit.get()
-            if last.get("dur") == dur and last.get("unit") == unit:
+            # slider_max in die Änderungs-Erkennung einschließen: eine Änderung
+            # von slider_max_minutes allein (dur/unit unverändert) muss ebenfalls
+            # alle Tabs aktualisieren, da sonst max= auf dem alten Wert stehen bleibt.
+            if (last.get("dur") == dur
+                    and last.get("unit") == unit
+                    and last.get("slider_max") == slider_max):
                 return
-            _last_applied_dur_unit.set({"dur": dur, "unit": unit})
+            _last_applied_dur_unit.set({"dur": dur, "unit": unit, "slider_max": slider_max})
 
-            ui.update_slider("sld_default_duration", value=dur)
+            # value= auf neuen Default, max= auf konfigurierten Slider-Maximalwert.
+            # Ohne max= würde Shiny nur den Wert aktualisieren, das Widget-Maximum
+            # aber am hartcodierten Initialwert (max=60 / max=120) belassen.
+            ui.update_slider("sld_default_duration", min=1, max=slider_max, value=dur)
             ui.update_radio_buttons("rb_default_time_unit", selected=unit)
 
             # Ventile-Tab: alle Zone-Slider + Radiobuttons
             for i in range(1, ANZAHL_VENTILE + 1):
-                ui.update_slider(f"sld_{i}", value=dur)
+                ui.update_slider(f"sld_{i}", min=1, max=slider_max, value=dur)
                 ui.update_radio_buttons(f"rb_{i}", selected=unit)
 
             # Warteschlange-Tab
-            ui.update_slider("q_add_dur", value=dur)
+            ui.update_slider("q_add_dur", min=1, max=slider_max, value=dur)
             ui.update_radio_buttons("q_add_unit", selected=unit)
 
             # Zeitplaene-Tab
-            ui.update_slider("sch_dur", value=dur)
+            ui.update_slider("sch_dur", min=1, max=slider_max, value=dur)
             ui.update_radio_buttons("sch_unit", selected=unit)
 
         # Helper: Color-Picker DOM-Wert via JS setzen

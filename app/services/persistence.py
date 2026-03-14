@@ -260,11 +260,6 @@ def load_user_settings_from_disk():
     if not _re.match(r'^#[0-9a-fA-F]{6}$', accent_color):
         accent_color = ACCENT_COLOR
 
-    try:
-        default_duration = max(1, min(120, int(user.get("DEFAULT_DURATION", DEFAULT_DURATION))))
-    except Exception:
-        default_duration = DEFAULT_DURATION
-
     default_time_unit = str(user.get("DEFAULT_TIME_UNIT", DEFAULT_TIME_UNIT))
     if default_time_unit not in ("Sekunden", "Minuten"):
         default_time_unit = DEFAULT_TIME_UNIT
@@ -281,6 +276,15 @@ def load_user_settings_from_disk():
         hard_max_min = int(getattr(state, "hard_max_runtime_s", MAX_RUNTIME_S)) // 60
         slider_max_minutes = min(slider_max_minutes, hard_max_min)
 
+    try:
+        # Clamp gegen slider_max_minutes (statt hartem 120er-Cap):
+        # default_duration ist der Startwert der Slider und darf nie außerhalb
+        # des konfigurierten Slider-Bereichs liegen.
+        default_duration = max(1, min(slider_max_minutes, int(user.get("DEFAULT_DURATION", DEFAULT_DURATION))))
+    except Exception:
+        default_duration = DEFAULT_DURATION
+
+    with state_lock:
         state.max_history_items  = max_hist
         state.navbar_title       = navbar_title
         state.accent_color       = accent_color
