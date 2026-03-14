@@ -28,7 +28,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
-from core.config import MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED, NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT
+from core.config import MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED, NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES
 
 shutdown_event = threading.Event()
 threads: list[threading.Thread] = []
@@ -179,6 +179,10 @@ class RunState:
     accent_color: str = ACCENT_COLOR
     default_duration: int = DEFAULT_DURATION
     default_time_unit: str = DEFAULT_TIME_UNIT
+    # Maximaler Anzeigewert der Laufzeit-Slider in Minuten.
+    # Wird in den Einstellungen konfiguriert; darf hard_max_runtime_s // 60 nicht
+    # übersteigen (wird beim Laden und beim POST /settings geprüft).
+    slider_max_minutes: int = SLIDER_MAX_MINUTES
 
     # ── Hard-Limits (aus device_config.json) ──────────────────────────────────
     # Diese Limits überschreiben User-Eingaben im Route-Handler.

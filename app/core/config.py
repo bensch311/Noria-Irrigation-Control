@@ -42,6 +42,10 @@ NAVBAR_TITLE = "Noria - Irrigation Control"
 ACCENT_COLOR = "#b8902a"
 DEFAULT_DURATION = 5
 DEFAULT_TIME_UNIT = "Minuten"
+# Standardmäßiger Maximalwert der Laufzeit-Slider in Minuten.
+# Entspricht MAX_RUNTIME_S umgerechnet, damit Slider und Hard-Limit
+# ab Werk übereinstimmen. Vom Benutzer über die Einstellungen anpassbar.
+SLIDER_MAX_MINUTES = MAX_RUNTIME_S // 60
 
 MAX_CONCURRENT_VALVES = 2
 DEFAULT_PARALLEL_ENABLED = False

@@ -2,18 +2,20 @@
 """
 Tests fuer api/routes_settings.py
 
-GET  /settings : liefert alle User-Settings + max_valves + valve_driver (readonly)
+GET  /settings : liefert alle User-Settings + max_valves + valve_driver + hard_max_runtime_s (readonly)
 POST /settings : validiert + setzt State + persistiert sofort
 
 Neue Felder (zusaetzlich zu max_history_items):
-  navbar_title       : 1–50 Zeichen, darf nicht leer sein
-  accent_color       : 6-stelliger Hex-Farbwert (#rrggbb)
-  default_duration   : int 1–120
-  default_time_unit  : "Sekunden" | "Minuten"
+  navbar_title        : 1–50 Zeichen, darf nicht leer sein
+  accent_color        : 6-stelliger Hex-Farbwert (#rrggbb)
+  default_duration    : int 1–120
+  default_time_unit   : "Sekunden" | "Minuten"
+  slider_max_minutes  : int 1–1440, wird gegen hard_max_runtime_s // 60 gekappt
 
 Readonly-Felder (aus device_config, nicht via POST setzbar):
-  max_valves         : Anzahl konfigurierter Ventile
-  valve_driver       : aktiver Treiber ("rpi" | "sim")
+  max_valves          : Anzahl konfigurierter Ventile
+  valve_driver        : aktiver Treiber ("rpi" | "sim")
+  hard_max_runtime_s  : maximale Laufzeit in Sekunden (Hardware-Grenze)
 """
 
 import pytest
@@ -22,7 +24,7 @@ from unittest.mock import patch
 from core.state import state, state_lock
 from core.config import (
     MAX_HISTORY_ITEMS, NAVBAR_TITLE, ACCENT_COLOR,
-    DEFAULT_DURATION, DEFAULT_TIME_UNIT,
+    DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
 )
 
 
@@ -38,6 +40,7 @@ def _full_payload(**overrides) -> dict:
         "accent_color":      "#82372a",
         "default_duration":  5,
         "default_time_unit": "Minuten",
+        "slider_max_minutes": 60,
     }
     base.update(overrides)
     return base
@@ -52,8 +55,8 @@ def test_get_settings_returns_all_keys(client):
     assert resp.status_code == 200
     data = resp.json()
     for key in ("max_history_items", "navbar_title", "accent_color",
-                "default_duration", "default_time_unit", "max_valves",
-                "valve_driver"):
+                "default_duration", "default_time_unit", "slider_max_minutes",
+                "max_valves", "valve_driver", "hard_max_runtime_s"):
         assert key in data, f"Key fehlt: {key}"
 
 
@@ -65,30 +68,41 @@ def test_get_settings_types(client):
     assert isinstance(data["accent_color"], str)
     assert isinstance(data["default_duration"], int)
     assert isinstance(data["default_time_unit"], str)
+    assert isinstance(data["slider_max_minutes"], int)
     assert isinstance(data["max_valves"], int)
     assert isinstance(data["valve_driver"], str)
+    assert isinstance(data["hard_max_runtime_s"], int)
 
 
 def test_get_settings_reflects_state(client):
     with state_lock:
-        state.max_history_items = 42
-        state.navbar_title      = "Hof Muster"
-        state.accent_color      = "#123456"
-        state.default_duration  = 15
-        state.default_time_unit = "Sekunden"
+        state.max_history_items  = 42
+        state.navbar_title       = "Hof Muster"
+        state.accent_color       = "#123456"
+        state.default_duration   = 15
+        state.default_time_unit  = "Sekunden"
+        state.slider_max_minutes = 30
     resp = client.get("/settings")
     data = resp.json()
-    assert data["max_history_items"] == 42
-    assert data["navbar_title"]      == "Hof Muster"
-    assert data["accent_color"]      == "#123456"
-    assert data["default_duration"]  == 15
-    assert data["default_time_unit"] == "Sekunden"
+    assert data["max_history_items"]  == 42
+    assert data["navbar_title"]       == "Hof Muster"
+    assert data["accent_color"]       == "#123456"
+    assert data["default_duration"]   == 15
+    assert data["default_time_unit"]  == "Sekunden"
+    assert data["slider_max_minutes"] == 30
 
 
 def test_get_settings_max_valves_readonly(client):
     with state_lock:
         state.max_valves = 8
     assert client.get("/settings").json()["max_valves"] == 8
+
+
+def test_get_settings_hard_max_runtime_s_readonly(client):
+    """hard_max_runtime_s spiegelt state.hard_max_runtime_s – kein POST-Feld."""
+    with state_lock:
+        state.hard_max_runtime_s = 7200
+    assert client.get("/settings").json()["hard_max_runtime_s"] == 7200
 
 
 def test_get_settings_valve_driver_readonly_rpi(client):
@@ -123,23 +137,26 @@ def test_post_settings_updates_all_state_fields(client):
         accent_color="#aabbcc",
         default_duration=10,
         default_time_unit="Sekunden",
+        slider_max_minutes=45,
     )
     with patch("api.routes_settings.save_user_settings_to_disk"):
         resp = client.post("/settings", json=payload)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["ok"]                is True
-    assert data["max_history_items"] == 50
-    assert data["navbar_title"]      == "Test Anlage"
-    assert data["accent_color"]      == "#aabbcc"
-    assert data["default_duration"]  == 10
-    assert data["default_time_unit"] == "Sekunden"
+    assert data["ok"]                 is True
+    assert data["max_history_items"]  == 50
+    assert data["navbar_title"]       == "Test Anlage"
+    assert data["accent_color"]       == "#aabbcc"
+    assert data["default_duration"]   == 10
+    assert data["default_time_unit"]  == "Sekunden"
+    assert data["slider_max_minutes"] == 45
     with state_lock:
-        assert state.max_history_items == 50
-        assert state.navbar_title      == "Test Anlage"
-        assert state.accent_color      == "#aabbcc"
-        assert state.default_duration  == 10
-        assert state.default_time_unit == "Sekunden"
+        assert state.max_history_items  == 50
+        assert state.navbar_title       == "Test Anlage"
+        assert state.accent_color       == "#aabbcc"
+        assert state.default_duration   == 10
+        assert state.default_time_unit  == "Sekunden"
+        assert state.slider_max_minutes == 45
 
 
 def test_post_settings_calls_persist(client):
@@ -149,12 +166,13 @@ def test_post_settings_calls_persist(client):
 
 
 def test_post_settings_roundtrip(client):
-    payload = _full_payload(navbar_title="Anlage Nord", accent_color="#001122")
+    payload = _full_payload(navbar_title="Anlage Nord", accent_color="#001122", slider_max_minutes=30)
     with patch("api.routes_settings.save_user_settings_to_disk"):
         client.post("/settings", json=payload)
     resp = client.get("/settings")
-    assert resp.json()["navbar_title"] == "Anlage Nord"
-    assert resp.json()["accent_color"] == "#001122"
+    assert resp.json()["navbar_title"]       == "Anlage Nord"
+    assert resp.json()["accent_color"]       == "#001122"
+    assert resp.json()["slider_max_minutes"] == 30
 
 
 def test_post_settings_only_max_history_required(client):
@@ -276,3 +294,79 @@ def test_post_settings_valid_time_units_accepted(client):
     with patch("api.routes_settings.save_user_settings_to_disk"):
         assert client.post("/settings", json=_full_payload(default_time_unit="Sekunden")).status_code == 200
         assert client.post("/settings", json=_full_payload(default_time_unit="Minuten")).status_code == 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /settings – slider_max_minutes Validierung
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_post_settings_slider_max_zero_rejected(client):
+    resp = client.post("/settings", json=_full_payload(slider_max_minutes=0))
+    assert resp.status_code == 422
+
+def test_post_settings_slider_max_negative_rejected(client):
+    resp = client.post("/settings", json=_full_payload(slider_max_minutes=-1))
+    assert resp.status_code == 422
+
+def test_post_settings_slider_max_over_pydantic_cap_rejected(client):
+    """1441 überschreitet den Pydantic-Absolutcap von 1440."""
+    resp = client.post("/settings", json=_full_payload(slider_max_minutes=1441))
+    assert resp.status_code == 422
+
+def test_post_settings_slider_max_boundary_min_ok(client):
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(slider_max_minutes=1))
+    assert resp.status_code == 200
+    with state_lock:
+        assert state.slider_max_minutes == 1
+
+def test_post_settings_slider_max_clamped_to_hard_limit(client):
+    """slider_max_minutes wird auf hard_max_runtime_s // 60 gekappt, kein 422."""
+    with state_lock:
+        state.hard_max_runtime_s = 1800  # 30 Minuten
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(slider_max_minutes=60))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["slider_max_minutes"] == 30  # gekappt auf 1800 // 60
+    with state_lock:
+        assert state.slider_max_minutes == 30
+
+def test_post_settings_slider_max_at_hard_limit_ok(client):
+    """slider_max_minutes exakt gleich hard_max_runtime_s // 60 → kein Kappen."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(slider_max_minutes=60))
+    assert resp.status_code == 200
+    assert resp.json()["slider_max_minutes"] == 60
+
+def test_post_settings_slider_max_below_hard_limit_ok(client):
+    """slider_max_minutes unterhalb von hard_max_runtime_s // 60 → unveraendert."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=_full_payload(slider_max_minutes=30))
+    assert resp.status_code == 200
+    assert resp.json()["slider_max_minutes"] == 30
+
+def test_post_settings_slider_max_persisted_in_state(client):
+    """State.slider_max_minutes wird nach POST korrekt gesetzt."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        client.post("/settings", json=_full_payload(slider_max_minutes=45))
+    with state_lock:
+        assert state.slider_max_minutes == 45
+
+def test_post_settings_slider_max_default_when_omitted(client):
+    """Fehlendes slider_max_minutes → Pydantic-Default 60 wird verwendet."""
+    with state_lock:
+        state.hard_max_runtime_s = 3600
+    payload = {k: v for k, v in _full_payload().items() if k != "slider_max_minutes"}
+    with patch("api.routes_settings.save_user_settings_to_disk"):
+        resp = client.post("/settings", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["slider_max_minutes"] == 60

@@ -41,7 +41,7 @@ from core.config import (
     DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE,
     DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
-    NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT,
+    NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
     CORRUPT_FILE_MAX_KEEP,
 )
 from core.logging import log_event, logger
@@ -132,6 +132,7 @@ def _default_user_settings_payload() -> dict:
             "ACCENT_COLOR": ACCENT_COLOR,
             "DEFAULT_DURATION": int(DEFAULT_DURATION),
             "DEFAULT_TIME_UNIT": DEFAULT_TIME_UNIT,
+            "SLIDER_MAX_MINUTES": int(SLIDER_MAX_MINUTES),
         },
     }
 
@@ -268,12 +269,24 @@ def load_user_settings_from_disk():
     if default_time_unit not in ("Sekunden", "Minuten"):
         default_time_unit = DEFAULT_TIME_UNIT
 
+    try:
+        slider_max_minutes = max(1, int(user.get("SLIDER_MAX_MINUTES", SLIDER_MAX_MINUTES)))
+    except Exception:
+        slider_max_minutes = SLIDER_MAX_MINUTES
+    # Prüfung gegen hard_max_runtime_s: wird nach dem Schreiben in den State
+    # angewendet, damit device_config.json-Änderungen automatisch greifen.
+    # Der State enthält zu diesem Zeitpunkt bereits den korrekten hard_max_runtime_s
+    # (load_device_config_from_disk() läuft vor load_user_settings_from_disk()).
     with state_lock:
-        state.max_history_items = max_hist
-        state.navbar_title = navbar_title
-        state.accent_color = accent_color
-        state.default_duration = default_duration
-        state.default_time_unit = default_time_unit
+        hard_max_min = int(getattr(state, "hard_max_runtime_s", MAX_RUNTIME_S)) // 60
+        slider_max_minutes = min(slider_max_minutes, hard_max_min)
+
+        state.max_history_items  = max_hist
+        state.navbar_title       = navbar_title
+        state.accent_color       = accent_color
+        state.default_duration   = default_duration
+        state.default_time_unit  = default_time_unit
+        state.slider_max_minutes = slider_max_minutes
 
 
 def save_user_settings_to_disk():
@@ -283,13 +296,15 @@ def save_user_settings_to_disk():
         accent_color = str(getattr(state, "accent_color", ACCENT_COLOR))
         default_duration = int(getattr(state, "default_duration", DEFAULT_DURATION))
         default_time_unit = str(getattr(state, "default_time_unit", DEFAULT_TIME_UNIT))
+        slider_max_minutes = int(getattr(state, "slider_max_minutes", SLIDER_MAX_MINUTES))
 
     payload = _default_user_settings_payload()
-    payload["user"]["MAX_HISTORY_ITEMS"] = max_hist
-    payload["user"]["NAVBAR_TITLE"] = navbar_title
-    payload["user"]["ACCENT_COLOR"] = accent_color
-    payload["user"]["DEFAULT_DURATION"] = default_duration
-    payload["user"]["DEFAULT_TIME_UNIT"] = default_time_unit
+    payload["user"]["MAX_HISTORY_ITEMS"]   = max_hist
+    payload["user"]["NAVBAR_TITLE"]        = navbar_title
+    payload["user"]["ACCENT_COLOR"]        = accent_color
+    payload["user"]["DEFAULT_DURATION"]    = default_duration
+    payload["user"]["DEFAULT_TIME_UNIT"]   = default_time_unit
+    payload["user"]["SLIDER_MAX_MINUTES"]  = slider_max_minutes
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(USER_SETTINGS_FILE, payload)
 

@@ -93,6 +93,9 @@ class SettingsUpdateRequest(BaseModel):
     accent_color        : Akzentfarbe als Hex-String, z.B. "#82372a".
     default_duration    : Standardwert der Dauer-Slider (1–120).
     default_time_unit   : Standard-Zeiteinheit fuer Dauer-Radiobuttons.
+    slider_max_minutes  : Maximaler Anzeigewert der Laufzeit-Slider in Minuten (1–1440).
+                          Darf hard_max_runtime_s // 60 nicht übersteigen –
+                          wird im Route-Handler dynamisch geprüft.
 
     max_history_items ist required (bestehende API-Kompatibilitaet).
     Alle anderen Felder haben Defaults und sind optional.
@@ -102,6 +105,9 @@ class SettingsUpdateRequest(BaseModel):
     accent_color: str = Field("#82372a")
     default_duration: int = Field(5, ge=1, le=120)
     default_time_unit: Literal["Sekunden", "Minuten"] = "Minuten"
+    # 1440 = 24 h als absoluter Pydantic-Cap; dynamische Prüfung gegen
+    # hard_max_runtime_s // 60 erfolgt im Route-Handler.
+    slider_max_minutes: int = Field(60, ge=1, le=1440)
 
     @field_validator("navbar_title")
     @classmethod
