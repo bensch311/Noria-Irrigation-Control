@@ -317,6 +317,9 @@ ui.tags.head(
 # die reaktiven Renderer überschrieben.
 ACCENT_COLOR_DEFAULT = "#b8902a"
 NAVBAR_TITLE_DEFAULT = "Noria - Irrigation Control"
+# Hardcoded Prefix der immer in der Navbar und im Browser-Tab erscheint.
+# Der User konfiguriert nur den Teil dahinter (den "Suffix").
+NAVBAR_PREFIX = "Noria - "
 
 # Initiales CSS mit Fallback-Farbe (sofort beim Laden aktiv)
 ui.tags.style(f":root {{ --accent: {ACCENT_COLOR_DEFAULT}; }}")
@@ -466,8 +469,11 @@ def _dynamic_accent_style():
 @render.ui
 def _dynamic_navbar_title_js():
     d = _settings_data()
-    title = d.get("navbar_title", NAVBAR_TITLE_DEFAULT) if d else NAVBAR_TITLE_DEFAULT
-    title_js = _json_mod.dumps(title)
+    # navbar_title enthält nur den User-konfigurierten Suffix.
+    # NAVBAR_PREFIX wird hier unveränderlich vorangestellt.
+    suffix = d.get("navbar_title", NAVBAR_TITLE_DEFAULT) if d else NAVBAR_TITLE_DEFAULT
+    full_title = NAVBAR_PREFIX + suffix
+    title_js = _json_mod.dumps(full_title)
     return ui.tags.script(f"""
         (function() {{
             // Zielt auf den Text-Span, nicht auf das Root-Element – so wird ein
@@ -1631,10 +1637,18 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ui.p("Darstellung", class_="settings-section-title")
 
                     ui.p("Navbar-Titel", class_="fw-semibold mb-1")
-                    ui.input_text(
-                        "txt_navbar_title", None,
-                        value="Bewaesserungscomputer",
-                        placeholder="z.B. Hof Muster – Bewaesserung",
+                    ui.div(
+                        # ui.tags.span(
+                        #     NAVBAR_PREFIX,
+                        #     class_="input-group-text",
+                        #     style="font-size:0.9rem;",
+                        # ),
+                        ui.input_text(
+                            "txt_navbar_title", None,
+                            value="Bewaesserungscomputer",
+                            placeholder="z.B. Hof Muster",
+                        ),
+                        class_="input-group",
                     )
 
                     ui.p("Akzentfarbe", class_="fw-semibold mt-3 mb-1")
@@ -1903,6 +1917,9 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
         @reactive.event(input.btn_save_settings)
         def _h_save_settings():
             hist_val  = input.sld_max_history()
+            # txt_navbar_title enthält nur den Suffix (ohne NAVBAR_PREFIX).
+            # NAVBAR_PREFIX wird in _dynamic_navbar_title_js angehängt und
+            # niemals in der Datenbank gespeichert.
             title_val = input.txt_navbar_title() or NAVBAR_TITLE_DEFAULT
             # clr_accent_color kommt via Shiny.setInputValue; Fallback auf Default
             try:
@@ -1975,8 +1992,13 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 if hist is not None:
                     ui.update_slider("sld_max_history", value=int(hist))
 
-                title = d.get("navbar_title", NAVBAR_TITLE_DEFAULT)
-                ui.update_text("txt_navbar_title", value=title)
+                # Gespeicherter Wert ist reiner Suffix – kein Prefix abschneiden nötig.
+                # Sicherheitshalber: falls ein alter Wert mit Prefix gespeichert wurde,
+                # diesen entfernen damit das Textfeld nicht "Noria - Hof Muster" zeigt.
+                title_raw = d.get("navbar_title", NAVBAR_TITLE_DEFAULT)
+                if title_raw.startswith(NAVBAR_PREFIX):
+                    title_raw = title_raw[len(NAVBAR_PREFIX):] or NAVBAR_TITLE_DEFAULT
+                ui.update_text("txt_navbar_title", value=title_raw)
 
                 color = d.get("accent_color", ACCENT_COLOR_DEFAULT)
                 _apply_color_picker(color)
