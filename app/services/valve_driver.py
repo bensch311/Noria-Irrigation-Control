@@ -6,8 +6,8 @@ Dieses Modul stellt eine einheitliche Schnittstelle für Ventiloperationen berei
 unabhängig davon ob ein echter Raspberry Pi oder eine Simulation verwendet wird.
 
 Treiber-Typen:
-  SimValveDriver    – Simulation (kein GPIO, nur Logging). Für Dev/Tests/Windows.
-  RpiGpioValveDriver – Echter Raspberry Pi GPIO via RPi.GPIO (BCM-Nummerierung).
+  SimValveDriver     – Simulation (kein GPIO, nur Logging). Für Dev/Tests/Windows.
+  RpiGpioValveDriver – Echter Raspberry Pi GPIO via lgpio/rpi-lgpio (BCM-Nummerierung).
 
 Treiber-Auswahl (Reihenfolge, see get_valve_driver()):
   1. ENV-Variable IRRIGATION_VALVE_DRIVER ("sim" | "rpi")
@@ -16,11 +16,17 @@ Treiber-Auswahl (Reihenfolge, see get_valve_driver()):
 
 Bei RpiGpioValveDriver:
   - active_low=True: Relais-Board mit Active-Low-Logik (typisch für chinesische
-    8-Kanal-Relay-Boards). LOW = Relais anzieht = Ventil öffnet.
-  - active_low=False: Standard-Logik. HIGH = Relais anzieht = Ventil öffnet.
-  - Pins werden beim Init als Outputs konfiguriert und auf "geschlossen" gesetzt.
+    8-Kanal-Relay-Boards). LOW = Relais zieht an = Ventil öffnet.
+  - active_low=False: Standard-Logik. HIGH = Relais zieht an = Ventil öffnet.
+  - Pins werden beim Init via gpio_claim_output() als Outputs konfiguriert und
+    atomar auf "geschlossen" gesetzt (kein Race zwischen Richtungs- und Wert-Setzung).
   - close_all() ist best-effort: alle Zonen werden versucht, auch bei Teilfehlern.
-  - cleanup() gibt GPIO-Ressourcen frei – IMMER nach close_all() aufrufen.
+  - cleanup() gibt den GPIO-Chip-Handle frei – IMMER nach close_all() aufrufen.
+
+Warum lgpio statt RPi.GPIO:
+  Der Raspberry Pi 5 verwendet den neuen RP1-I/O-Controller. RPi.GPIO 0.7.x
+  unterstützt diesen Chip nicht und ist daher auf Pi 5 nicht nutzbar.
+  rpi-lgpio stellt die lgpio-API bereit und unterstützt den RP1 vollständig.
 
 Singleton-Pattern:
   get_valve_driver()   – gibt die globale Instanz zurück (lazy init)
@@ -88,7 +94,7 @@ class BaseValveDriver:
         raise NotImplementedError
 
     def cleanup(self) -> None:
-        """Gibt Hardware-Ressourcen frei (z.B. GPIO.cleanup() auf RPi).
+        """Gibt Hardware-Ressourcen frei (z.B. gpiochip_close() auf RPi).
         Default ist ein No-Op – Unterklassen überschreiben bei Bedarf.
         Muss NACH close_all() aufgerufen werden.
         """
@@ -115,8 +121,12 @@ class SimValveDriver(BaseValveDriver):
 
 class RpiGpioValveDriver(BaseValveDriver):
     """
-    Raspberry Pi GPIO Driver via RPi.GPIO (BCM numbering).
-    Relay boards are often active-low.
+    Raspberry Pi GPIO Driver via lgpio / rpi-lgpio (BCM numbering).
+
+    Kompatibel mit Raspberry Pi 5 (RP1-Chip). Verwendet lgpio statt RPi.GPIO,
+    da RPi.GPIO 0.7.x den RP1-I/O-Controller nicht unterstützt.
+
+    Relay boards sind oft active-low (LOW = Relais zieht an).
     """
     name: str = "rpi"
 
@@ -125,24 +135,35 @@ class RpiGpioValveDriver(BaseValveDriver):
         self._active_low = bool(active_low)
 
         try:
-            import RPi.GPIO as GPIO  # type: ignore
+            import lgpio  # type: ignore
         except Exception as e:
-            raise ValveDriverError(f"RPi.GPIO nicht verfügbar: {e}")
+            raise ValveDriverError(f"lgpio nicht verfügbar: {e}")
 
-        self._GPIO = GPIO
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
+        self._lgpio = lgpio
 
-        # Setup all pins as outputs, initial value = "closed" (sicher/inaktiv).
-        # initial= setzt Richtung UND Wert atomar – kein Race zwischen setup()
-        # und dem ersten output()-Call. Ohne initial= würde lgpio/RPi.GPIO den
-        # Pin kurz auf LOW setzen, was bei Active-Low-Boards alle Relais kurz
-        # (oder dauerhaft) aktiviert bevor write_closed() greift.
-        # closed = de-energized: active_low=True → HIGH, active_low=False → LOW
-        # (identisch zu _write_closed(), aber als initial= für atomares Setup)
-        initial_closed = GPIO.HIGH if self._active_low else GPIO.LOW
+        # gpiochip 0 ist auf allen Pi-Modellen der primäre GPIO-Chip.
+        try:
+            self._handle = lgpio.gpiochip_open(0)
+        except Exception as e:
+            raise ValveDriverError(f"GPIO-Chip konnte nicht geöffnet werden: {e}")
+
+        # gpio_claim_output() setzt Richtung UND Initialwert atomar – kein Race
+        # zwischen claim und erstem write(). Bei Active-Low-Boards bedeutet
+        # "geschlossen" (de-energized) = HIGH (1). Bei Active-High = LOW (0).
+        initial_closed = self._closed_val()
         for zone, pin in sorted(self._pins_by_zone.items()):
-            GPIO.setup(int(pin), GPIO.OUT, initial=initial_closed)
+            try:
+                lgpio.gpio_claim_output(self._handle, int(pin), initial_closed)
+            except Exception as e:
+                # Chip-Handle freigeben bevor wir die Exception weiterwerfen,
+                # damit kein Ressourcen-Leak entsteht.
+                try:
+                    lgpio.gpiochip_close(self._handle)
+                except Exception:
+                    pass
+                raise ValveDriverError(
+                    f"Pin BCM {pin} (Zone {zone}) konnte nicht konfiguriert werden: {e}"
+                )
 
         log_event(
             "valve_driver_gpio_setup",
@@ -152,15 +173,19 @@ class RpiGpioValveDriver(BaseValveDriver):
             zones=sorted(list(self._pins_by_zone.keys())),
         )
 
+    def _open_val(self) -> int:
+        # open = relay energized: active_low → 0 (LOW), active_high → 1 (HIGH)
+        return 0 if self._active_low else 1
+
+    def _closed_val(self) -> int:
+        # closed = relay de-energized: active_low → 1 (HIGH), active_high → 0 (LOW)
+        return 1 if self._active_low else 0
+
     def _write_open(self, pin: int) -> None:
-        # open = relay energized
-        val = 0 if self._active_low else 1
-        self._GPIO.output(pin, val)
+        self._lgpio.gpio_write(self._handle, pin, self._open_val())
 
     def _write_closed(self, pin: int) -> None:
-        # closed = relay de-energized
-        val = 1 if self._active_low else 0
-        self._GPIO.output(pin, val)
+        self._lgpio.gpio_write(self._handle, pin, self._closed_val())
 
     def open(self, zone: int) -> None:
         if zone not in self._pins_by_zone:
@@ -204,13 +229,13 @@ class RpiGpioValveDriver(BaseValveDriver):
         )
 
     def cleanup(self) -> None:
-        """Gibt GPIO-Ressourcen frei und setzt alle Pins auf Input zurück.
+        """Gibt den GPIO-Chip-Handle frei.
 
         Muss nach close_all() aufgerufen werden – niemals davor, da
-        GPIO.cleanup() die Pin-Kontrolle sofort abgibt.
+        gpiochip_close() die Pin-Kontrolle sofort abgibt.
         """
         try:
-            self._GPIO.cleanup()
+            self._lgpio.gpiochip_close(self._handle)
             log_event("valve_driver_gpio_cleanup", source="driver", driver=self.name)
         except Exception as e:
             log_event(
@@ -251,7 +276,7 @@ def _read_driver_settings_from_state() -> dict[str, Any]:
     """Liest Driver-Settings (mode, active_low, pins) aus dem globalen State.
 
     Der State wird von load_device_config_from_disk() (persistence.py) befüllt.
-    Diese Funktion ist der "Brücke" zwischen Persistence und Driver-Initialisierung.
+    Diese Funktion ist die "Brücke" zwischen Persistence und Driver-Initialisierung.
     """
     try:
         from core.state import state, state_lock
@@ -273,7 +298,7 @@ def get_valve_driver() -> BaseValveDriver:
       2) device_config.json/state
       3) fallback = sim
 
-    Bei Fehlern in der Initialisierung (z.B. RPi.GPIO nicht verfügbar,
+    Bei Fehlern in der Initialisierung (z.B. lgpio nicht verfügbar,
     fehlende GPIO-Pins) → sicherer Fallback auf SimValveDriver mit Error-Log.
     """
     global _driver
@@ -302,7 +327,7 @@ def get_valve_driver() -> BaseValveDriver:
 
         if mode == "rpi":
             if not pins:
-                raise ValveDriverError("IRRIGATION_GPIO_PINS ist leer/fehlt in settings.json")
+                raise ValveDriverError("IRRIGATION_GPIO_PINS ist leer/fehlt in device_config.json")
 
             pins_by_zone: Dict[int, int] = {}
             for k, v in pins.items():
@@ -314,7 +339,7 @@ def get_valve_driver() -> BaseValveDriver:
             if not vres.get("ok"):
                 raise ValveDriverError(f"Ungültige GPIO Pin-Konfiguration: {vres}")
 
-            # NEW: require full coverage 1..max_valves if present in state
+            # Vollständige Pin-Abdeckung 1..max_valves prüfen
             try:
                 from core.state import state, state_lock
                 with state_lock:
@@ -330,7 +355,7 @@ def get_valve_driver() -> BaseValveDriver:
             log_event("valve_driver_init", source="driver", driver=_driver.name, mode=mode, env_override=bool(env_mode))
             return _driver
 
-        # unknown mode => safe fallback
+        # Unbekannter Modus → sicherer Fallback
         _driver = SimValveDriver()
         log_event(
             "valve_driver_init_fallback",
@@ -343,7 +368,7 @@ def get_valve_driver() -> BaseValveDriver:
         return _driver
 
     except Exception as e:
-        # any init error => safe fallback to sim
+        # Jeder Init-Fehler → sicherer Fallback auf sim
         _driver = SimValveDriver()
         log_event(
             "valve_driver_init_failed_fallback",
