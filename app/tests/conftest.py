@@ -4,6 +4,7 @@ Gemeinsame Fixtures und Hilfsfunktionen für alle Tests.
 Autouse-Fixtures sorgen vor/nach jedem Test für:
   - sauberen RunState (clean_state)
   - SimValveDriver als Valve-Driver (sim_driver)
+  - SimSensorDriver als Sensor-Driver (sim_sensor_driver)
   - MagicMock als IO-Worker (mock_io)
   - bekannten API-Key in core.security (_patch_api_key)
 
@@ -47,6 +48,7 @@ from core.state import (
 )
 from services.io_worker import IOResult, IOWorker, set_io_worker, reset_io_worker
 from services.valve_driver import SimValveDriver, set_valve_driver, reset_valve_driver
+from services.sensor_driver import SimSensorDriver, set_sensor_driver, reset_sensor_driver
 
 # ---------------------------------------------------------------------------
 # Test-API-Key: 64 gültige Hex-Zeichen (256 bit), fest für alle Tests.
@@ -102,6 +104,10 @@ def reset_global_state() -> None:
         if state.gpio_pins_by_zone is None:
             state.gpio_pins_by_zone = {}
 
+        # sensor_gpio_pins_by_zone: analog zu gpio_pins_by_zone.
+        if state.sensor_gpio_pins_by_zone is None:
+            state.sensor_gpio_pins_by_zone = {}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Autouse-Fixtures (laufen vor/nach JEDEM Test)
@@ -123,6 +129,15 @@ def sim_driver():
     set_valve_driver(driver)
     yield driver
     reset_valve_driver()
+
+
+@pytest.fixture(autouse=True)
+def sim_sensor_driver():
+    """Setzt SimSensorDriver als aktiven Sensor-Driver für alle Tests."""
+    driver = SimSensorDriver()
+    set_sensor_driver(driver)
+    yield driver
+    reset_sensor_driver()
 
 
 @pytest.fixture(autouse=True)

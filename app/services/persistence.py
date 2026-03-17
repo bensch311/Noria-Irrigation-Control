@@ -18,7 +18,7 @@ Technische Eigenschaften:
     nie eine halbgeschriebene Zieldatei (crash-safe).
 
   Korrupte-Datei-Behandlung: Bei JSON-Parse-Fehler wird die korrupte Datei in
-    <name>.corrupt-<ts> umbenannt (max. CORRUPT_FILE_MAX_KEEP Backups),
+    <n>.corrupt-<ts> umbenannt (max. CORRUPT_FILE_MAX_KEEP Backups),
     und der State bleibt bei den Defaults/letzten bekannten Werten.
 
   Dirty-Flag-Mechanismus: Änderungen setzen state.*_dirty=True.
@@ -115,6 +115,11 @@ def _default_device_config_payload() -> dict:
             "IRRIGATION_RELAY_ACTIVE_LOW": True,
             "IRRIGATION_GPIO_PINS": {},                # {"1": 17, ...} BCM
         },
+        "sensors": {
+            "IRRIGATION_SENSOR_DRIVER": "sim",         # sim | rpi_switch
+            "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
+            "IRRIGATION_SENSOR_PINS": {},              # {"1": 24, ...} BCM
+        },
         "hard_limits": {
             "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
             "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
@@ -174,6 +179,7 @@ def load_device_config_from_disk():
 
     dev = payload.get("device") if isinstance(payload.get("device"), dict) else {}
     hl = payload.get("hard_limits") if isinstance(payload.get("hard_limits"), dict) else {}
+    sens = payload.get("sensors") if isinstance(payload.get("sensors"), dict) else {}
 
     def _int(x, default):
         try:
@@ -181,6 +187,7 @@ def load_device_config_from_disk():
         except Exception:
             return default
 
+    # ── Ventil-Konfiguration ──────────────────────────────────────────────────
     max_valves = max(1, _int(dev.get("MAX_VALVES", MAX_VALVES), MAX_VALVES))
 
     drv = str(dev.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim").strip().lower()
@@ -201,10 +208,35 @@ def load_device_config_from_disk():
             except Exception:
                 continue
 
+    # ── Hard-Limits ───────────────────────────────────────────────────────────
     hard_max_runtime_s = max(1, _int(hl.get("MAX_RUNTIME_S", MAX_RUNTIME_S), MAX_RUNTIME_S))
     hard_max_conc = max(1, _int(hl.get("MAX_CONCURRENT_VALVES", MAX_CONCURRENT_VALVES), MAX_CONCURRENT_VALVES))
     hard_max_conc = min(hard_max_conc, max_valves)
 
+    # ── Sensor-Konfiguration ──────────────────────────────────────────────────
+    sensor_drv = str(
+        sens.get("IRRIGATION_SENSOR_DRIVER", "sim") or "sim"
+    ).strip().lower()
+    if sensor_drv not in ("sim", "rpi_switch"):
+        sensor_drv = "sim"
+
+    sensor_internal_pull_up = bool(
+        sens.get("IRRIGATION_SENSOR_INTERNAL_PULL_UP", False)
+    )
+
+    sensor_pins_raw = sens.get("IRRIGATION_SENSOR_PINS", {})
+    sensor_pins_norm: dict[int, int] = {}
+    if isinstance(sensor_pins_raw, dict):
+        for k, v in sensor_pins_raw.items():
+            try:
+                z = int(k)
+                p = int(v)
+                if z >= 1:
+                    sensor_pins_norm[z] = p
+            except Exception:
+                continue
+
+    # ── State aktualisieren ───────────────────────────────────────────────────
     with state_lock:
         state.max_valves = max_valves
         state.valve_driver_mode = drv
@@ -212,10 +244,19 @@ def load_device_config_from_disk():
         state.gpio_pins_by_zone = pins_norm
         state.hard_max_runtime_s = hard_max_runtime_s
         state.hard_max_concurrent_valves = hard_max_conc
+        state.sensor_driver_mode = sensor_drv
+        state.sensor_gpio_pins_by_zone = sensor_pins_norm
+        state.sensor_internal_pull_up = sensor_internal_pull_up
 
     try:
         from services.valve_driver import reset_valve_driver
         reset_valve_driver()
+    except Exception:
+        pass
+
+    try:
+        from services.sensor_driver import reset_sensor_driver
+        reset_sensor_driver()
     except Exception:
         pass
 

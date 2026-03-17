@@ -115,6 +115,7 @@ class RunState:
       - Hardware-Fault-Latch:  hw_faulted, hw_fault_*
       - Parallel-Modus:        parallel_enabled, max_concurrent_valves, parallel_drain_logged
       - Device-Konfiguration:  max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
+      - Sensor-Konfiguration:  sensor_driver_mode, sensor_gpio_pins_by_zone, sensor_internal_pull_up
       - User-Settings:         max_history_items, navbar_title, accent_color, …
       - Hard-Limits:           hard_max_runtime_s, hard_max_concurrent_valves
       - Neustart-Erkennung:    unclean_restart, restart_detected_at
@@ -172,6 +173,11 @@ class RunState:
     valve_driver_mode: str = "sim"      # "sim" | "rpi"
     relay_active_low: bool = True       # True = Relais-Board mit Active-Low-Logik
     gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
+
+    # ── Sensor-Konfiguration (aus device_config.json) ─────────────────────────
+    sensor_driver_mode: str = "sim"                          # "sim" | "rpi_switch"
+    sensor_gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
+    sensor_internal_pull_up: bool = False   # True = internen Pi-Pull-Up (~50kΩ) verwenden
 
     # ── User-Settings (aus user_settings.json) ────────────────────────────────
     max_history_items: int = 20
