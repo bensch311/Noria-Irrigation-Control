@@ -321,3 +321,155 @@ class TestGetSensorConfig:
         assert resp.status_code == 200
         data = resp.json()
         assert data["gpio_config_valid"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /sensors/sim/set
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPostSensorsSimSet:
+    def test_returns_200_in_sim_mode(self, client):
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [], "moist_zones": []})
+        assert resp.status_code == 200
+
+    def test_requires_api_key(self, client):
+        resp = client.post(
+            "/sensors/sim/set",
+            json={"dry_zones": [], "moist_zones": []},
+            headers={"X-API-Key": ""},
+        )
+        assert resp.status_code == 401
+
+    def test_returns_404_when_not_sim_mode(self, client):
+        """Im rpi_switch-Modus muss der Endpunkt 404 zurückgeben."""
+        with state_lock:
+            state.sensor_driver_mode = "rpi_switch"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [1]})
+        assert resp.status_code == 404
+
+    def test_set_zone_dry(self, client, sim_sensor_driver):
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [1, 2]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert 1 in data["dry_zones"]
+        assert 2 in data["dry_zones"]
+
+    def test_set_zone_moist_clears_dry(self, client, sim_sensor_driver):
+        """Zone erst trocken, dann wieder feucht setzen."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        sim_sensor_driver.set_zone_dry(3)
+
+        resp = client.post("/sensors/sim/set", json={"moist_zones": [3]})
+        assert resp.status_code == 200
+        # Zone 3 darf nicht mehr in dry_zones sein
+        assert 3 not in resp.json()["dry_zones"]
+
+    def test_empty_body_is_valid(self, client):
+        """Leerer Body (keine Zonen gesetzt) → 200, kein Fehler."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_overlap_dry_and_moist_returns_422(self, client):
+        """Zone in dry_zones UND moist_zones → 422 Validation Error."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post(
+            "/sensors/sim/set",
+            json={"dry_zones": [1], "moist_zones": [1]},
+        )
+        assert resp.status_code == 422
+
+    def test_zone_less_than_1_returns_422(self, client):
+        """Zone 0 ist ungültig (Zonen beginnen bei 1)."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [0]})
+        assert resp.status_code == 422
+
+    def test_driver_state_actually_changed(self, client, sim_sensor_driver):
+        """Prüft dass der SimSensorDriver-Singleton wirklich verändert wurde."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        client.post("/sensors/sim/set", json={"dry_zones": [5]})
+
+        # Direkt am Driver prüfen – das ist der Singleton den sensor_engine liest
+        reading = sim_sensor_driver.read(5)
+        assert reading.needs_irrigation is True
+
+    def test_multiple_zones_set_at_once(self, client, sim_sensor_driver):
+        """Mehrere Zonen gleichzeitig auf trocken setzen."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [1, 2, 3]})
+        assert resp.status_code == 200
+        dry = resp.json()["dry_zones"]
+        assert sorted(dry) == [1, 2, 3]
+
+    def test_response_dry_zones_sorted(self, client):
+        """dry_zones im Response sind sortiert."""
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [3, 1, 2]})
+        assert resp.json()["dry_zones"] == [1, 2, 3]
+
+    def test_sim_set_triggers_queue_item_on_next_poll(self, client, sim_sensor_driver):
+        """End-to-End: Zone trocken setzen → sensor_engine_loop stellt Queue-Item ein.
+
+        Dieser Test simuliert einen vollständigen Polling-Zyklus manuell, ohne
+        den Background-Thread zu starten. Er prüft die Kernlogik:
+          1. Zone via API auf trocken setzen
+          2. _read_all_sensors() liest den gesetzten Zustand vom SimDriver
+          3. _process_sensor_cycle_locked() stellt ein QueueItem ein
+
+        Der Timer-Loop der das Item tatsächlich startet wird NICHT getestet –
+        das ist der Zuständigkeit von test_timer.py und Integration-Tests.
+        """
+        import time as _time
+        from core.state import QueueItem
+        from services.sensor_engine import _read_all_sensors, _process_sensor_cycle_locked
+
+        with state_lock:
+            state.sensor_driver_mode = "sim"
+            state.sensor_gpio_pins_by_zone = {1: 24}
+            state.sensor_cooldown_s = 0       # kein Cooldown für den Test
+            state.sensor_default_duration_s = 60
+            state.sensor_readings = {}
+            state.sensor_last_triggered = {}
+            state.queue = []
+            state.queue_state = "bereit"
+
+        # Zone 1 auf trocken setzen
+        resp = client.post("/sensors/sim/set", json={"dry_zones": [1]})
+        assert resp.status_code == 200
+
+        # Polling-Zyklus manuell durchführen
+        zones = [1]
+        readings = _read_all_sensors(zones)
+        assert len(readings) == 1
+        assert readings[0].needs_irrigation is True
+
+        now_m = _time.monotonic()
+        with state_lock:
+            items_to_queue, _ = _process_sensor_cycle_locked(readings, now_m)
+            if items_to_queue:
+                state.queue.extend(items_to_queue)
+
+        # Queue muss ein Item für Zone 1 enthalten
+        with state_lock:
+            queue_snapshot = list(state.queue)
+
+        assert len(queue_snapshot) == 1
+        item = queue_snapshot[0]
+        assert item.zone == 1
+        assert item.source == "sensor"
+        assert item.duration == 60

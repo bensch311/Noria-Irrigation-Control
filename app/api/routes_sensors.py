@@ -1,11 +1,12 @@
 # app/api/routes_sensors.py
 """
-Sensor-Endpunkte: Lesezustand und Konfiguration der Bewässerungssensoren.
+Sensor-Endpunkte: Lesezustand, Konfiguration und Simulations-Steuerung.
 
-GET /sensors/readings  – Aktueller Feuchtezustand aller konfigurierten Sensor-Zonen
-GET /sensors/config    – Aktive Sensor-Konfiguration inkl. GPIO-Validierung
+GET  /sensors/readings    – Aktueller Feuchtezustand aller konfigurierten Sensor-Zonen
+GET  /sensors/config      – Aktive Sensor-Konfiguration inkl. GPIO-Validierung
+POST /sensors/sim/set     – Sim-only: Zonen manuell auf trocken/feucht setzen
 
-Beide Endpunkte sind read-only und liefern ausschließlich State-Snapshots.
+GET-Endpunkte sind read-only und liefern ausschließlich State-Snapshots.
 Die Bewertungslogik (wann eine Zone bewässert wird) liegt vollständig in
 services/sensor_engine.py.
 
@@ -23,14 +24,24 @@ Besonderheit von /sensors/readings:
 Besonderheit von /sensors/config:
   gpio_validation wird – analog zu GET /health für Ventile – nur im
   Modus "rpi_switch" durchgeführt. Im Sim-Modus ist sie per Definition gültig.
+
+Besonderheit von POST /sensors/sim/set:
+  Nur verfügbar wenn sensor_driver_mode == "sim" (404 sonst).
+  Schreibt direkt in den SimSensorDriver-Singleton – der nächste Polling-
+  Zyklus des sensor_engine_loop liest den gesetzten Zustand und stellt
+  ggf. Queue-Items ein. Dient ausschließlich zum manuellen Testen des
+  End-to-End-Pfades ohne echte Hardware.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 import time
 
 from core.state import state, state_lock
 from core.security import require_api_key
-from services.sensor_driver import get_sensor_driver, validate_sensor_pins
+from core.logging import log_event
+from core.limiter import limiter, MUTATION_LIMIT
+from services.sensor_driver import get_sensor_driver, validate_sensor_pins, SimSensorDriver
+from models.requests import SimSensorSetRequest
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
@@ -143,4 +154,87 @@ def get_sensor_config():
         "gpio_config_valid":      gpio_config_valid,
         "invalid_pins":           gpio_validation.get("invalid_pins", []),
         "duplicate_pins":         gpio_validation.get("duplicate_pins", []),
+    }
+
+
+@router.post("/sensors/sim/set")
+@limiter.limit(MUTATION_LIMIT)
+def sim_set_sensor_state(request, req: SimSensorSetRequest):
+    """Setzt Sensor-Zonen im Sim-Modus manuell auf trocken oder feucht.
+
+    NUR im Sim-Modus verfügbar (sensor_driver_mode == "sim").
+    Im Produktionsmodus (rpi_switch) antwortet der Endpunkt mit 404 –
+    es gibt keine Möglichkeit, Hardware-Readings zu überschreiben.
+
+    Funktionsweise:
+      - Schreibt direkt in den SimSensorDriver-Singleton via set_zone_dry() /
+        set_zone_moist().
+      - Der nächste sensor_engine_loop-Zyklus liest den gesetzten Zustand
+        und stellt ggf. ein QueueItem ein (wenn Cooldown abgelaufen).
+      - Ideal zum End-to-End-Test des vollständigen Sensor→Queue→Ventil-Pfads
+        ohne echte Hardware.
+
+    Request-Felder:
+      dry_zones   – Zonen auf "trocken" setzen (needs_irrigation=True)
+      moist_zones – Zonen auf "feucht" setzen  (needs_irrigation=False)
+
+    Response-Felder:
+      ok          – immer True bei Erfolg
+      dry_zones   – welche Zonen jetzt als trocken gelten (aus dem Driver)
+      moist_zones – welche Zonen jetzt als feucht gelten
+    """
+    # Modus-Guard: 404 wenn kein Sim-Driver aktiv.
+    # Geprüft wird sensor_driver_mode im State (Konfiguration), nicht der
+    # tatsächliche Treiber-Name – so schlägt der Guard auch dann an, wenn
+    # der Treiber-Init fehlgeschlagen und auf sim gefallen ist (rpi_switch
+    # konfiguriert, aber sim aktiv). Letzteres wäre ein Hardware-Problem,
+    # kein Grund den Debug-Endpunkt zu öffnen.
+    with state_lock:
+        mode = str(getattr(state, "sensor_driver_mode", "sim")).strip().lower()
+
+    if mode != "sim":
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"POST /sensors/sim/set ist nur im Sim-Modus verfügbar "
+                f"(aktueller Modus: '{mode}')."
+            ),
+        )
+
+    # Driver-Instanz holen und auf SimSensorDriver prüfen.
+    # get_sensor_driver() gibt den globalen Singleton zurück – denselben den
+    # sensor_engine_loop beim nächsten Poll verwendet.
+    driver = get_sensor_driver()
+    if not isinstance(driver, SimSensorDriver):
+        # Sollte bei mode=="sim" nicht passieren, aber defensive Guard.
+        raise HTTPException(
+            status_code=500,
+            detail="Sensor-Driver ist kein SimSensorDriver trotz sim-Modus.",
+        )
+
+    # Zustand setzen
+    for zone in req.dry_zones:
+        driver.set_zone_dry(zone)
+    for zone in req.moist_zones:
+        driver.set_zone_moist(zone)
+
+    # Aktuellen Driver-Zustand für den Response lesen
+    dry_now   = sorted(driver._dry_zones)
+    moist_now = sorted(
+        z for z in (req.dry_zones + req.moist_zones)
+        if z not in driver._dry_zones
+    )
+
+    log_event(
+        "sensor_sim_set",
+        source="manual",
+        dry_zones=req.dry_zones,
+        moist_zones=req.moist_zones,
+        driver_dry_zones_after=dry_now,
+    )
+
+    return {
+        "ok":         True,
+        "dry_zones":  dry_now,
+        "moist_zones": moist_now,
     }

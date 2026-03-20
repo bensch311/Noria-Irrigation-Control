@@ -85,6 +85,44 @@ class ParallelModeRequest(BaseModel):
     enabled: bool
 
 
+class SimSensorSetRequest(BaseModel):
+    """Request-Modell für POST /sensors/sim/set.
+
+    Setzt beliebig viele Zonen gleichzeitig auf trocken oder feucht.
+    Zonen die in beiden Listen auftauchen sind ein Validierungsfehler (422).
+
+    Nur gueltig wenn sensor_driver_mode == "sim" – im Produktionsmodus
+    antwortet der Endpunkt mit 404.
+
+    dry_zones:   Zonen die als trocken markiert werden (needs_irrigation=True).
+    moist_zones: Zonen die als feucht markiert werden (needs_irrigation=False).
+
+    Beide Listen sind optional; ein leerer Body tut nichts und gibt den
+    aktuellen Zustand zurueck. So kann der Endpunkt auch rein zum Abfragen
+    des Sim-Zustands genutzt werden.
+    """
+    dry_zones:   List[int] = Field(default_factory=list)
+    moist_zones: List[int] = Field(default_factory=list)
+
+    @field_validator("dry_zones", "moist_zones")
+    @classmethod
+    def validate_zones_positive(cls, v: List[int]) -> List[int]:
+        for z in v:
+            if z < 1:
+                raise ValueError(
+                    f"Zonen-Nummer muss >= 1 sein, bekommen: {z}"
+                )
+        return v
+
+    def model_post_init(self, __context: object) -> None:
+        """Prueft dass keine Zone in beiden Listen vorkommt."""
+        overlap = set(self.dry_zones) & set(self.moist_zones)
+        if overlap:
+            raise ValueError(
+                f"Zonen {sorted(overlap)} kommen in dry_zones UND moist_zones vor."
+            )
+
+
 class SettingsUpdateRequest(BaseModel):
     """Request-Modell für POST /settings.
 
