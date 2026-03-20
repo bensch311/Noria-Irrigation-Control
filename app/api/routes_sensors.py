@@ -33,7 +33,7 @@ Besonderheit von POST /sensors/sim/set:
   End-to-End-Pfades ohne echte Hardware.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 import time
 
 from core.state import state, state_lock
@@ -159,7 +159,7 @@ def get_sensor_config():
 
 @router.post("/sensors/sim/set")
 @limiter.limit(MUTATION_LIMIT)
-def sim_set_sensor_state(request, req: SimSensorSetRequest):
+def sim_set_sensor_state(request: Request, req: SimSensorSetRequest):
     """Setzt Sensor-Zonen im Sim-Modus manuell auf trocken oder feucht.
 
     NUR im Sim-Modus verfügbar (sensor_driver_mode == "sim").

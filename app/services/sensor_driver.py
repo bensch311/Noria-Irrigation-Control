@@ -207,13 +207,9 @@ class SimSensorDriver(BaseSensorDriver):
         needs = zone in self._dry_zones
         # Kontakt geschlossen (raw=0) = trocken; Kontakt offen (raw=1) = feucht
         raw = 0 if needs else 1
-        log_event(
-            "sensor_hw_read",
-            source="driver",
-            driver=self.name,
-            zone=zone,
-            needs_irrigation=needs,
-        )
+        # Kein log_event: SimSensorDriver wird alle paar Sekunden gepolt;
+        # Routine-Lesevorgänge erzeugen keinen Mehrwert im Log und würden
+        # die Logdatei im Entwicklungsbetrieb stark aufblähen.
         return SensorReading(
             zone=zone,
             needs_irrigation=needs,
@@ -319,15 +315,19 @@ class RpiGpioSwitchSensorDriver(BaseSensorDriver):
         # LOW (0) = Kontakt geschlossen = Boden trocken = Bewässerung nötig
         needs_irrigation = (raw == 0)
 
-        log_event(
-            "sensor_hw_read",
-            source="driver",
-            driver=self.name,
-            zone=zone,
-            pin=pin,
-            raw_gpio_value=int(raw),
-            needs_irrigation=needs_irrigation,
-        )
+        # Nur bei Bewässerungsbedarf loggen – Routine-Polls mit feuchtem Boden
+        # erzeugen keinen Mehrwert im Log und würden die Logdatei aufblähen.
+        # Fehler (SensorDriverError) werden oberhalb bereits geloggt.
+        if needs_irrigation:
+            log_event(
+                "sensor_hw_read",
+                source="driver",
+                driver=self.name,
+                zone=zone,
+                pin=pin,
+                raw_gpio_value=int(raw),
+                needs_irrigation=needs_irrigation,
+            )
         return SensorReading(
             zone=zone,
             needs_irrigation=needs_irrigation,
