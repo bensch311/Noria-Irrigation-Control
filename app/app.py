@@ -1376,22 +1376,27 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         style="margin-top:0.3rem;",
                     )
 
+                # ui.card() ist in Shiny Express ein Kontext-Manager und kann
+                # in @render.ui nicht mit Positionsargumenten aufgerufen werden.
+                # Loesung: div + Bootstrap-Klassen, identisches Muster wie
+                # tile()-Helfer in _overview_tiles.
                 cards.append(
-                    ui.card(
-                        ui.card_header(
+                    ui.div(
+                        # card-header
+                        ui.div(
                             ui.div(
                                 ui.tags.b(f"Zone {zone}"),
                                 ui.span(
                                     "",
                                     class_=dot_class,
                                     title=status_text,
-                                    # margin-left:auto schiebt den Dot im Flex-
-                                    # Container zuverlaessig nach rechts.
                                     style="margin-left:auto; display:block; flex-shrink:0;",
                                 ),
                                 style="display:flex; align-items:center; width:100%;",
                             ),
+                            class_="card-header",
                         ),
+                        # card-body
                         ui.div(
                             ui.div(
                                 ui.span(status_text, class_=status_cls),
@@ -1408,10 +1413,183 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                                 class_="px-3 pb-3 pt-1",
                             ),
                         ),
+                        class_="card bslib-card",
                     )
                 )
 
             return ui.div(*cards, class_="sensor-grid")
+
+        # ----- Sim-Steuerung (nur im Sim-Modus sichtbar) ---------------------
+        #
+        # Exakt dasselbe Pattern wie _settings_initialized im Settings-Tab:
+        #
+        #   1. STATISCHER Wrapper-div mit id="sim_panel_wrap" – nie in @render.ui.
+        #      Die Checkbox-Inputs darin werden vom Poll NICHT neu initialisiert,
+        #      weil sie nicht Teil eines @render.ui-Outputs sind.
+        #
+        #   2. @render.ui _sensor_sim_visibility gibt ausschliesslich ein <style>-Tag
+        #      zurueck (display:block / display:none) – reine Render-Funktion,
+        #      kein Side-Effect, kein ui.update_*-Aufruf.
+        #
+        #   3. @reactive.effect _sync_sim_zones: einziger Ort der ui.update_*-Aufrufe.
+        #      Guard-Flag _sim_zones_initialized verhindert Reset bei jedem Poll,
+        #      analog zu _last_applied_dur_unit im Settings-Tab.
+
+        _sim_zones_initialized: reactive.Value = reactive.Value([])
+
+        # Statischer Wrapper: immer im DOM, Sichtbarkeit via CSS gesteuert.
+        # Inputs hier sind nie Teil eines @render.ui – kein Poll-Reset moeglich.
+        with ui.div(id="sim_panel_wrap", style="margin-top:1rem;"):
+            with ui.div(class_="card bslib-card"):
+                ui.div(
+                    ui.tags.i(class_="bi bi-bug me-2", style="color:#6b7280;"),
+                    "Sim-Steuerung",
+                    ui.tags.span(
+                        "nur im Sim-Modus",
+                        class_="badge text-bg-secondary app-badge ms-2",
+                        style="font-size:0.72rem; vertical-align:middle;",
+                    ),
+                    class_="card-header",
+                    style="font-weight:700;",
+                )
+                with ui.div(class_="card-body", style="padding:1rem;"):
+                    ui.tags.p(
+                        "Zonen manuell auf trocken oder feucht setzen. "
+                        "Der naechste Polling-Zyklus wertet den gesetzten "
+                        "Zustand aus und loest ggf. einen Bewaesserungslauf aus.",
+                        class_="text-muted small",
+                        style="margin-bottom:1rem;",
+                    )
+                    with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap; margin-bottom:1rem;"):
+                        with ui.div(style="flex:1; min-width:160px;"):
+                            ui.tags.p("Trocken setzen", class_="form-section-title")
+                            # Leere choices – _sync_sim_zones fuellt sie beim ersten Poll
+                            ui.input_checkbox_group(
+                                "sim_dry_zones", label=None, choices={}, inline=True,
+                            )
+                        with ui.div(style="flex:1; min-width:160px;"):
+                            ui.tags.p("Feucht setzen", class_="form-section-title")
+                            ui.input_checkbox_group(
+                                "sim_moist_zones", label=None, choices={}, inline=True,
+                            )
+                    ui.input_action_button(
+                        "btn_sim_set",
+                        ui.div(ui.tags.i(class_="bi bi-send me-1"), "Zustand setzen"),
+                        class_="btn btn-sm btn-outline-secondary",
+                    )
+
+        @render.ui
+        def _sensor_sim_visibility():
+            """Steuert Sichtbarkeit von #sim_panel_wrap via injiziertem <style>-Tag.
+
+            Pure Render-Funktion: gibt ausschliesslich ein <style>-Tag zurueck,
+            kein ui.update_*-Aufruf (Shiny-Regel: Side-Effects nur in @reactive.effect).
+            Analog zu _dynamic_accent_style im Navbar-Bereich.
+            """
+            cfg = _sensor_config_data()
+            is_sim = (
+                bool(cfg)
+                and cfg.get("sensor_driver", "") == "sim"
+                and bool(cfg.get("zones_configured", []))
+            )
+            display = "block" if is_sim else "none"
+            return ui.tags.style(f"#sim_panel_wrap {{ display: {display} !important; }}")
+
+        @reactive.effect
+        def _sync_sim_zones():
+            """Aktualisiert Checkbox-Choices wenn sich die Zone-Liste aendert.
+
+            Einziger Ort fuer ui.update_checkbox_group()-Aufrufe (Side-Effect).
+            Guard-Flag _sim_zones_initialized verhindert Reset bei unveraenderter
+            Zone-Liste – identisches Muster wie _last_applied_dur_unit im Settings-Tab.
+            """
+            cfg = _sensor_config_data()
+            zones = cfg.get("zones_configured", []) if cfg else []
+
+            # Keine Aenderung → nichts tun, Auswahl des Nutzers bleibt erhalten
+            if _sim_zones_initialized.get() == zones:
+                return
+
+            _sim_zones_initialized.set(zones)
+            zone_choices = {str(z): f"Zone {z}" for z in zones}
+            ui.update_checkbox_group("sim_dry_zones",   choices=zone_choices, selected=[])
+            ui.update_checkbox_group("sim_moist_zones", choices=zone_choices, selected=[])
+
+        @reactive.effect
+        @reactive.event(input.btn_sim_set)
+        def _h_sim_set():
+            """Sendet ausgewaehlte Zonen-Zustaende an POST /sensors/sim/set."""
+            try:
+                dry_raw   = input.sim_dry_zones()   or []
+                moist_raw = input.sim_moist_zones() or []
+            except Exception:
+                ui.notification_show(
+                    "Fehler beim Lesen der Auswahl.", type="error", duration=4,
+                )
+                return
+
+            dry_zones   = [int(z) for z in dry_raw]
+            moist_zones = [int(z) for z in moist_raw]
+
+            # Ueberlappung clientseitig abfangen bevor der API-Call fehlschlaegt
+            overlap = set(dry_zones) & set(moist_zones)
+            if overlap:
+                ui.notification_show(
+                    f"Zonen {sorted(overlap)} sind in beiden Listen. "
+                    "Bitte Auswahl korrigieren.",
+                    type="warning",
+                    duration=5,
+                )
+                return
+
+            if not dry_zones and not moist_zones:
+                ui.notification_show(
+                    "Keine Zonen ausgewaehlt.", type="warning", duration=3,
+                )
+                return
+
+            rv = _post("/sensors/sim/set", json={
+                "dry_zones":   dry_zones,
+                "moist_zones": moist_zones,
+            })
+
+            if rv and rv.ok:
+                data = rv.json()
+                dry_now   = data.get("dry_zones", [])
+                moist_now = data.get("moist_zones", [])
+                parts = []
+                if dry_now:
+                    parts.append(f"Trocken: {dry_now}")
+                if moist_now:
+                    parts.append(f"Feucht: {moist_now}")
+                ui.notification_show(
+                    "Sim-Zustand gesetzt. " + (" | ".join(parts)),
+                    type="message",
+                    duration=4,
+                )
+                # Auswahl nach erfolgreichem Setzen zuruecksetzen –
+                # _sim_zones_initialized bleibt unveraendert (Zonen-Liste
+                # hat sich nicht geaendert, nur die Auswahl wird geleert).
+                cfg   = _sensor_config_data()
+                zones = cfg.get("zones_configured", []) if cfg else []
+                zone_choices = {str(z): f"Zone {z}" for z in zones}
+                ui.update_checkbox_group("sim_dry_zones",   choices=zone_choices, selected=[])
+                ui.update_checkbox_group("sim_moist_zones", choices=zone_choices, selected=[])
+                _bump_sensor()
+            elif rv and rv.status_code == 404:
+                ui.notification_show(
+                    "Backend ist nicht im Sim-Modus.", type="error", duration=4,
+                )
+            elif rv and rv.status_code == 422:
+                detail = _json_or_none(rv) or {}
+                ui.notification_show(
+                    detail.get("detail", "Ungueltige Eingabe."),
+                    type="error", duration=5,
+                )
+            else:
+                ui.notification_show(
+                    "Sim-Set fehlgeschlagen.", type="error", duration=4,
+                )
 
     # =========================================================================
     # TAB 5 - ZEITPLAENE
