@@ -65,6 +65,7 @@ from services.persistence import (
     load_user_settings_from_disk,
     load_runtime_state_from_disk,
     save_runtime_state_to_disk,
+    load_sensor_assignments_from_disk,
 )
 from services.timer import timer_loop
 from services.scheduler import scheduler_loop
@@ -231,6 +232,7 @@ async def lifespan(app: FastAPI):
     load_schedules_from_disk()
     load_queue_from_disk()
     load_history_from_disk()
+    load_sensor_assignments_from_disk()  # Sensor-Zonen-Zuordnung
 
     # 5. Sentinel-Check: Stromausfall / Crash-Erkennung
     # Muss NACH load_*_from_disk() (DATA_DIR ist dann garantiert vorhanden)
@@ -282,6 +284,7 @@ async def lifespan(app: FastAPI):
         # sind nach einem Neustart nicht mehr gültig.
         state.sensor_readings = {}
         state.sensor_last_triggered = {}
+        # sensor_zone_assignments bleibt erhalten (aus sensor_assignments.json geladen)
 
     shutdown_event.clear()
     threads.clear()

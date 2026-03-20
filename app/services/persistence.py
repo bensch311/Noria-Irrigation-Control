@@ -40,6 +40,7 @@ from core.state import state, state_lock, QueueItem, ScheduleRule, HistoryItem
 from core.config import (
     DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE,
     DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
+    SENSOR_ASSIGNMENTS_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
     NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
     CORRUPT_FILE_MAX_KEEP,
@@ -118,7 +119,7 @@ def _default_device_config_payload() -> dict:
         "sensors": {
             "IRRIGATION_SENSOR_DRIVER": "sim",         # sim | rpi_switch
             "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
-            "IRRIGATION_SENSOR_PINS": {},              # {"1": 24, ...} BCM
+            "IRRIGATION_SENSOR_PINS": {},              # {"1": 24, ...} sensor_id: BCM-Pin
             "IRRIGATION_SENSOR_POLLING_INTERVAL_S": 30,
             "IRRIGATION_SENSOR_COOLDOWN_S": 600,
             "IRRIGATION_SENSOR_DEFAULT_DURATION_S": 300,
@@ -228,14 +229,14 @@ def load_device_config_from_disk():
     )
 
     sensor_pins_raw = sens.get("IRRIGATION_SENSOR_PINS", {})
-    sensor_pins_norm: dict[int, int] = {}
+    sensor_pins_norm: dict[int, int] = {}  # sensor_id → BCM-Pin
     if isinstance(sensor_pins_raw, dict):
         for k, v in sensor_pins_raw.items():
             try:
-                z = int(k)
-                p = int(v)
-                if z >= 1:
-                    sensor_pins_norm[z] = p
+                sid = int(k)   # sensor_id, nicht zone
+                pin = int(v)
+                if sid >= 1:
+                    sensor_pins_norm[sid] = pin
             except Exception:
                 continue
 
@@ -263,7 +264,7 @@ def load_device_config_from_disk():
         state.hard_max_runtime_s = hard_max_runtime_s
         state.hard_max_concurrent_valves = hard_max_conc
         state.sensor_driver_mode = sensor_drv
-        state.sensor_gpio_pins_by_zone = sensor_pins_norm
+        state.sensor_gpio_pins = sensor_pins_norm
         state.sensor_internal_pull_up = sensor_internal_pull_up
         state.sensor_polling_interval_s = sensor_polling_interval_s
         state.sensor_cooldown_s = sensor_cooldown_s
@@ -426,6 +427,77 @@ def save_runtime_state_to_disk():
     payload["runtime"]["max_concurrent_valves"] = max_conc
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(RUNTIME_STATE_FILE, payload)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sensor_assignments (Sensor-Zonen-Zuordnung – via UI editierbar)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _default_sensor_assignments_payload() -> dict:
+    return {
+        "version": 1,
+        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "assignments": {},  # {"1": [1, 2, 3], ...} sensor_id: [zone, ...]
+    }
+
+
+def load_sensor_assignments_from_disk():
+    """Lädt Sensor-Zonen-Zuordnung aus sensor_assignments.json.
+
+    Fehlt die Datei (Erstinstallation) → leere Zuordnung, kein Fehler.
+    Korrupte Datei → Backup + leere Zuordnung.
+    """
+    if not os.path.exists(SENSOR_ASSIGNMENTS_FILE):
+        with state_lock:
+            state.sensor_zone_assignments = {}
+            state.sensor_assignments_dirty = False
+        return
+
+    try:
+        with open(SENSOR_ASSIGNMENTS_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        logger.exception("load_sensor_assignments_from_disk failed")
+        log_event("sensor_assignments_corrupt", level="error", source="system")
+        _backup_corrupt_file(SENSOR_ASSIGNMENTS_FILE)
+        with state_lock:
+            state.sensor_zone_assignments = {}
+            state.sensor_assignments_dirty = False
+        return
+
+    raw = payload.get("assignments", {})
+    assignments: dict[int, list[int]] = {}
+    if isinstance(raw, dict):
+        for sid_str, zones in raw.items():
+            try:
+                sid = int(sid_str)
+                if sid >= 1 and isinstance(zones, list):
+                    assignments[sid] = [int(z) for z in zones if int(z) >= 1]
+            except Exception:
+                continue
+
+    with state_lock:
+        state.sensor_zone_assignments = assignments
+        state.sensor_assignments_dirty = False
+
+    log_event(
+        "sensor_assignments_loaded",
+        source="system",
+        sensor_count=len(assignments),
+    )
+
+
+def save_sensor_assignments_to_disk():
+    """Schreibt Sensor-Zonen-Zuordnung atomar auf Disk."""
+    with state_lock:
+        assignments = dict(state.sensor_zone_assignments or {})
+        state.sensor_assignments_dirty = False
+
+    # Schlüssel müssen Strings sein für JSON
+    payload = _default_sensor_assignments_payload()
+    payload["assignments"] = {str(sid): zones for sid, zones in assignments.items()}
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    _atomic_write_json(SENSOR_ASSIGNMENTS_FILE, payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -644,9 +716,10 @@ def persistence_loop():
             break
         try:
             with state_lock:
-                do_sched = bool(state.schedules_dirty)
-                do_queue = bool(state.queue_dirty)
-                do_hist = bool(state.history_dirty)
+                do_sched   = bool(state.schedules_dirty)
+                do_queue   = bool(state.queue_dirty)
+                do_hist    = bool(state.history_dirty)
+                do_sensors = bool(state.sensor_assignments_dirty)
 
             if do_sched:
                 save_schedules_to_disk()
@@ -657,6 +730,9 @@ def persistence_loop():
             if do_hist:
                 save_history_to_disk()
                 log_event("persist_history", source="system")
+            if do_sensors:
+                save_sensor_assignments_to_disk()
+                log_event("persist_sensor_assignments", source="system")
 
         except Exception:
             logger.exception("persistence_loop crashed")

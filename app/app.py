@@ -397,6 +397,13 @@ def _sensor_config_data() -> dict:
     _sensor_trigger.get()
     return _json_or_none(_get("/sensors/config")) or {}
 
+@reactive.calc
+def _sensor_assignments_data() -> dict:
+    """Gecachter /sensors/assignments-Fetch."""
+    reactive.invalidate_later(POLL_SLOW_S)
+    _sensor_trigger.get()
+    return _json_or_none(_get("/sensors/assignments")) or {}
+
 # Letzter angewendeter dur/unit-Wert – verhindert Reset der Slider bei jedem Poll
 _last_applied_dur_unit: reactive.Value = reactive.Value({})
 # Zustandsvariable für das Hardware-Fault-Modal.
@@ -1298,74 +1305,67 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
             return ui.div(config_bar, *warn_items)
 
-        # ----- Zonen-Karten --------------------------------------------------
-        # Dynamisch: Zone-Liste kommt aus dem API-Response, nicht aus
-        # ANZAHL_VENTILE – Sensor-Zonen sind unabhaengig von Ventil-Zonen.
+        # ----- Sensor-Karten (eine Card pro Sensor) -------------------------
         @render.ui
         def _sensor_zone_cards():
-            d   = _sensor_readings_data()
-            cfg = _sensor_config_data()
+            d    = _sensor_readings_data()
+            cfg  = _sensor_config_data()
+            asgn = _sensor_assignments_data()
 
-            zones         = cfg.get("zones_configured", []) if cfg else []
-            readings      = d.get("readings", {})            if d   else {}
-            last_triggered = d.get("last_triggered", {})     if d   else {}
-            cooldown_s    = int(d.get("cooldown_s", 600))    if d   else 600
+            sensors        = cfg.get("sensors_configured", [])  if cfg  else []
+            readings       = d.get("readings", {})               if d    else {}
+            last_triggered = d.get("last_triggered", {})         if d    else {}
+            cooldown_s     = int(d.get("cooldown_s", 600))       if d    else 600
+            assignments    = asgn.get("assignments", {})         if asgn else {}
 
-            if not zones:
+            if not sensors:
                 return ui.div(
                     ui.tags.i(class_="bi bi-moisture me-2",
                               style="font-size:1.6rem; color:rgba(15,23,42,0.22);"),
-                    ui.tags.p(
-                        "Keine Sensor-Zonen konfiguriert.",
-                        class_="text-muted",
-                        style="margin-top:0.5rem;",
-                    ),
+                    ui.tags.p("Keine Sensoren konfiguriert.", class_="text-muted",
+                              style="margin-top:0.5rem;"),
                     ui.tags.p(
                         "In device_config.json unter 'sensors' → "
-                        "'IRRIGATION_SENSOR_PINS' Zonen-Pin-Zuordnung eintragen "
-                        "(z.\u00a0B. {\"1\": 24, \"2\": 25}).",
+                        "'IRRIGATION_SENSOR_PINS' eintragen "
+                        '(z.\u00a0B. {"1": 24, "2": 25}).',
                         class_="text-muted small",
                     ),
                     style="text-align:center; padding:2rem 1rem;",
                 )
 
+            def _fmt_elapsed(elapsed):
+                if elapsed is None:   return "Noch kein Trigger"
+                if elapsed < 60:      return f"vor {int(elapsed)} Sek."
+                if elapsed < 3600:    return f"vor {int(elapsed / 60)} Min."
+                h = int(elapsed / 3600); m = int((elapsed % 3600) / 60)
+                return f"vor {h} Std. {m} Min."
+
             cards = []
-            for zone in zones:
-                z_key    = str(zone)
-                moisture = readings.get(z_key)       # None = noch kein Poll
-                elapsed  = last_triggered.get(z_key) # None = nie getriggert
+            for sid in sensors:
+                s_key    = str(sid)
+                moisture = readings.get(s_key)
+                elapsed  = last_triggered.get(s_key)
+                zones    = assignments.get(s_key, [])
 
-                # Dot-Farbe und Statustext je Feuchte-Zustand
                 if moisture is None:
-                    dot_class   = "sensor-dot unknown"
-                    status_text = "Unbekannt"
-                    status_cls  = "text-muted small"
-                elif moisture:   # True = trocken = Bewaesserung noetig
-                    dot_class   = "sensor-dot dry"
-                    status_text = "Trocken \u2013 Bewaesserung noetig"
-                    status_cls  = "sensor-status-dry small fw-bold"
-                else:            # False = feucht
-                    dot_class   = "sensor-dot moist"
-                    status_text = "Feucht"
-                    status_cls  = "sensor-status-moist small"
-
-                # Letzter Trigger: lesbare Zeitangabe
-                if elapsed is None:
-                    trigger_text = "Noch kein Trigger"
-                elif elapsed < 60:
-                    trigger_text = f"vor {int(elapsed)} Sek."
-                elif elapsed < 3600:
-                    trigger_text = f"vor {int(elapsed / 60)} Min."
+                    dot_class, status_text, status_cls = (
+                        "sensor-dot unknown", "Unbekannt", "text-muted small"
+                    )
+                elif moisture:
+                    dot_class, status_text, status_cls = (
+                        "sensor-dot dry",
+                        "Trocken – Bewaesserung noetig",
+                        "sensor-status-dry small fw-bold",
+                    )
                 else:
-                    h   = int(elapsed / 3600)
-                    min_ = int((elapsed % 3600) / 60)
-                    trigger_text = f"vor {h} Std. {min_} Min."
+                    dot_class, status_text, status_cls = (
+                        "sensor-dot moist", "Feucht", "sensor-status-moist small"
+                    )
 
-                # Cooldown-Restzeit (nur anzeigen wenn aktiv)
                 cooldown_row = ui.div()
                 if elapsed is not None and elapsed < cooldown_s:
-                    remaining = int(cooldown_s - elapsed)
-                    rem_text  = f"{remaining // 60} min" if remaining >= 60 else f"{remaining} s"
+                    rem = int(cooldown_s - elapsed)
+                    rem_text = f"{rem // 60} min" if rem >= 60 else f"{rem} s"
                     cooldown_row = ui.div(
                         ui.tags.small(
                             ui.tags.i(class_="bi bi-hourglass-split me-1",
@@ -1376,39 +1376,47 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         style="margin-top:0.3rem;",
                     )
 
-                # ui.card() ist in Shiny Express ein Kontext-Manager und kann
-                # in @render.ui nicht mit Positionsargumenten aufgerufen werden.
-                # Loesung: div + Bootstrap-Klassen, identisches Muster wie
-                # tile()-Helfer in _overview_tiles.
+                if zones:
+                    zones_text = ", ".join(f"Zone {z}" for z in sorted(zones))
+                    zones_row = ui.div(
+                        ui.tags.small(
+                            ui.tags.i(class_="bi bi-diagram-3 me-1",
+                                      style="color:#6b7280;"),
+                            zones_text, class_="text-muted",
+                        ),
+                        style="margin-top:0.3rem;",
+                    )
+                else:
+                    zones_row = ui.div(
+                        ui.tags.small(
+                            ui.tags.i(class_="bi bi-exclamation-circle me-1",
+                                      style="color:#d97706;"),
+                            "Keine Zonen zugeordnet", class_="text-muted",
+                        ),
+                        style="margin-top:0.3rem;",
+                    )
+
                 cards.append(
                     ui.div(
-                        # card-header
                         ui.div(
                             ui.div(
-                                ui.tags.b(f"Zone {zone}"),
-                                ui.span(
-                                    "",
-                                    class_=dot_class,
-                                    title=status_text,
-                                    style="margin-left:auto; display:block; flex-shrink:0;",
-                                ),
+                                ui.tags.b(f"Sensor {sid}"),
+                                ui.span("", class_=dot_class, title=status_text,
+                                        style="margin-left:auto; display:block; flex-shrink:0;"),
                                 style="display:flex; align-items:center; width:100%;",
                             ),
                             class_="card-header",
                         ),
-                        # card-body
                         ui.div(
-                            ui.div(
-                                ui.span(status_text, class_=status_cls),
-                                class_="sensor-status-area px-3 pt-2",
-                            ),
+                            ui.div(ui.span(status_text, class_=status_cls),
+                                   class_="sensor-status-area px-3 pt-2"),
                             ui.div(
                                 ui.tags.small(
                                     ui.tags.i(class_="bi bi-clock me-1",
                                               style="color:#6b7280;"),
-                                    trigger_text,
-                                    class_="text-muted",
+                                    _fmt_elapsed(elapsed), class_="text-muted",
                                 ),
+                                zones_row,
                                 cooldown_row,
                                 class_="px-3 pb-3 pt-1",
                             ),
@@ -1462,13 +1470,13 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     )
                     with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap; margin-bottom:1rem;"):
                         with ui.div(style="flex:1; min-width:160px;"):
-                            ui.tags.p("Trocken setzen", class_="form-section-title")
+                            ui.tags.p("Sensor trocken setzen", class_="form-section-title")
                             # Leere choices – _sync_sim_zones fuellt sie beim ersten Poll
                             ui.input_checkbox_group(
                                 "sim_dry_zones", label=None, choices={}, inline=True,
                             )
                         with ui.div(style="flex:1; min-width:160px;"):
-                            ui.tags.p("Feucht setzen", class_="form-section-title")
+                            ui.tags.p("Sensor feucht setzen", class_="form-section-title")
                             ui.input_checkbox_group(
                                 "sim_moist_zones", label=None, choices={}, inline=True,
                             )
@@ -1490,7 +1498,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             is_sim = (
                 bool(cfg)
                 and cfg.get("sensor_driver", "") == "sim"
-                and bool(cfg.get("zones_configured", []))
+                and bool(cfg.get("sensors_configured", []))
             )
             display = "block" if is_sim else "none"
             return ui.tags.style(f"#sim_panel_wrap {{ display: {display} !important; }}")
@@ -1504,16 +1512,16 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             Zone-Liste – identisches Muster wie _last_applied_dur_unit im Settings-Tab.
             """
             cfg = _sensor_config_data()
-            zones = cfg.get("zones_configured", []) if cfg else []
+            sensors = cfg.get("sensors_configured", []) if cfg else []
 
             # Keine Aenderung → nichts tun, Auswahl des Nutzers bleibt erhalten
-            if _sim_zones_initialized.get() == zones:
+            if _sim_zones_initialized.get() == sensors:
                 return
 
-            _sim_zones_initialized.set(zones)
-            zone_choices = {str(z): f"Zone {z}" for z in zones}
-            ui.update_checkbox_group("sim_dry_zones",   choices=zone_choices, selected=[])
-            ui.update_checkbox_group("sim_moist_zones", choices=zone_choices, selected=[])
+            _sim_zones_initialized.set(sensors)
+            sensor_choices = {str(s): f"Sensor {s}" for s in sensors}
+            ui.update_checkbox_group("sim_dry_zones",   choices=sensor_choices, selected=[])
+            ui.update_checkbox_group("sim_moist_zones", choices=sensor_choices, selected=[])
 
         @reactive.effect
         @reactive.event(input.btn_sim_set)
@@ -1528,11 +1536,10 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 )
                 return
 
-            dry_zones   = [int(z) for z in dry_raw]
-            moist_zones = [int(z) for z in moist_raw]
+            dry_sensors   = [int(z) for z in dry_raw]
+            moist_sensors = [int(z) for z in moist_raw]
 
-            # Ueberlappung clientseitig abfangen bevor der API-Call fehlschlaegt
-            overlap = set(dry_zones) & set(moist_zones)
+            overlap = set(dry_sensors) & set(moist_sensors)
             if overlap:
                 ui.notification_show(
                     f"Zonen {sorted(overlap)} sind in beiden Listen. "
@@ -1542,21 +1549,21 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 )
                 return
 
-            if not dry_zones and not moist_zones:
+            if not dry_sensors and not moist_sensors:
                 ui.notification_show(
                     "Keine Zonen ausgewaehlt.", type="warning", duration=3,
                 )
                 return
 
             rv = _post("/sensors/sim/set", json={
-                "dry_zones":   dry_zones,
-                "moist_zones": moist_zones,
+                "dry_sensors":   dry_sensors,
+                "moist_sensors": moist_sensors,
             })
 
             if rv and rv.ok:
                 data = rv.json()
-                dry_now   = data.get("dry_zones", [])
-                moist_now = data.get("moist_zones", [])
+                dry_now   = data.get("dry_sensors", [])
+                moist_now = []
                 parts = []
                 if dry_now:
                     parts.append(f"Trocken: {dry_now}")
@@ -1570,11 +1577,11 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 # Auswahl nach erfolgreichem Setzen zuruecksetzen –
                 # _sim_zones_initialized bleibt unveraendert (Zonen-Liste
                 # hat sich nicht geaendert, nur die Auswahl wird geleert).
-                cfg   = _sensor_config_data()
-                zones = cfg.get("zones_configured", []) if cfg else []
-                zone_choices = {str(z): f"Zone {z}" for z in zones}
-                ui.update_checkbox_group("sim_dry_zones",   choices=zone_choices, selected=[])
-                ui.update_checkbox_group("sim_moist_zones", choices=zone_choices, selected=[])
+                cfg     = _sensor_config_data()
+                sensors = cfg.get("sensors_configured", []) if cfg else []
+                sensor_choices = {str(s): f"Sensor {s}" for s in sensors}
+                ui.update_checkbox_group("sim_dry_zones",   choices=sensor_choices, selected=[])
+                ui.update_checkbox_group("sim_moist_zones", choices=sensor_choices, selected=[])
                 _bump_sensor()
             elif rv and rv.status_code == 404:
                 ui.notification_show(
@@ -2475,3 +2482,70 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
         # Da _settings_initialized True ist, würde B) nicht mehr greifen.
         # Lösung: Save setzt Flag zurück → nächster Poll lädt Werte neu.
         # (Implementierung: _h_save_settings setzt _settings_initialized.set(False))
+        # ----- Sensor-Zonen-Zuordnung ------------------------------------
+        with ui.card(class_="mt-3"):
+            ui.card_header("Sensor-Zonen-Zuordnung")
+
+            ui.tags.p(
+                "Legt fest, welche Ventil-Zonen ein Sensor bewaessert. "
+                "Ein Sensor kann mehrere Zonen steuern.",
+                class_="text-muted small",
+                style="margin-bottom:1rem;",
+            )
+
+            @render.ui
+            def _sensor_assignment_rows():
+                cfg  = _sensor_config_data()
+                asgn = _sensor_assignments_data()
+                sensors     = cfg.get("sensors_configured", [])  if cfg  else []
+                assignments = asgn.get("assignments", {})         if asgn else {}
+                if not sensors:
+                    return ui.p("Keine Sensoren konfiguriert.", class_="text-muted small")
+                zone_choices = {str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)}
+                rows = []
+                for sid in sensors:
+                    rows.append(
+                        ui.div(
+                            ui.tags.b(f"Sensor {sid}",
+                                      style="display:block; margin-bottom:0.35rem;"),
+                            ui.input_checkbox_group(
+                                f"asgn_sensor_{sid}",
+                                label=None,
+                                choices=zone_choices,
+                                selected=[str(z) for z in assignments.get(str(sid), [])],
+                                inline=True,
+                            ),
+                            class_="settings-section",
+                            style="margin-bottom:0.5rem;",
+                        )
+                    )
+                return ui.div(*rows)
+
+            ui.input_action_button(
+                "btn_save_sensor_assignments",
+                "Zuordnung speichern",
+                class_="btn btn-outline-secondary w-100 mt-2",
+            )
+
+            @reactive.effect
+            @reactive.event(input.btn_save_sensor_assignments)
+            def _h_save_sensor_assignments():
+                cfg     = _sensor_config_data()
+                sensors = cfg.get("sensors_configured", []) if cfg else []
+                assignments = {}
+                for sid in sensors:
+                    try:
+                        raw = input[f"asgn_sensor_{sid}"]() or []
+                        assignments[str(sid)] = [int(z) for z in raw]
+                    except Exception:
+                        assignments[str(sid)] = []
+                rv = _post("/sensors/assignments", json={"assignments": assignments})
+                if rv and rv.ok:
+                    ui.notification_show(
+                        "Sensor-Zuordnung gespeichert.", type="message", duration=3,
+                    )
+                    _bump_sensor()
+                else:
+                    ui.notification_show(
+                        "Fehler beim Speichern.", type="error", duration=4,
+                    )

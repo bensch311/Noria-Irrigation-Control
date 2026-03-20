@@ -396,7 +396,7 @@ def _read_sensor_settings_from_state() -> dict[str, Any]:
         with state_lock:
             return {
                 "mode": getattr(state, "sensor_driver_mode", None),
-                "pins": getattr(state, "sensor_gpio_pins_by_zone", None),
+                "pins": getattr(state, "sensor_gpio_pins", None),
                 "internal_pull_up": getattr(state, "sensor_internal_pull_up", False),
             }
     except Exception:

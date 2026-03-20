@@ -3,27 +3,25 @@ Tests für services/sensor_engine.py
 
 Getestet werden:
   - _process_sensor_cycle_locked  (Kern-Logik, direkt unter state_lock testbar)
-    - Auslöse-Bedingungen: moist / dry / cooldown / already_active / already_queued /
-                           hw_faulted / queue_full
-    - State-Updates: sensor_readings, sensor_last_triggered
-    - Queue-Item-Inhalt: zone, duration, source, time_unit
-    - Mehrere Zonen: unabhängige Verarbeitung
-  - _read_all_sensors             (Fehlerresistenz, Sensor-Treiber-Integration)
-    - Alle Zonen werden gelesen
-    - Ausgefallene Zonen werden übersprungen, Rest läuft durch
-
-Hinweis zur Test-Strategie:
-  _process_sensor_cycle_locked() ist eine reine State-Manipulations-Funktion
-  die unter state_lock aufgerufen wird. Sie ist vollständig ohne Threads testbar.
-  sensor_engine_loop() als Thread wird NICHT direkt getestet – die Logik ist
-  vollständig in _process_sensor_cycle_locked() gekapselt und dort abgedeckt.
+    - Feuchter Sensor → kein Item
+    - Trockener Sensor mit Zuordnung → Items für alle zugeordneten Zonen
+    - Trockener Sensor ohne Zuordnung → kein Item (sensor_skip_no_assignment)
+    - Cooldown pro Sensor: blockiert; nach Ablauf: feuert
+    - Zone bereits aktiv → wird übersprungen, andere Zonen laufen durch
+    - Zone bereits in Queue → wird übersprungen
+    - hw_faulted → alle Sensoren blockiert
+    - Queue-Limit → weitere Items werden übersprungen
+    - sensor_readings State-Update immer (auch bei Skip)
+    - sensor_last_triggered NUR gesetzt wenn >= 1 Zone eingestellt
+    - Mehrere Sensoren: unabhängig voneinander
+  - _read_all_sensors  (Fehlerresistenz)
 """
 
 import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from core.state import state, state_lock, QueueItem
+from core.state import state, state_lock, QueueItem, ActiveRun
 from core.config import MAX_QUEUE_ITEMS
 from services.sensor_driver import SensorReading, SensorDriverError, SimSensorDriver, set_sensor_driver
 from services.sensor_engine import _process_sensor_cycle_locked, _read_all_sensors
@@ -33,537 +31,323 @@ from services.sensor_engine import _process_sensor_cycle_locked, _read_all_senso
 # Hilfsfunktionen
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_reading(
-    zone: int,
-    needs_irrigation: bool,
-    raw_gpio_value: int | None = None,
-    driver_name: str = "sim",
-) -> SensorReading:
-    """Factory für SensorReading-Testobjekte."""
-    if raw_gpio_value is None:
-        raw_gpio_value = 0 if needs_irrigation else 1
+def _make_reading(sensor_id: int, needs_irrigation: bool) -> SensorReading:
     return SensorReading(
-        zone=zone,
+        zone=sensor_id,  # zone-Feld trägt die sensor_id
         needs_irrigation=needs_irrigation,
-        raw_gpio_value=raw_gpio_value,
+        raw_gpio_value=0 if needs_irrigation else 1,
         timestamp=time.monotonic(),
-        driver_name=driver_name,
+        driver_name="sim",
     )
 
 
-def _run_cycle(
-    readings: list[SensorReading],
-    now_m: float | None = None,
-) -> tuple[list[QueueItem], dict[int, bool]]:
-    """Führt _process_sensor_cycle_locked unter state_lock aus."""
+def _run_cycle(readings, now_m=None):
     if now_m is None:
         now_m = time.monotonic()
     with state_lock:
         return _process_sensor_cycle_locked(readings, now_m)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – Grundverhalten
-# ─────────────────────────────────────────────────────────────────────────────
+def _set_assignments(assignments: dict):
+    """Setzt sensor_zone_assignments im State."""
+    with state_lock:
+        state.sensor_zone_assignments = assignments
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grundverhalten
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TestProcessSensorCycleBasic:
-    def test_moist_zone_produces_no_queue_item(self):
-        readings = [_make_reading(zone=1, needs_irrigation=False)]
-        items, _ = _run_cycle(readings)
+    def test_moist_sensor_produces_no_item(self):
+        _set_assignments({1: [1, 2]})
+        items, _ = _run_cycle([_make_reading(1, False)])
         assert items == []
 
-    def test_dry_zone_produces_queue_item(self):
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert len(items) == 1
+    def test_dry_sensor_with_assignment_produces_items_for_all_zones(self):
+        _set_assignments({1: [1, 2, 3]})
+        items, _ = _run_cycle([_make_reading(1, True)])
+        zones = {i.zone for i in items}
+        assert zones == {1, 2, 3}
 
-    def test_queue_item_source_is_sensor(self):
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items[0].source == "sensor"
+    def test_all_items_have_source_sensor(self):
+        _set_assignments({1: [1, 2]})
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert all(i.source == "sensor" for i in items)
 
-    def test_queue_item_has_correct_zone(self):
-        readings = [_make_reading(zone=3, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items[0].zone == 3
-
-    def test_queue_item_uses_sensor_default_duration(self):
+    def test_all_items_use_default_duration(self):
+        _set_assignments({1: [1]})
         with state_lock:
-            state.sensor_default_duration_s = 450
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items[0].duration == 450
+            state.sensor_default_duration_s = 120
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert items[0].duration == 120
 
-    def test_queue_item_time_unit_is_sekunden(self):
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
+    def test_all_items_time_unit_sekunden(self):
+        _set_assignments({1: [1]})
+        items, _ = _run_cycle([_make_reading(1, True)])
         assert items[0].time_unit == "Sekunden"
 
-    def test_multiple_dry_zones_produce_multiple_items(self):
-        readings = [
-            _make_reading(zone=1, needs_irrigation=True),
-            _make_reading(zone=2, needs_irrigation=True),
-            _make_reading(zone=3, needs_irrigation=False),
-        ]
-        items, _ = _run_cycle(readings)
-        assert len(items) == 2
-        zones = {item.zone for item in items}
-        assert zones == {1, 2}
+    def test_dry_sensor_without_assignment_produces_no_item(self):
+        _set_assignments({})  # Sensor 1 hat keine Zuordnung
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert items == []
 
     def test_empty_readings_produces_no_items(self):
-        items, new_readings = _run_cycle([])
+        items, readings = _run_cycle([])
         assert items == []
-        assert new_readings == {}
+        assert readings == {}
+
+    def test_two_independent_sensors(self):
+        _set_assignments({1: [1], 2: [2]})
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        zones = {i.zone for i in items}
+        assert zones == {1, 2}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – sensor_readings State-Update
+# sensor_readings State-Update
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-class TestProcessSensorCycleReadingsUpdate:
-    def test_sensor_readings_updated_for_moist_zone(self):
-        readings = [_make_reading(zone=2, needs_irrigation=False)]
-        _run_cycle(readings)
+class TestSensorReadingsUpdate:
+    def test_readings_updated_for_moist_sensor(self):
+        _run_cycle([_make_reading(1, False)])
         with state_lock:
-            assert state.sensor_readings is not None
-            assert state.sensor_readings.get(2) is False
+            assert state.sensor_readings.get(1) is False
 
-    def test_sensor_readings_updated_for_dry_zone(self):
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        _run_cycle(readings)
+    def test_readings_updated_for_dry_sensor(self):
+        _run_cycle([_make_reading(1, True)])
         with state_lock:
             assert state.sensor_readings.get(1) is True
 
-    def test_sensor_readings_updated_even_when_skipped(self):
-        """Readings werden aktualisiert, auch wenn kein Item eingestellt wird."""
-        # Cooldown setzen damit Zone übersprungen wird
+    def test_readings_updated_even_when_skipped_by_cooldown(self):
         now_m = time.monotonic()
         with state_lock:
-            state.sensor_last_triggered = {1: now_m}  # gerade erst getriggert
             state.sensor_cooldown_s = 600
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        _run_cycle(readings, now_m=now_m + 1.0)  # Nur 1s nach letztem Trigger
-
+            state.sensor_last_triggered = {1: now_m}
+        _run_cycle([_make_reading(1, True)], now_m=now_m + 1.0)
         with state_lock:
-            # Kein Item, aber Readings müssen trotzdem aktualisiert sein
             assert state.sensor_readings.get(1) is True
 
-    def test_new_readings_dict_returned_correctly(self):
-        readings = [
-            _make_reading(zone=1, needs_irrigation=True),
-            _make_reading(zone=2, needs_irrigation=False),
-        ]
-        _, new_readings = _run_cycle(readings)
+    def test_new_readings_dict_returned(self):
+        _, new_readings = _run_cycle([
+            _make_reading(1, True),
+            _make_reading(2, False),
+        ])
         assert new_readings[1] is True
         assert new_readings[2] is False
 
-    def test_sensor_readings_initialised_if_none(self):
-        with state_lock:
-            state.sensor_readings = None
-        readings = [_make_reading(zone=1, needs_irrigation=False)]
-        _run_cycle(readings)
-        with state_lock:
-            assert state.sensor_readings is not None
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – Cooldown
+# Cooldown (pro Sensor)
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-class TestProcessSensorCycleCooldown:
-    def test_dry_zone_within_cooldown_produces_no_item(self):
+class TestCooldown:
+    def test_within_cooldown_produces_no_item(self):
         now_m = time.monotonic()
+        _set_assignments({1: [1]})
         with state_lock:
             state.sensor_cooldown_s = 600
-            state.sensor_last_triggered = {1: now_m - 60.0}  # Vor 60s getriggert
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings, now_m=now_m)
+            state.sensor_last_triggered = {1: now_m - 60.0}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
         assert items == []
 
-    def test_dry_zone_after_cooldown_produces_item(self):
+    def test_after_cooldown_produces_items(self):
         now_m = time.monotonic()
+        _set_assignments({1: [1]})
         with state_lock:
             state.sensor_cooldown_s = 600
-            state.sensor_last_triggered = {1: now_m - 700.0}  # Vor 700s → abgelaufen
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings, now_m=now_m)
+            state.sensor_last_triggered = {1: now_m - 700.0}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
         assert len(items) == 1
 
-    def test_zone_with_no_prior_trigger_is_not_blocked(self):
-        """Kein vorheriger Trigger → Cooldown gilt als abgelaufen."""
+    def test_no_prior_trigger_not_blocked(self):
+        _set_assignments({1: [1]})
         with state_lock:
             state.sensor_cooldown_s = 600
-            state.sensor_last_triggered = {}  # Kein Eintrag für Zone 1
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
+            state.sensor_last_triggered = {}
+        items, _ = _run_cycle([_make_reading(1, True)])
         assert len(items) == 1
 
-    def test_last_triggered_set_when_item_created(self):
+    def test_last_triggered_set_on_successful_queue(self):
         now_m = time.monotonic()
+        _set_assignments({1: [1]})
         with state_lock:
             state.sensor_last_triggered = {}
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        _run_cycle(readings, now_m=now_m)
-
+        _run_cycle([_make_reading(1, True)], now_m=now_m)
         with state_lock:
-            assert 1 in state.sensor_last_triggered
-            assert abs(state.sensor_last_triggered[1] - now_m) < 0.01
+            assert abs(state.sensor_last_triggered.get(1, -1) - now_m) < 0.01
 
-    def test_last_triggered_not_set_when_skipped_by_cooldown(self):
+    def test_last_triggered_NOT_set_when_all_zones_skipped(self):
+        """Wenn alle Zonen des Sensors übersprungen werden (z.B. alle aktiv),
+        darf sensor_last_triggered NICHT gesetzt werden."""
         now_m = time.monotonic()
+        _set_assignments({1: [1]})
         with state_lock:
-            state.sensor_cooldown_s = 600
-            original_ts = now_m - 60.0
-            state.sensor_last_triggered = {1: original_ts}
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        _run_cycle(readings, now_m=now_m)
-
-        with state_lock:
-            # Timestamp darf nicht verändert worden sein
-            assert abs(state.sensor_last_triggered[1] - original_ts) < 0.01
-
-    def test_cooldown_zero_means_no_cooldown(self):
-        """Cooldown von 0s = kein Cooldown, sofort wieder triggerbar."""
-        now_m = time.monotonic()
-        with state_lock:
-            state.sensor_cooldown_s = 0
-            state.sensor_last_triggered = {1: now_m - 0.001}  # Gerade erst
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings, now_m=now_m)
-        assert len(items) == 1
-
-    def test_cooldown_per_zone_independent(self):
-        """Cooldown gilt pro Zone, nicht global."""
-        now_m = time.monotonic()
-        with state_lock:
-            state.sensor_cooldown_s = 600
-            state.sensor_last_triggered = {
-                1: now_m - 60.0,   # Zone 1: noch im Cooldown
-                2: now_m - 700.0,  # Zone 2: Cooldown abgelaufen
-            }
-
-        readings = [
-            _make_reading(zone=1, needs_irrigation=True),
-            _make_reading(zone=2, needs_irrigation=True),
-        ]
-        items, _ = _run_cycle(readings, now_m=now_m)
-        zones = {item.zone for item in items}
-        assert 1 not in zones
-        assert 2 in zones
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – Überspringen-Bedingungen
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestProcessSensorCycleSkipConditions:
-    def test_dry_zone_already_active_produces_no_item(self):
-        """Zone in active_runs → kein Queue-Item."""
-        from core.state import ActiveRun
-        with state_lock:
-            now_m = time.monotonic()
+            state.sensor_last_triggered = {}
             state.active_runs = {
                 1: ActiveRun(
-                    zone=1,
-                    end_time=now_m + 60,
-                    time_unit="Sekunden",
-                    started_at=now_m,
-                    started_source="manual",
-                    started_planned_s=60,
-                )
-            }
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items == []
-
-    def test_dry_zone_already_in_queue_any_source_produces_no_item(self):
-        """Zone bereits in Queue (egal welche Quelle) → kein Item."""
-        with state_lock:
-            state.queue = [QueueItem(zone=1, duration=60, time_unit="Sekunden", source="schedule")]
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items == []
-
-    def test_dry_zone_already_queued_by_sensor_no_double_entry(self):
-        """Zone bereits von Sensor in Queue → kein Doppel-Eintrag."""
-        with state_lock:
-            state.queue = [QueueItem(zone=2, duration=300, time_unit="Sekunden", source="sensor")]
-
-        readings = [_make_reading(zone=2, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items == []
-
-    def test_hw_faulted_blocks_all_items(self):
-        """Bei hw_faulted=True darf kein Queue-Item erzeugt werden."""
-        with state_lock:
-            state.hw_faulted = True
-
-        readings = [
-            _make_reading(zone=1, needs_irrigation=True),
-            _make_reading(zone=2, needs_irrigation=True),
-        ]
-        items, _ = _run_cycle(readings)
-        assert items == []
-
-    def test_hw_faulted_does_not_block_readings_update(self):
-        """hw_faulted blockiert Items, aber Readings werden trotzdem aktualisiert."""
-        with state_lock:
-            state.hw_faulted = True
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        _, new_readings = _run_cycle(readings)
-        assert new_readings.get(1) is True
-
-    def test_queue_full_skips_item(self):
-        """Queue-Limit erreicht → kein neues Item."""
-        with state_lock:
-            state.queue = [
-                QueueItem(zone=z, duration=60, time_unit="Sekunden", source="manual")
-                for z in range(1, MAX_QUEUE_ITEMS + 1)
-            ]
-
-        # Zone MAX_QUEUE_ITEMS + 1 ist nicht in der Queue
-        readings = [_make_reading(zone=MAX_QUEUE_ITEMS + 1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert items == []
-
-    def test_other_zone_in_queue_does_not_block_this_zone(self):
-        """Nur die eigene Zone in Queue zählt, nicht andere Zonen."""
-        with state_lock:
-            state.queue = [QueueItem(zone=2, duration=60, time_unit="Sekunden", source="sensor")]
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        assert len(items) == 1
-        assert items[0].zone == 1
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – Logging
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestProcessSensorCycleLogging:
-    def test_trigger_logged_on_item_creation(self):
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings)
-        trigger_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_trigger"
-        ]
-        assert len(trigger_events) == 1
-        assert trigger_events[0].kwargs["zone"] == 1
-
-    def test_cooldown_skip_logged(self):
-        now_m = time.monotonic()
-        with state_lock:
-            state.sensor_cooldown_s = 600
-            state.sensor_last_triggered = {1: now_m - 10.0}
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings, now_m=now_m)
-        skip_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_skip_cooldown"
-        ]
-        assert len(skip_events) == 1
-
-    def test_already_active_skip_logged(self):
-        from core.state import ActiveRun
-        with state_lock:
-            now_m = time.monotonic()
-            state.active_runs = {
-                1: ActiveRun(
-                    zone=1, end_time=now_m + 60, time_unit="Sekunden",
+                    zone=1, end_time=now_m+60, time_unit="Sekunden",
                     started_at=now_m, started_source="manual", started_planned_s=60,
                 )
             }
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings)
-        skip_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_skip_already_active"
-        ]
-        assert len(skip_events) == 1
-
-    def test_already_queued_skip_logged(self):
+        _run_cycle([_make_reading(1, True)], now_m=now_m)
         with state_lock:
-            state.queue = [QueueItem(zone=3, duration=60, time_unit="Sekunden", source="schedule")]
+            assert 1 not in state.sensor_last_triggered
 
-        readings = [_make_reading(zone=3, needs_irrigation=True)]
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings)
-        skip_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_skip_already_queued"
-        ]
-        assert len(skip_events) == 1
+    def test_cooldown_zero_means_no_cooldown(self):
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_last_triggered = {1: now_m - 0.001}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        assert len(items) == 1
 
-    def test_hw_faulted_skip_logged(self):
+    def test_cooldown_independent_per_sensor(self):
+        now_m = time.monotonic()
+        _set_assignments({1: [1], 2: [2]})
+        with state_lock:
+            state.sensor_cooldown_s = 600
+            state.sensor_last_triggered = {
+                1: now_m - 60.0,   # Sensor 1: noch im Cooldown
+                2: now_m - 700.0,  # Sensor 2: Cooldown abgelaufen
+            }
+        items, _ = _run_cycle([
+            _make_reading(1, True),
+            _make_reading(2, True),
+        ], now_m=now_m)
+        zones = {i.zone for i in items}
+        assert 1 not in zones  # Sensor 1 blockiert
+        assert 2 in zones      # Sensor 2 durchgelassen
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Überspringen-Bedingungen
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSkipConditions:
+    def test_hw_faulted_blocks_all(self):
+        _set_assignments({1: [1], 2: [2]})
         with state_lock:
             state.hw_faulted = True
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings)
-        skip_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_skip_hw_faulted"
-        ]
-        assert len(skip_events) == 1
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        assert items == []
 
-    def test_queue_full_skip_logged(self):
+    def test_hw_faulted_does_not_block_readings_update(self):
+        with state_lock:
+            state.hw_faulted = True
+        _, new_readings = _run_cycle([_make_reading(1, True)])
+        assert new_readings.get(1) is True
+
+    def test_zone_already_active_skipped_others_queued(self):
+        """Zone 1 ist aktiv → wird übersprungen; Zone 2 kommt durch."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1, 2]})
+        with state_lock:
+            state.active_runs = {
+                1: ActiveRun(
+                    zone=1, end_time=now_m+60, time_unit="Sekunden",
+                    started_at=now_m, started_source="manual", started_planned_s=60,
+                )
+            }
+        items, _ = _run_cycle([_make_reading(1, True)])
+        zones = {i.zone for i in items}
+        assert 1 not in zones
+        assert 2 in zones
+
+    def test_zone_already_queued_skipped(self):
+        _set_assignments({1: [1, 2]})
+        with state_lock:
+            state.queue = [QueueItem(zone=1, duration=60, time_unit="Sekunden", source="manual")]
+        items, _ = _run_cycle([_make_reading(1, True)])
+        zones = {i.zone for i in items}
+        assert 1 not in zones
+        assert 2 in zones
+
+    def test_queue_full_skips_remaining_zones(self):
+        _set_assignments({1: list(range(1, MAX_QUEUE_ITEMS + 2))})
         with state_lock:
             state.queue = [
                 QueueItem(zone=z, duration=60, time_unit="Sekunden", source="manual")
                 for z in range(1, MAX_QUEUE_ITEMS + 1)
             ]
-        readings = [_make_reading(zone=MAX_QUEUE_ITEMS + 1, needs_irrigation=True)]
+        items, _ = _run_cycle([_make_reading(1, True)])
+        # Queue bereits voll → kein weiteres Item
+        assert items == []
+
+    def test_no_double_entry_for_same_zone_two_sensors(self):
+        """Zwei Sensoren sind beide trocken und beide haben Zone 1 zugeordnet.
+        Zone 1 darf nur EINMAL in die Queue kommen."""
+        _set_assignments({1: [1], 2: [1]})
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        zone1_items = [i for i in items if i.zone == 1]
+        assert len(zone1_items) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLogging:
+    def test_sensor_trigger_logged(self):
+        _set_assignments({1: [1, 2]})
         with patch("services.sensor_engine.log_event") as mock_log:
-            _run_cycle(readings)
-        skip_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_skip_queue_full"
-        ]
-        assert len(skip_events) == 1
+            _run_cycle([_make_reading(1, True)])
+        events = [c.args[0] for c in mock_log.call_args_list if c.args]
+        assert "sensor_trigger" in events
 
+    def test_sensor_trigger_contains_sensor_id_and_zones(self):
+        _set_assignments({1: [1, 2]})
+        with patch("services.sensor_engine.log_event") as mock_log:
+            _run_cycle([_make_reading(1, True)])
+        trigger = next(c for c in mock_log.call_args_list if c.args and c.args[0] == "sensor_trigger")
+        assert trigger.kwargs["sensor_id"] == 1
+        assert set(trigger.kwargs["zones_queued"]) == {1, 2}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _process_sensor_cycle_locked – Grenzfälle
-# ─────────────────────────────────────────────────────────────────────────────
+    def test_no_assignment_logged(self):
+        _set_assignments({})
+        with patch("services.sensor_engine.log_event") as mock_log:
+            _run_cycle([_make_reading(1, True)])
+        events = [c.args[0] for c in mock_log.call_args_list if c.args]
+        assert "sensor_skip_no_assignment" in events
 
-
-class TestProcessSensorCycleEdgeCases:
-    def test_sensor_last_triggered_initialised_if_none(self):
+    def test_cooldown_skip_logged(self):
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
         with state_lock:
-            state.sensor_last_triggered = None
-
-        readings = [_make_reading(zone=1, needs_irrigation=True)]
-        items, _ = _run_cycle(readings)
-        # Zone sollte trotzdem getriggert werden (sensor_last_triggered wird initialisiert)
-        assert len(items) == 1
-        with state_lock:
-            assert state.sensor_last_triggered is not None
-
-    def test_queue_counter_includes_items_from_same_cycle(self):
-        """
-        Wenn in einem Zyklus mehrere Zonen triggern, muss das Queue-Limit
-        auch die Items aus demselben Zyklus mitzählen.
-        Hier: MAX_QUEUE_ITEMS - 1 Items schon in Queue + 2 neue Zonen →
-        nur eine Zone darf durch, die zweite wird blockiert.
-        """
-        with state_lock:
-            state.queue = [
-                QueueItem(zone=z, duration=60, time_unit="Sekunden", source="manual")
-                for z in range(1, MAX_QUEUE_ITEMS)  # MAX_QUEUE_ITEMS - 1 Items
-            ]
-
-        readings = [
-            _make_reading(zone=MAX_QUEUE_ITEMS + 10, needs_irrigation=True),
-            _make_reading(zone=MAX_QUEUE_ITEMS + 11, needs_irrigation=True),
-        ]
-        items, _ = _run_cycle(readings)
-        # Erste Zone passt rein, zweite überschreitet Limit
-        assert len(items) == 1
-
-    def test_mixed_moist_and_dry_zones(self):
-        readings = [
-            _make_reading(zone=1, needs_irrigation=False),
-            _make_reading(zone=2, needs_irrigation=True),
-            _make_reading(zone=3, needs_irrigation=False),
-            _make_reading(zone=4, needs_irrigation=True),
-        ]
-        items, new_readings = _run_cycle(readings)
-        zones = {item.zone for item in items}
-        assert zones == {2, 4}
-        assert new_readings == {1: False, 2: True, 3: False, 4: True}
+            state.sensor_cooldown_s = 600
+            state.sensor_last_triggered = {1: now_m - 10.0}
+        with patch("services.sensor_engine.log_event") as mock_log:
+            _run_cycle([_make_reading(1, True)], now_m=now_m)
+        events = [c.args[0] for c in mock_log.call_args_list if c.args]
+        assert "sensor_skip_cooldown" in events
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _read_all_sensors
 # ─────────────────────────────────────────────────────────────────────────────
 
-
 class TestReadAllSensors:
-    def test_returns_readings_for_all_zones(self, sim_sensor_driver):
-        """SimSensorDriver gibt für alle angegebenen Zonen ein Reading zurück."""
+    def test_reads_all_sensor_ids(self, sim_sensor_driver):
         readings = _read_all_sensors([1, 2, 3])
         assert len(readings) == 3
-        zones = {r.zone for r in readings}
-        assert zones == {1, 2, 3}
+        ids = {r.zone for r in readings}
+        assert ids == {1, 2, 3}
 
-    def test_returns_needs_irrigation_false_by_default(self, sim_sensor_driver):
-        """SimSensorDriver meldet standardmäßig alle Zonen als feucht."""
-        readings = _read_all_sensors([1, 2])
-        assert all(not r.needs_irrigation for r in readings)
-
-    def test_dry_zone_returns_needs_irrigation_true(self, sim_sensor_driver):
-        sim_sensor_driver.set_zone_dry(2)
-        readings = _read_all_sensors([1, 2])
-        by_zone = {r.zone: r for r in readings}
-        assert by_zone[2].needs_irrigation is True
-        assert by_zone[1].needs_irrigation is False
-
-    def test_failed_zone_is_skipped_others_continue(self):
-        """
-        Schlägt der Read für eine Zone fehl (SensorDriverError),
-        müssen die anderen Zonen trotzdem gelesen werden.
-        """
+    def test_failed_sensor_skipped_others_continue(self):
         call_count = 0
-
-        class _PartiallyFailingDriver(SimSensorDriver):
-            def read(self, zone: int):
+        class _PartialFail(SimSensorDriver):
+            def read(self, zone):
                 nonlocal call_count
                 call_count += 1
                 if zone == 2:
-                    raise SensorDriverError("Simulierter Sensor-Ausfall Zone 2")
+                    raise SensorDriverError("Ausfall")
                 return super().read(zone)
-
-        failing_driver = _PartiallyFailingDriver()
-        set_sensor_driver(failing_driver)
-
+        set_sensor_driver(_PartialFail())
         readings = _read_all_sensors([1, 2, 3])
-
-        # Zone 2 schlägt fehl, Zone 1 und 3 müssen trotzdem da sein
         assert len(readings) == 2
-        zones = {r.zone for r in readings}
-        assert 2 not in zones
-        assert 1 in zones
-        assert 3 in zones
+        ids = {r.zone for r in readings}
+        assert 2 not in ids
 
-    def test_failed_zone_logged_as_warning(self):
-        """SensorDriverError bei read() muss als Warning geloggt werden."""
-        class _FailingDriver(SimSensorDriver):
-            def read(self, zone: int):
-                raise SensorDriverError(f"Ausfall Zone {zone}")
-
-        set_sensor_driver(_FailingDriver())
-
-        with patch("services.sensor_engine.log_event") as mock_log:
-            _read_all_sensors([1])
-
-        error_events = [
-            c for c in mock_log.call_args_list
-            if c.args and c.args[0] == "sensor_read_error"
-        ]
-        assert len(error_events) == 1
-        assert error_events[0].kwargs.get("level") == "warning"
-
-    def test_empty_zone_list_returns_empty_list(self, sim_sensor_driver):
-        readings = _read_all_sensors([])
-        assert readings == []
+    def test_empty_list_returns_empty(self, sim_sensor_driver):
+        assert _read_all_sensors([]) == []

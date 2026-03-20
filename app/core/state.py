@@ -115,9 +115,10 @@ class RunState:
       - Hardware-Fault-Latch:   hw_faulted, hw_fault_*
       - Parallel-Modus:         parallel_enabled, max_concurrent_valves, parallel_drain_logged
       - Device-Konfiguration:   max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
-      - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins_by_zone,
+      - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins,
                                 sensor_internal_pull_up, sensor_polling_interval_s,
                                 sensor_cooldown_s, sensor_default_duration_s
+      - Sensor-Zuordnung:       sensor_zone_assignments (sensor_id → [zone, ...])
       - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered
       - User-Settings:          max_history_items, navbar_title, accent_color, …
       - Hard-Limits:            hard_max_runtime_s, hard_max_concurrent_valves
@@ -178,8 +179,8 @@ class RunState:
     gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
 
     # ── Sensor-Konfiguration (aus device_config.json) ─────────────────────────
-    sensor_driver_mode: str = "sim"                          # "sim" | "rpi_switch"
-    sensor_gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
+    sensor_driver_mode: str = "sim"                    # "sim" | "rpi_switch"
+    sensor_gpio_pins: Dict[int, int] | None = None   # {sensor_id: BCM-Pin} – Hardware-Konfig
     sensor_internal_pull_up: bool = False  # True = internen Pi-Pull-Up (~50kΩ) verwenden
 
     # Polling-Intervall: wie oft alle Sensor-Zonen gelesen werden (Sekunden).
@@ -194,14 +195,23 @@ class RunState:
     # Wird als duration in QueueItem.duration verwendet (source="sensor").
     sensor_default_duration_s: int = 300
 
+    # Sensor-Zonen-Zuordnung: welcher Sensor welche Ventil-Zonen steuert.
+    # {sensor_id: [zone, ...]} – z.B. {1: [1, 2, 3], 2: [4, 5]}.
+    # Wird aus sensor_assignments.json geladen und via POST /sensors/assignments
+    # gespeichert. None = noch nicht geladen.
+    sensor_zone_assignments: Dict[int, list] | None = None
+
+    # Dirty-Flag für persistence_loop
+    sensor_assignments_dirty: bool = False
+
     # ── Sensor-Laufzeit (rein in-memory, kein Persist) ────────────────────────
-    # sensor_readings:       Letzter bekannter Feuchtezustand pro Zone.
+    # sensor_readings:       Letzter bekannter Feuchtezustand pro Sensor.
     #                        None = noch kein Lesevorgang seit Start.
-    #                        {zone: needs_irrigation} – True = trocken.
+    #                        {sensor_id: needs_irrigation} – True = trocken.
     sensor_readings: Dict[int, bool] | None = None
 
     # sensor_last_triggered: Monotonic-Timestamp des letzten sensor-getriggerten
-    #                        Laufstarts pro Zone. Für Cooldown-Berechnung.
+    #                        Laufstarts pro Sensor. Für Cooldown-Berechnung.
     #                        None = noch kein Trigger seit Start.
     sensor_last_triggered: Dict[int, float] | None = None
 

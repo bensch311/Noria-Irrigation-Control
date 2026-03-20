@@ -104,14 +104,15 @@ def reset_global_state() -> None:
         if state.gpio_pins_by_zone is None:
             state.gpio_pins_by_zone = {}
 
-        # sensor_gpio_pins_by_zone: analog zu gpio_pins_by_zone.
-        if state.sensor_gpio_pins_by_zone is None:
-            state.sensor_gpio_pins_by_zone = {}
+        # sensor_gpio_pins: analog zu gpio_pins_by_zone.
+        if state.sensor_gpio_pins is None:
+            state.sensor_gpio_pins = {}
 
-        # Sensor-Laufzeit-Dicts explizit initialisieren damit Tests
-        # ohne None-Guards direkt schreiben können.
+        # Sensor-Laufzeitdaten und Zuordnung initialisieren.
         state.sensor_readings = {}
         state.sensor_last_triggered = {}
+        if state.sensor_zone_assignments is None:
+            state.sensor_zone_assignments = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

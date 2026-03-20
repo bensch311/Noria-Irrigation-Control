@@ -238,13 +238,13 @@ class TestSimSensorDriver:
         # read() muss auch int akzeptieren
         assert drv.read(1).needs_irrigation is True
 
-    def test_read_logs_event(self):
+    def test_read_does_not_log_event(self):
+        # SimSensorDriver.read() loggt bewusst NICHT – Routine-Polls würden
+        # die Logdatei aufblähen. Sichergestellt dass kein log_event-Aufruf stattfindet.
         drv = SimSensorDriver()
         with patch("services.sensor_driver.log_event") as mock_log:
             drv.read(3)
-        assert mock_log.called
-        event_name = mock_log.call_args.args[0]
-        assert event_name == "sensor_hw_read"
+        assert not mock_log.called
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -94,32 +94,32 @@ class SimSensorSetRequest(BaseModel):
     Nur gueltig wenn sensor_driver_mode == "sim" – im Produktionsmodus
     antwortet der Endpunkt mit 404.
 
-    dry_zones:   Zonen die als trocken markiert werden (needs_irrigation=True).
-    moist_zones: Zonen die als feucht markiert werden (needs_irrigation=False).
+    dry_sensors:   Sensor-IDs die als trocken markiert werden (needs_irrigation=True).
+    moist_sensors: Sensor-IDs die als feucht markiert werden (needs_irrigation=False).
 
     Beide Listen sind optional; ein leerer Body tut nichts und gibt den
     aktuellen Zustand zurueck. So kann der Endpunkt auch rein zum Abfragen
     des Sim-Zustands genutzt werden.
     """
-    dry_zones:   List[int] = Field(default_factory=list)
-    moist_zones: List[int] = Field(default_factory=list)
+    dry_sensors:   List[int] = Field(default_factory=list)
+    moist_sensors: List[int] = Field(default_factory=list)
 
-    @field_validator("dry_zones", "moist_zones")
+    @field_validator("dry_sensors", "moist_sensors")
     @classmethod
-    def validate_zones_positive(cls, v: List[int]) -> List[int]:
-        for z in v:
-            if z < 1:
+    def validate_sensor_ids_positive(cls, v: List[int]) -> List[int]:
+        for s in v:
+            if s < 1:
                 raise ValueError(
-                    f"Zonen-Nummer muss >= 1 sein, bekommen: {z}"
+                    f"Sensor-ID muss >= 1 sein, bekommen: {s}"
                 )
         return v
 
     def model_post_init(self, __context: object) -> None:
-        """Prueft dass keine Zone in beiden Listen vorkommt."""
-        overlap = set(self.dry_zones) & set(self.moist_zones)
+        """Prueft dass keine Sensor-ID in beiden Listen vorkommt."""
+        overlap = set(self.dry_sensors) & set(self.moist_sensors)
         if overlap:
             raise ValueError(
-                f"Zonen {sorted(overlap)} kommen in dry_zones UND moist_zones vor."
+                f"Sensor-IDs {sorted(overlap)} kommen in dry_sensors UND moist_sensors vor."
             )
 
 
@@ -170,4 +170,42 @@ class SettingsUpdateRequest(BaseModel):
                 f"Ungueltige Akzentfarbe {v!r}: muss ein 6-stelliger Hex-Farbwert sein "
                 "(z.B. '#82372a')."
             )
+        return v
+
+class SensorAssignmentRequest(BaseModel):
+    """Request-Modell für POST /sensors/assignments.
+
+    Setzt die Zuordnung Sensor-ID → Ventil-Zonen vollständig neu.
+    Die gesamte bisherige Zuordnung wird durch die übermittelte ersetzt.
+
+    assignments: Dict mit sensor_id (str) → Liste der zugeordneten Zonen.
+                 Leere Liste = Sensor hat keine Zonen (deaktiviert).
+                 Nicht enthaltene Sensor-IDs behalten ihre bisherige Zuordnung NICHT –
+                 die gesamte Zuordnung wird ersetzt (PUT-Semantik).
+
+    Beispiel: {"1": [1, 2, 3], "2": [4, 5]}
+    """
+    assignments: dict[str, List[int]] = Field(default_factory=dict)
+
+    @field_validator("assignments")
+    @classmethod
+    def validate_assignments(cls, v: dict) -> dict:
+        for sid_str, zones in v.items():
+            try:
+                sid = int(sid_str)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Sensor-ID muss eine ganze Zahl sein, bekommen: {sid_str!r}"
+                )
+            if sid < 1:
+                raise ValueError(f"Sensor-ID muss >= 1 sein, bekommen: {sid}")
+            for z in zones:
+                try:
+                    zi = int(z)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"Zonen-Nummer muss eine ganze Zahl sein, bekommen: {z!r}"
+                    )
+                if zi < 1:
+                    raise ValueError(f"Zonen-Nummer muss >= 1 sein, bekommen: {zi}")
         return v
