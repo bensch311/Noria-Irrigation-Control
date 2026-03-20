@@ -119,6 +119,9 @@ def _default_device_config_payload() -> dict:
             "IRRIGATION_SENSOR_DRIVER": "sim",         # sim | rpi_switch
             "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
             "IRRIGATION_SENSOR_PINS": {},              # {"1": 24, ...} BCM
+            "IRRIGATION_SENSOR_POLLING_INTERVAL_S": 30,
+            "IRRIGATION_SENSOR_COOLDOWN_S": 600,
+            "IRRIGATION_SENSOR_DEFAULT_DURATION_S": 300,
         },
         "hard_limits": {
             "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
@@ -236,6 +239,21 @@ def load_device_config_from_disk():
             except Exception:
                 continue
 
+    # Polling-Intervall: minimum 5s (geclampt im sensor_engine_loop, aber schon hier validiert)
+    sensor_polling_interval_s = max(
+        5, _int(sens.get("IRRIGATION_SENSOR_POLLING_INTERVAL_S", 30), 30)
+    )
+
+    # Cooldown: minimum 0s (kein negativer Cooldown möglich)
+    sensor_cooldown_s = max(
+        0, _int(sens.get("IRRIGATION_SENSOR_COOLDOWN_S", 600), 600)
+    )
+
+    # Standard-Laufzeit: minimum 1s
+    sensor_default_duration_s = max(
+        1, _int(sens.get("IRRIGATION_SENSOR_DEFAULT_DURATION_S", 300), 300)
+    )
+
     # ── State aktualisieren ───────────────────────────────────────────────────
     with state_lock:
         state.max_valves = max_valves
@@ -247,6 +265,9 @@ def load_device_config_from_disk():
         state.sensor_driver_mode = sensor_drv
         state.sensor_gpio_pins_by_zone = sensor_pins_norm
         state.sensor_internal_pull_up = sensor_internal_pull_up
+        state.sensor_polling_interval_s = sensor_polling_interval_s
+        state.sensor_cooldown_s = sensor_cooldown_s
+        state.sensor_default_duration_s = sensor_default_duration_s
 
     try:
         from services.valve_driver import reset_valve_driver

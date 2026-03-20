@@ -14,7 +14,8 @@ Startup-Reihenfolge (kritisch – nicht umstellen!):
   6. IO-Worker starten              (MUSS vor Hardware-Ops starten)
   7. Fail-Safe close_all            (Ventile nach Absturz/Stromausfall schließen)
   8. Runtime-State zurücksetzen     (active_runs leeren, paused=False)
-  9. Background-Threads starten     (timer_loop, scheduler_loop, persistence_loop)
+  9. Background-Threads starten     (timer_loop, scheduler_loop, persistence_loop,
+                                     sensor_engine_loop)
  10. Watchdog-Thread starten        (systemd WATCHDOG=1)
  11. running.lock anlegen           (signalisiert: Service läuft sauber)
  12. READY=1 an systemd senden
@@ -27,7 +28,7 @@ Shutdown-Reihenfolge:
   5. Dirty-State flushen             (letzte Saves für schedules/queue/history)
   6. Background-Threads joinen       (max. 2s pro Thread)
   7. IO-Worker stoppen               (ZULETZT – nach allen anderen Threads)
-  8. GPIO-Cleanup                    (Pins auf Input zurücksetzen)
+  8. GPIO-Cleanup                    (Valve-Driver und Sensor-Driver Handles freigeben)
 
 Sentinel-File-Muster (Neustart-Erkennung):
   running.lock wird beim Start angelegt und beim Shutdown als ERSTES gelöscht.
@@ -68,6 +69,7 @@ from services.persistence import (
 from services.timer import timer_loop
 from services.scheduler import scheduler_loop
 from services.persistence import persistence_loop
+from services.sensor_engine import sensor_engine_loop
 
 from services.io_worker import get_io_worker, IOCommand
 from core.security import load_or_create_api_key
@@ -276,12 +278,21 @@ async def lifespan(app: FastAPI):
         state.queue_state = "bereit"
         state.queue_state_before_valve_pause = "bereit"
         state.parallel_drain_logged = False
+        # Sensor-Laufzeitdaten zurücksetzen: Readings und Cooldown-Timestamps
+        # sind nach einem Neustart nicht mehr gültig.
+        state.sensor_readings = {}
+        state.sensor_last_triggered = {}
 
     shutdown_event.clear()
     threads.clear()
 
     # 9. Background-Threads starten
-    for fn, name in [(timer_loop, "timer_loop"), (scheduler_loop, "scheduler_loop"), (persistence_loop, "persistence_loop")]:
+    for fn, name in [
+        (timer_loop,         "timer_loop"),
+        (scheduler_loop,     "scheduler_loop"),
+        (persistence_loop,   "persistence_loop"),
+        (sensor_engine_loop, "sensor_engine_loop"),
+    ]:
         th = threading.Thread(target=fn, daemon=True, name=name)
         th.start()
         threads.append(th)
@@ -368,7 +379,7 @@ async def lifespan(app: FastAPI):
         logger.exception("shutdown flush failed")
         log_event("shutdown_flush_error", level="error", source="system")
 
-    # 5. Background-Threads joinen
+    # 5. Background-Threads joinen (inkl. sensor_engine_loop)
     for th in threads:
         try:
             th.join(timeout=2.0)
@@ -388,8 +399,11 @@ async def lifespan(app: FastAPI):
             error=repr(e)
         )
 
-    # 7. GPIO-Cleanup nach IO-Worker-Shutdown: Pins auf Input zurücksetzen.
-    # Reihenfolge ist sicherheitskritisch: close_all() (oben) → io_worker.shutdown() → cleanup().
+    # 7. GPIO-Cleanup nach IO-Worker-Shutdown.
+    # Reihenfolge ist sicherheitskritisch: close_all() → io_worker.shutdown() → cleanup().
+    # Valve-Driver zuerst (safety-critical), dann Sensor-Driver.
+
+    # Valve-Driver: Pins auf Input zurücksetzen.
     # SimValveDriver.cleanup() ist ein No-Op.
     try:
         from services.valve_driver import get_valve_driver
@@ -398,6 +412,21 @@ async def lifespan(app: FastAPI):
         logger.exception("valve driver cleanup failed")
         log_event(
             "valve_driver_cleanup_failed",
+            level="error",
+            source="system",
+            error=repr(e)
+        )
+
+    # Sensor-Driver: GPIO-Handle freigeben.
+    # SimSensorDriver.cleanup() ist ein No-Op.
+    # Sensor-Engine-Thread ist bereits gejoint (Schritt 5) → kein Use-after-Free.
+    try:
+        from services.sensor_driver import get_sensor_driver
+        get_sensor_driver().cleanup()
+    except Exception as e:
+        logger.exception("sensor driver cleanup failed")
+        log_event(
+            "sensor_driver_cleanup_failed",
             level="error",
             source="system",
             error=repr(e)

@@ -47,7 +47,7 @@ class ActiveRun:
     end_time: float           # monotonic timestamp – Ablaufzeitpunkt (0.0 wenn pausiert)
     time_unit: str            # "Sekunden" | "Minuten" – nur für Anzeige
     started_at: float         # monotonic timestamp – Startzeitpunkt
-    started_source: str       # "manual" | "queue" | "schedule"
+    started_source: str       # "manual" | "queue" | "schedule" | "sensor"
     started_planned_s: int    # ursprünglich geplante Laufzeit in Sekunden
 
     paused_at: float = 0.0          # monotonic timestamp des letzten Pause-Zeitpunkts (0.0 = nicht pausiert)
@@ -68,7 +68,7 @@ class QueueItem:
     zone: int
     duration: int       # Laufzeit in Sekunden
     time_unit: str
-    source: str = "queue"   # "manual" | "queue" | "schedule" – Ursprung des Eintrags
+    source: str = "queue"   # "manual" | "queue" | "schedule" | "sensor" – Ursprung des Eintrags
 
 
 @dataclass
@@ -96,7 +96,7 @@ class HistoryItem:
     ts_end: str         # ISO-8601-Zeitstempel des Laufendes (Europa/Berlin)
     zone: int
     duration_s: int     # tatsächlich gelaufene Sekunden
-    source: str         # "manual" | "queue" | "schedule"
+    source: str         # "manual" | "queue" | "schedule" | "sensor"
     time_unit: str = "Sekunden"
 
 
@@ -108,18 +108,21 @@ class RunState:
     Alle Felder sind unter state_lock zu lesen und zu schreiben.
 
     Felder-Gruppen:
-      - Ventil-Zustand:        paused, active_runs
-      - Queue:                 queue, queue_state, queue_state_before_valve_pause
-      - Zeitpläne:             schedules, automation_enabled, automation_block_run_key
-      - Dirty-Flags:           schedules_dirty, queue_dirty, history_dirty
-      - Hardware-Fault-Latch:  hw_faulted, hw_fault_*
-      - Parallel-Modus:        parallel_enabled, max_concurrent_valves, parallel_drain_logged
-      - Device-Konfiguration:  max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
-      - Sensor-Konfiguration:  sensor_driver_mode, sensor_gpio_pins_by_zone, sensor_internal_pull_up
-      - User-Settings:         max_history_items, navbar_title, accent_color, …
-      - Hard-Limits:           hard_max_runtime_s, hard_max_concurrent_valves
-      - Neustart-Erkennung:    unclean_restart, restart_detected_at
-      - Verlauf:               run_history
+      - Ventil-Zustand:         paused, active_runs
+      - Queue:                  queue, queue_state, queue_state_before_valve_pause
+      - Zeitpläne:              schedules, automation_enabled, automation_block_run_key
+      - Dirty-Flags:            schedules_dirty, queue_dirty, history_dirty
+      - Hardware-Fault-Latch:   hw_faulted, hw_fault_*
+      - Parallel-Modus:         parallel_enabled, max_concurrent_valves, parallel_drain_logged
+      - Device-Konfiguration:   max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
+      - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins_by_zone,
+                                sensor_internal_pull_up, sensor_polling_interval_s,
+                                sensor_cooldown_s, sensor_default_duration_s
+      - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered
+      - User-Settings:          max_history_items, navbar_title, accent_color, …
+      - Hard-Limits:            hard_max_runtime_s, hard_max_concurrent_valves
+      - Neustart-Erkennung:     unclean_restart, restart_detected_at
+      - Verlauf:                run_history
     """
 
     # ── Ventil-Zustand ────────────────────────────────────────────────────────
@@ -177,7 +180,30 @@ class RunState:
     # ── Sensor-Konfiguration (aus device_config.json) ─────────────────────────
     sensor_driver_mode: str = "sim"                          # "sim" | "rpi_switch"
     sensor_gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
-    sensor_internal_pull_up: bool = False   # True = internen Pi-Pull-Up (~50kΩ) verwenden
+    sensor_internal_pull_up: bool = False  # True = internen Pi-Pull-Up (~50kΩ) verwenden
+
+    # Polling-Intervall: wie oft alle Sensor-Zonen gelesen werden (Sekunden).
+    # Minimum ist 5s (wird in sensor_engine_loop geclampt).
+    sensor_polling_interval_s: int = 30
+
+    # Cooldown: Mindestabstand zwischen zwei sensor-getriggerten Läufen pro Zone (Sekunden).
+    # Verhindert Dauerbewässerung bei dauerhaft trockenem Boden oder defektem Sensor.
+    sensor_cooldown_s: int = 600
+
+    # Standard-Laufzeit sensor-getriggerter Bewässerungsläufe (Sekunden).
+    # Wird als duration in QueueItem.duration verwendet (source="sensor").
+    sensor_default_duration_s: int = 300
+
+    # ── Sensor-Laufzeit (rein in-memory, kein Persist) ────────────────────────
+    # sensor_readings:       Letzter bekannter Feuchtezustand pro Zone.
+    #                        None = noch kein Lesevorgang seit Start.
+    #                        {zone: needs_irrigation} – True = trocken.
+    sensor_readings: Dict[int, bool] | None = None
+
+    # sensor_last_triggered: Monotonic-Timestamp des letzten sensor-getriggerten
+    #                        Laufstarts pro Zone. Für Cooldown-Berechnung.
+    #                        None = noch kein Trigger seit Start.
+    sensor_last_triggered: Dict[int, float] | None = None
 
     # ── User-Settings (aus user_settings.json) ────────────────────────────────
     max_history_items: int = 20
