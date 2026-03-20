@@ -195,11 +195,13 @@ _status_trigger   = reactive.Value(0)
 _queue_trigger    = reactive.Value(0)
 _schedule_trigger = reactive.Value(0)
 _history_trigger  = reactive.Value(0)
+_sensor_trigger   = reactive.Value(0)
 
 def _bump_status():   _status_trigger.set(_status_trigger.get() + 1)
 def _bump_queue():    _queue_trigger.set(_queue_trigger.get() + 1)
 def _bump_schedule(): _schedule_trigger.set(_schedule_trigger.get() + 1)
 def _bump_history():  _history_trigger.set(_history_trigger.get() + 1)
+def _bump_sensor():   _sensor_trigger.set(_sensor_trigger.get() + 1)
 
 # --- Backend-Health ----------------------------------------------------------
 
@@ -372,6 +374,28 @@ def _sysinfo_data() -> dict:
     """
     reactive.invalidate_later(POLL_SLOW_S)
     return _json_or_none(_get("/system/info")) or {}
+
+@reactive.calc
+def _sensor_readings_data() -> dict:
+    """Gecachter /sensors/readings-Fetch. Langsamer Poll genuegt.
+
+    Liefert Bodenfeuchte-Status aller konfigurierten Sensor-Zonen.
+    Bei Verbindungsfehler: leeres Dict – Karten zeigen 'Unbekannt'.
+    """
+    reactive.invalidate_later(POLL_SLOW_S)
+    _sensor_trigger.get()
+    return _json_or_none(_get("/sensors/readings")) or {}
+
+@reactive.calc
+def _sensor_config_data() -> dict:
+    """Gecachter /sensors/config-Fetch. Langsamer Poll genuegt.
+
+    Liefert Sensor-Konfiguration (Treiber, Pins, Intervall, Cooldown).
+    Aenderungen erfordern Backend-Neustart – seltener Poll genuegt.
+    """
+    reactive.invalidate_later(POLL_SLOW_S)
+    _sensor_trigger.get()
+    return _json_or_none(_get("/sensors/config")) or {}
 
 # Letzter angewendeter dur/unit-Wert – verhindert Reset der Slider bei jedem Poll
 _last_applied_dur_unit: reactive.Value = reactive.Value({})
@@ -1197,7 +1221,200 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             _bump_queue()
 
     # =========================================================================
-    # TAB 4 - ZEITPLAENE
+    # TAB 4 - SENSOREN
+    # =========================================================================
+    with ui.nav_panel("Sensoren", value="sensoren"):
+
+        # ----- Konfigurations-Banner -----------------------------------------
+        # Zeigt Treiber, Intervall, Cooldown und eventuelle Warnungen.
+        # Render-Funktion statt statischem UI: damit Warnbanner (ungueltige Pins,
+        # Sim-Fallback) reaktiv auftauchen ohne Seiten-Reload.
+        @render.ui
+        def _sensor_config_banner():
+            cfg = _sensor_config_data()
+            if not cfg:
+                return ui.div()
+
+            drv         = cfg.get("sensor_driver", "sim")
+            mode        = cfg.get("configured_driver_mode", "sim")
+            interval_s  = int(cfg.get("polling_interval_s", 30))
+            cooldown_s  = int(cfg.get("cooldown_s", 600))
+            duration_s  = int(cfg.get("default_duration_s", 300))
+            gpio_valid  = bool(cfg.get("gpio_config_valid", True))
+            zones       = cfg.get("zones_configured", [])
+
+            # Dauer-Formatierung: Minuten wenn >= 60s, sonst Sekunden
+            def _fmt_dur(s: int) -> str:
+                return f"{s // 60} min" if s >= 60 else f"{s} s"
+
+            config_bar = ui.div(
+                ui.tags.span(ui.tags.b("Treiber: "), drv,      class_="sensor-cfg-item"),
+                ui.tags.span(ui.tags.b("Polling: "), f"{interval_s} s", class_="sensor-cfg-item"),
+                ui.tags.span(ui.tags.b("Cooldown: "), _fmt_dur(cooldown_s), class_="sensor-cfg-item"),
+                ui.tags.span(ui.tags.b("Laufzeit: "), _fmt_dur(duration_s), class_="sensor-cfg-item"),
+                ui.tags.span(
+                    ui.tags.b("Zonen: "),
+                    str(len(zones)) if zones else "–",
+                    class_="sensor-cfg-item",
+                ),
+                class_="sensor-config-bar",
+            )
+
+            # Warnbanner aufbauen (mehrere Warnungen moeglich)
+            warn_items = []
+
+            # rpi_switch konfiguriert, aber Treiber ist sim → Init-Fehler beim Start
+            if mode == "rpi_switch" and drv == "sim":
+                warn_items.append(
+                    ui.div(
+                        ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
+                                  style="color:#d97706;"),
+                        "Sensor-Treiber laeuft im Sim-Modus obwohl 'rpi_switch' "
+                        "konfiguriert ist – GPIO-Fehler beim Start. "
+                        "Verkabelung und lgpio-Installation pruefen.",
+                        class_="sensor-warn-bar",
+                    )
+                )
+
+            # Ungueltige oder doppelte GPIO-Pins
+            if not gpio_valid:
+                inv = cfg.get("invalid_pins", [])
+                dup = cfg.get("duplicate_pins", [])
+                details = []
+                if inv:
+                    details.append(f"ungueltige Pins: {[e['pin'] for e in inv]}")
+                if dup:
+                    details.append(f"Duplikate: {[e['pin'] for e in dup]}")
+                warn_items.append(
+                    ui.div(
+                        ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
+                                  style="color:#d97706;"),
+                        "Ungueltige Sensor-Pin-Konfiguration",
+                        (f" ({', '.join(details)})" if details else ""),
+                        ". Bitte device_config.json pruefen.",
+                        class_="sensor-warn-bar",
+                    )
+                )
+
+            return ui.div(config_bar, *warn_items)
+
+        # ----- Zonen-Karten --------------------------------------------------
+        # Dynamisch: Zone-Liste kommt aus dem API-Response, nicht aus
+        # ANZAHL_VENTILE – Sensor-Zonen sind unabhaengig von Ventil-Zonen.
+        @render.ui
+        def _sensor_zone_cards():
+            d   = _sensor_readings_data()
+            cfg = _sensor_config_data()
+
+            zones         = cfg.get("zones_configured", []) if cfg else []
+            readings      = d.get("readings", {})            if d   else {}
+            last_triggered = d.get("last_triggered", {})     if d   else {}
+            cooldown_s    = int(d.get("cooldown_s", 600))    if d   else 600
+
+            if not zones:
+                return ui.div(
+                    ui.tags.i(class_="bi bi-moisture me-2",
+                              style="font-size:1.6rem; color:rgba(15,23,42,0.22);"),
+                    ui.tags.p(
+                        "Keine Sensor-Zonen konfiguriert.",
+                        class_="text-muted",
+                        style="margin-top:0.5rem;",
+                    ),
+                    ui.tags.p(
+                        "In device_config.json unter 'sensors' → "
+                        "'IRRIGATION_SENSOR_PINS' Zonen-Pin-Zuordnung eintragen "
+                        "(z.\u00a0B. {\"1\": 24, \"2\": 25}).",
+                        class_="text-muted small",
+                    ),
+                    style="text-align:center; padding:2rem 1rem;",
+                )
+
+            cards = []
+            for zone in zones:
+                z_key    = str(zone)
+                moisture = readings.get(z_key)       # None = noch kein Poll
+                elapsed  = last_triggered.get(z_key) # None = nie getriggert
+
+                # Dot-Farbe und Statustext je Feuchte-Zustand
+                if moisture is None:
+                    dot_class   = "sensor-dot unknown"
+                    status_text = "Unbekannt"
+                    status_cls  = "text-muted small"
+                elif moisture:   # True = trocken = Bewaesserung noetig
+                    dot_class   = "sensor-dot dry"
+                    status_text = "Trocken \u2013 Bewaesserung noetig"
+                    status_cls  = "sensor-status-dry small fw-bold"
+                else:            # False = feucht
+                    dot_class   = "sensor-dot moist"
+                    status_text = "Feucht"
+                    status_cls  = "sensor-status-moist small"
+
+                # Letzter Trigger: lesbare Zeitangabe
+                if elapsed is None:
+                    trigger_text = "Noch kein Trigger"
+                elif elapsed < 60:
+                    trigger_text = f"vor {int(elapsed)} Sek."
+                elif elapsed < 3600:
+                    trigger_text = f"vor {int(elapsed / 60)} Min."
+                else:
+                    h   = int(elapsed / 3600)
+                    min_ = int((elapsed % 3600) / 60)
+                    trigger_text = f"vor {h} Std. {min_} Min."
+
+                # Cooldown-Restzeit (nur anzeigen wenn aktiv)
+                cooldown_row = ui.div()
+                if elapsed is not None and elapsed < cooldown_s:
+                    remaining = int(cooldown_s - elapsed)
+                    rem_text  = f"{remaining // 60} min" if remaining >= 60 else f"{remaining} s"
+                    cooldown_row = ui.div(
+                        ui.tags.small(
+                            ui.tags.i(class_="bi bi-hourglass-split me-1",
+                                      style="color:#6b7280;"),
+                            f"Cooldown: noch {rem_text}",
+                            class_="text-muted",
+                        ),
+                        style="margin-top:0.3rem;",
+                    )
+
+                cards.append(
+                    ui.card(
+                        ui.card_header(
+                            ui.div(
+                                ui.tags.b(f"Zone {zone}"),
+                                ui.span(
+                                    "",
+                                    class_=dot_class,
+                                    title=status_text,
+                                    # margin-left:auto schiebt den Dot im Flex-
+                                    # Container zuverlaessig nach rechts.
+                                    style="margin-left:auto; display:block; flex-shrink:0;",
+                                ),
+                                style="display:flex; align-items:center; width:100%;",
+                            ),
+                        ),
+                        ui.div(
+                            ui.div(
+                                ui.span(status_text, class_=status_cls),
+                                class_="sensor-status-area px-3 pt-2",
+                            ),
+                            ui.div(
+                                ui.tags.small(
+                                    ui.tags.i(class_="bi bi-clock me-1",
+                                              style="color:#6b7280;"),
+                                    trigger_text,
+                                    class_="text-muted",
+                                ),
+                                cooldown_row,
+                                class_="px-3 pb-3 pt-1",
+                            ),
+                        ),
+                    )
+                )
+
+            return ui.div(*cards, class_="sensor-grid")
+
+    # =========================================================================
+    # TAB 5 - ZEITPLAENE
     # =========================================================================
     with ui.nav_panel("Zeitplaene", value="schedule"):
 
@@ -1530,7 +1747,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             _bump_schedule()
 
     # =========================================================================
-    # TAB 5 - VERLAUF
+    # TAB 6 - VERLAUF
     # =========================================================================
     with ui.nav_panel("Verlauf", value="history"):
 
@@ -1605,7 +1822,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             _bump_history()
 
     # =========================================================================
-    # TAB 6 - EINSTELLUNGEN
+    # TAB 7 - EINSTELLUNGEN
     # =========================================================================
     ui.nav_spacer()
 

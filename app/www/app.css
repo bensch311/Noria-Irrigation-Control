@@ -695,3 +695,78 @@ input[data-sch-id]:focus {
 
 
 
+
+/* ---------- Sensor cards grid ---------- */
+.sensor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+  padding: 0.15rem;
+}
+
+/* Sensor-Dot: Feuchteanzeige im Card-Header (analog zu .valve-dot) */
+.sensor-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  box-shadow: 0 0 0 3px rgba(15,23,42,0.03);
+}
+.sensor-dot.moist {
+  background: rgba(34, 197, 94, 0.92);
+  box-shadow: 0 0 0 3px rgba(34,197,94,0.10), 0 0 18px rgba(34,197,94,0.14);
+}
+.sensor-dot.dry {
+  background: rgba(245, 158, 11, 0.92);
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.12), 0 0 18px rgba(245,158,11,0.16);
+}
+.sensor-dot.unknown {
+  background: rgba(15, 23, 42, 0.16);
+}
+
+/* display:contents-Trick: identisch zum valve-dot-Fix.
+   Das shiny-html-output-Wrapper-Div des sensor-dot muss transparent im
+   Flex-Container sein, damit margin-left:auto auf dem span-Element wirkt. */
+.card-header .shiny-html-output:has(.sensor-dot) {
+  display: contents;
+}
+
+/* Sensor-Statustext */
+.sensor-status-dry   { color: rgba(180, 110, 0, 0.95); }
+.sensor-status-moist { color: rgba(22, 163, 74, 0.92); }
+
+.sensor-status-area {
+  min-height: 1.9rem;
+  padding: 0.25rem 0;
+}
+
+/* Sensor-Konfigurationsleiste */
+.sensor-config-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  flex-wrap: wrap;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.018);
+  padding: 0.65rem 1rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.88rem;
+}
+
+.sensor-cfg-item {
+  white-space: nowrap;
+  color: var(--muted);
+}
+.sensor-cfg-item b { color: var(--text); }
+
+/* Sensor-Warnbanner (ungueltige Pins, Sim-Fallback) */
+.sensor-warn-bar {
+  background: rgba(245, 158, 11, 0.07);
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-radius: 14px;
+  padding: 0.65rem 1rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.88rem;
+  color: rgba(120, 70, 0, 0.92);
+}
