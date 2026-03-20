@@ -108,6 +108,11 @@ def reset_global_state() -> None:
         if state.sensor_gpio_pins_by_zone is None:
             state.sensor_gpio_pins_by_zone = {}
 
+        # Sensor-Laufzeit-Dicts explizit initialisieren damit Tests
+        # ohne None-Guards direkt schreiben können.
+        state.sensor_readings = {}
+        state.sensor_last_triggered = {}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Autouse-Fixtures (laufen vor/nach JEDEM Test)
@@ -217,6 +222,7 @@ def app():
     from api.routes_control import router as control_router
     from api.routes_history import router as history_router
     from api.routes_settings import router as settings_router
+    from api.routes_sensors import router as sensors_router
 
     # Frische Limiter-Instanz pro Test – identische Konfiguration wie Produktion.
     test_limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
@@ -245,6 +251,7 @@ def app():
     _app.include_router(control_router)
     _app.include_router(history_router)
     _app.include_router(settings_router)
+    _app.include_router(sensors_router)
     return _app
 
 
