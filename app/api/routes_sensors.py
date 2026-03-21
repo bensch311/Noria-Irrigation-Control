@@ -21,7 +21,7 @@ from core.security import require_api_key
 from core.logging import log_event
 from core.limiter import limiter, MUTATION_LIMIT
 from services.sensor_driver import get_sensor_driver, validate_sensor_pins, SimSensorDriver
-from models.requests import SimSensorSetRequest, SensorAssignmentRequest
+from models.requests import SimSensorSetRequest, SensorAssignmentRequest, SensorSettingsRequest
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
@@ -183,6 +183,61 @@ def set_sensor_assignments(request: Request, req: SensorAssignmentRequest):
     return {
         "ok":          True,
         "assignments": {str(sid): zones for sid, zones in normalized.items()},
+    }
+
+
+@router.patch("/sensors/settings")
+@limiter.limit(MUTATION_LIMIT)
+def patch_sensor_settings(request: Request, req: SensorSettingsRequest):
+    """Setzt Sensor-Betriebsparameter: Cooldown und Standard-Bewässerungsdauer.
+
+    Ändert ausschliesslich cooldown_s und default_duration_s im laufenden State
+    und persistiert beide Werte sofort in device_config.json (Partial-Update).
+
+    Hardware-Parameter (Pins, Treiber, Pull-Up, Polling-Intervall) sind nicht
+    änderbar – sie werden nur von install.sh gesetzt und erfordern einen Neustart.
+
+    Validierung:
+      - default_duration_s darf hard_max_runtime_s (aus device_config.json) nicht
+        überschreiten. Diese Grenze ist erst zur Laufzeit bekannt und wird hier
+        dynamisch geprüft (nicht in Pydantic, da State-abhängig – analog zu
+        /settings für slider_max_minutes).
+
+    Response-Felder:
+      ok                 – True bei Erfolg
+      cooldown_s         – Tatsächlich gesetzter Cooldown
+      default_duration_s – Tatsächlich gesetzte Standard-Bewässerungsdauer
+    """
+    with state_lock:
+        hard_max_runtime_s = int(getattr(state, "hard_max_runtime_s", 3600))
+
+    if req.default_duration_s > hard_max_runtime_s:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"default_duration_s ({req.default_duration_s} s) überschreitet "
+                f"hard_max_runtime_s ({hard_max_runtime_s} s)."
+            ),
+        )
+
+    with state_lock:
+        state.sensor_cooldown_s         = req.cooldown_s
+        state.sensor_default_duration_s = req.default_duration_s
+
+    from services.persistence import save_sensor_settings_to_disk
+    save_sensor_settings_to_disk()
+
+    log_event(
+        "sensor_settings_updated",
+        source="manual",
+        cooldown_s=req.cooldown_s,
+        default_duration_s=req.default_duration_s,
+    )
+
+    return {
+        "ok":                  True,
+        "cooldown_s":          req.cooldown_s,
+        "default_duration_s":  req.default_duration_s,
     }
 
 

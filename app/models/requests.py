@@ -172,6 +172,29 @@ class SettingsUpdateRequest(BaseModel):
             )
         return v
 
+class SensorSettingsRequest(BaseModel):
+    """Request-Modell für PATCH /sensors/settings.
+
+    Setzt die Sensor-Betriebsparameter Cooldown und Standard-Bewässerungsdauer.
+
+    Diese zwei Parameter sind als Operator-Einstellungen im UI editierbar.
+    Alle anderen Sensor-Parameter (Pins, Treiber, Pull-Up, Polling-Intervall)
+    sind Hardware-Admin-Konfiguration und ausschliesslich via install.sh setzbar.
+
+    cooldown_s         : Sperrzeit nach einem Sensor-Trigger in Sekunden.
+                         0 = kein Cooldown (Sensor kann sofort erneut auslösen).
+                         Maximaler sinnvoller Wert: 86400 (24 Stunden).
+
+    default_duration_s : Standard-Bewässerungsdauer bei Sensor-Trigger in Sekunden.
+                         Minimum 60 s (1 Minute), Maximum 3600 s (1 Stunde –
+                         entspricht dem Standard-Hard-Limit MAX_RUNTIME_S).
+                         Die genaue Prüfung gegen hard_max_runtime_s
+                         erfolgt im Route-Handler.
+    """
+    cooldown_s:          int = Field(..., ge=0, le=86400)
+    default_duration_s:  int = Field(..., ge=60, le=3600)
+
+
 class SensorAssignmentRequest(BaseModel):
     """Request-Modell für POST /sensors/assignments.
 

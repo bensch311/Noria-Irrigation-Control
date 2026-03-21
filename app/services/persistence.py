@@ -500,6 +500,55 @@ def save_sensor_assignments_to_disk():
     _atomic_write_json(SENSOR_ASSIGNMENTS_FILE, payload)
 
 
+def save_sensor_settings_to_disk():
+    """Schreibt Sensor-Betriebsparameter (Cooldown, Standardlaufzeit) in device_config.json.
+
+    Bewusste Ausnahme vom Prinzip "device_config.json ist im Betrieb read-only":
+    Cooldown und Standard-Bewässerungsdauer sind operative Parameter, die der
+    Operator im UI anpassen soll – ohne Neuinstallation.
+
+    Klar abgegrenzt von den Hardware-Parametern (Pins, Treiber, Pull-Up, Polling),
+    die nur via install.sh gesetzt werden und nach Änderung einen Neustart erfordern.
+
+    Implementierung als Partial-Update: liest die aktuelle device_config.json,
+    ändert ausschliesslich IRRIGATION_SENSOR_COOLDOWN_S und
+    IRRIGATION_SENSOR_DEFAULT_DURATION_S, und schreibt atomar zurück.
+    Alle anderen Felder (Ventile, Hard-Limits, Hardware-Parameter) bleiben unberührt.
+    """
+    with state_lock:
+        cooldown_s         = int(getattr(state, "sensor_cooldown_s", 3600))
+        default_duration_s = int(getattr(state, "sensor_default_duration_s", 600))
+
+    # Aktuelle Config lesen (Fallback auf Defaults wenn nicht vorhanden oder korrupt)
+    try:
+        with open(DEVICE_CONFIG_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError("Kein dict")
+    except Exception:
+        logger.exception("save_sensor_settings_to_disk: Lesen fehlgeschlagen, schreibe Default")
+        payload = _default_device_config_payload()
+
+    # sensors-Block sicherstellen (Defensiv gegen ältere device_config-Versionen
+    # ohne sensors-Schlüssel)
+    if not isinstance(payload.get("sensors"), dict):
+        payload["sensors"] = _default_device_config_payload()["sensors"]
+
+    # Ausschliesslich die zwei Betriebsparameter aktualisieren
+    payload["sensors"]["IRRIGATION_SENSOR_COOLDOWN_S"]         = cooldown_s
+    payload["sensors"]["IRRIGATION_SENSOR_DEFAULT_DURATION_S"] = default_duration_s
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+
+    _atomic_write_json(DEVICE_CONFIG_FILE, payload)
+
+    log_event(
+        "sensor_settings_saved",
+        source="system",
+        cooldown_s=cooldown_s,
+        default_duration_s=default_duration_s,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Serializer / Deserializer
 # ─────────────────────────────────────────────────────────────────────────────

@@ -332,8 +332,9 @@ if [[ "$SENSORS_INSTALLED" == "true" ]]; then
 
     echo
     echo "─── Sensor Betriebsparameter ───────────────────────────"
-    echo "  Diese Werte steuern wann und wie lange der Sensor"
-    echo "  eine Bewässerung auslöst."
+    echo "  Das Polling-Intervall bestimmt wie oft der Sensor abgefragt wird."
+    echo "  Cooldown und Bewässerungsdauer können nach der Installation im"
+    echo "  Sensoren-Tab der Benutzeroberfläche eingestellt werden."
     echo
     read -rp "  Polling-Intervall in Sekunden [10]: " SENSOR_POLLING
     SENSOR_POLLING="${SENSOR_POLLING:-10}"
@@ -341,19 +342,7 @@ if [[ "$SENSORS_INSTALLED" == "true" ]]; then
         die "Ungültiges Polling-Intervall: '$SENSOR_POLLING'"
     fi
 
-    read -rp "  Cooldown nach Auslösung in Sekunden [60]: " SENSOR_COOLDOWN
-    SENSOR_COOLDOWN="${SENSOR_COOLDOWN:-60}"
-    if ! [[ "$SENSOR_COOLDOWN" =~ ^[0-9]+$ ]] || [[ "$SENSOR_COOLDOWN" -lt 1 ]]; then
-        die "Ungültiger Cooldown: '$SENSOR_COOLDOWN'"
-    fi
-
-    read -rp "  Standard-Bewässerungsdauer in Sekunden [30]: " SENSOR_DURATION
-    SENSOR_DURATION="${SENSOR_DURATION:-30}"
-    if ! [[ "$SENSOR_DURATION" =~ ^[0-9]+$ ]] || [[ "$SENSOR_DURATION" -lt 1 ]]; then
-        die "Ungültige Bewässerungsdauer: '$SENSOR_DURATION'"
-    fi
-
-    success "Sensor-Parameter: Polling=${SENSOR_POLLING}s, Cooldown=${SENSOR_COOLDOWN}s, Dauer=${SENSOR_DURATION}s"
+    success "Sensor-Parameter: Polling=${SENSOR_POLLING}s (Cooldown + Dauer: im UI einstellbar)"
 fi
 
 echo
@@ -393,8 +382,8 @@ if [[ "$SENSORS_INSTALLED" == "true" ]]; then
     echo -e "  ${BOLD}Sensoren                 :${NC} ${GREEN}$NUM_SENSORS installiert${NC} – Pins: ${SENSOR_PINS[*]}"
     echo -e "  ${BOLD}Sensor Pull-Up           :${NC} $SENSOR_INTERNAL_PULL_UP"
     echo -e "  ${BOLD}Sensor Polling           :${NC} ${SENSOR_POLLING}s"
-    echo -e "  ${BOLD}Sensor Cooldown          :${NC} ${SENSOR_COOLDOWN}s"
-    echo -e "  ${BOLD}Sensor Bewässerungsdauer :${NC} ${SENSOR_DURATION}s"
+    echo -e "  ${BOLD}Sensor Cooldown          :${NC} 60 min (Standard, im UI anpassbar)"
+    echo -e "  ${BOLD}Sensor Bewässerungsdauer :${NC} 10 min (Standard, im UI anpassbar)"
 else
     echo -e "  ${BOLD}Sensoren                 :${NC} Keine – Sensor-Tab ausgeblendet"
 fi
@@ -604,14 +593,21 @@ if [[ "$SENSORS_INSTALLED" == "true" ]]; then
         SENSOR_PINS_JSON+="\"$i\": ${SENSOR_PINS[$((i-1))]}"
     done
 else
-    # Keine Sensoren: Treiber bleibt "sim", alle anderen Werte sind Defaults.
+    # Keine Sensoren: Treiber bleibt "sim", Hardware-Parameter auf Defaults setzen.
     # Das Frontend liest IRRIGATION_SENSOR_PINS und blendet den Tab aus wenn leer.
     SENSOR_DRIVER="sim"
     SENSOR_INTERNAL_PULL_UP="false"
     SENSOR_POLLING="10"
-    SENSOR_COOLDOWN="60"
-    SENSOR_DURATION="30"
 fi
+
+# Cooldown und Standard-Bewässerungsdauer werden NICHT in der install.sh abgefragt.
+# Sie sind operative Betriebsparameter, die der Operator im Sensoren-Tab der UI
+# einstellt. Hier werden nur die sinnvollen Startwerte gesetzt:
+#   Cooldown:         60 Minuten (3600 s) – verhindert Dauerbewässerung
+#   Bewässerungsdauer: 10 Minuten (600 s) – konservativer Startwert
+# Die UI-Slider erlauben Cooldown 0–240 min und Dauer 1–60 min.
+SENSOR_COOLDOWN_DEFAULT=3600
+SENSOR_DURATION_DEFAULT=600
 
 cat > "$DATA_DIR/device_config.json" << EOF
 {
@@ -631,8 +627,8 @@ cat > "$DATA_DIR/device_config.json" << EOF
       $SENSOR_PINS_JSON
     },
     "IRRIGATION_SENSOR_POLLING_INTERVAL_S": $SENSOR_POLLING,
-    "IRRIGATION_SENSOR_COOLDOWN_S": $SENSOR_COOLDOWN,
-    "IRRIGATION_SENSOR_DEFAULT_DURATION_S": $SENSOR_DURATION
+    "IRRIGATION_SENSOR_COOLDOWN_S": $SENSOR_COOLDOWN_DEFAULT,
+    "IRRIGATION_SENSOR_DEFAULT_DURATION_S": $SENSOR_DURATION_DEFAULT
   },
   "hard_limits": {
     "MAX_RUNTIME_S": $MAX_RUNTIME,

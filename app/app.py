@@ -129,6 +129,12 @@ def _delete(path: str, json: Any = None, timeout: float = 3.0) -> requests.Respo
     except Exception:
         return None
 
+def _patch(path: str, json: Any = None, timeout: float = 3.0) -> requests.Response | None:
+    try:
+        return _wrap_auth(_session.patch(BASE_URL + path, json=json, timeout=timeout))
+    except Exception:
+        return None
+
 
 # --- Auth Handling -----------------------------------------------------------
 
@@ -1435,6 +1441,144 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     )
 
                 return ui.div(*cards, class_="sensor-grid")
+
+            # ----- Sensor-Einstellungen (Cooldown + Bewässerungsdauer) ----------
+            #
+            # Dieselbe Statik-Pattern wie der Settings-Tab:
+            #
+            #   1. STATISCHE ui.input_slider()-Deklarationen – nie in @render.ui.
+            #      Kein Poll-Reset möglich, Nutzereingaben bleiben erhalten.
+            #
+            #   2. _sensor_settings_initialized-Guard: @reactive.effect
+            #      aktualisiert Slider-Werte nur einmal beim ersten verfügbaren
+            #      API-Fetch – danach niemals erneut (analog _settings_initialized
+            #      im Settings-Tab). Reset nur explizit via Speichern.
+            #
+            #   3. Speichern via PATCH /sensors/settings; reaktiviert den Guard
+            #      NICHT – Slider bleiben auf den gespeicherten Werten bis zum
+            #      nächsten manuellen Reset oder Neustart.
+
+            _sensor_settings_initialized: reactive.Value = reactive.Value(False)
+
+            with ui.div(class_="card bslib-card", style="margin-top:1rem;"):
+                ui.div(
+                    ui.tags.i(class_="bi bi-sliders me-2", style="color:#6b7280;"),
+                    "Sensor-Einstellungen",
+                    class_="card-header",
+                    style="font-weight:700;",
+                )
+                with ui.div(class_="card-body", style="padding:1rem;"):
+                    ui.tags.p(
+                        "Cooldown und Bewässerungsdauer gelten für alle Sensoren. "
+                        "Änderungen werden sofort wirksam und dauerhaft gespeichert.",
+                        class_="text-muted small",
+                        style="margin-bottom:1.25rem;",
+                    )
+                    with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap;"):
+                        with ui.div(style="flex:1; min-width:220px;"):
+                            ui.input_slider(
+                                "sensor_cooldown_min",
+                                label=ui.div(
+                                    ui.tags.b("Cooldown"),
+                                    ui.tags.span(
+                                        " – Wartezeit nach einem Sensor-Trigger",
+                                        class_="text-muted",
+                                        style="font-weight:normal; font-size:0.88rem;",
+                                    ),
+                                ),
+                                min=0, max=240, value=60, step=5,
+                                post=" min",
+                            )
+                        with ui.div(style="flex:1; min-width:220px;"):
+                            ui.input_slider(
+                                "sensor_duration_min",
+                                label=ui.div(
+                                    ui.tags.b("Bewässerungsdauer"),
+                                    ui.tags.span(
+                                        " – Standard-Laufzeit bei Auslösung",
+                                        class_="text-muted",
+                                        style="font-weight:normal; font-size:0.88rem;",
+                                    ),
+                                ),
+                                min=1, max=60, value=10, step=1,
+                                post=" min",
+                            )
+                    ui.input_action_button(
+                        "btn_sensor_settings_save",
+                        ui.div(
+                            ui.tags.i(class_="bi bi-floppy me-1"),
+                            "Einstellungen speichern",
+                        ),
+                        class_="btn btn-sm btn-primary",
+                        style="margin-top:1rem;",
+                    )
+
+            @reactive.effect
+            def _init_sensor_settings_sliders():
+                """Initialisiert Slider einmalig mit den Werten aus dem Backend.
+
+                Guard-Flag _sensor_settings_initialized verhindert Reset bei
+                jedem Poll-Tick – identisches Muster wie _settings_initialized
+                im Settings-Tab. Sobald der erste gueltige Config-Fetch vorliegt,
+                werden Slider einmalig gesetzt und der Flag auf True gesetzt.
+                """
+                if _sensor_settings_initialized.get():
+                    return
+                cfg = _sensor_config_data()
+                if not cfg:
+                    return
+                cooldown_min  = int(cfg.get("cooldown_s",         3600)) // 60
+                duration_min  = int(cfg.get("default_duration_s",  600)) // 60
+                # Clamp auf Slider-Grenzen (defensiv gegen out-of-range Werte in Config)
+                cooldown_min  = max(0,  min(240, cooldown_min))
+                duration_min  = max(1,  min(60,  duration_min))
+                ui.update_slider("sensor_cooldown_min",  value=cooldown_min)
+                ui.update_slider("sensor_duration_min",  value=duration_min)
+                _sensor_settings_initialized.set(True)
+
+            @reactive.effect
+            @reactive.event(input.btn_sensor_settings_save)
+            def _h_sensor_settings_save():
+                """Sendet Slider-Werte an PATCH /sensors/settings und loggt Ergebnis."""
+                try:
+                    cooldown_min  = int(input.sensor_cooldown_min())
+                    duration_min  = int(input.sensor_duration_min())
+                except Exception:
+                    ui.notification_show(
+                        "Fehler beim Lesen der Slider-Werte.", type="error", duration=4,
+                    )
+                    return
+
+                rv = _patch("/sensors/settings", json={
+                    "cooldown_s":         cooldown_min  * 60,
+                    "default_duration_s": duration_min  * 60,
+                })
+
+                if rv and rv.ok:
+                    ui.notification_show(
+                        f"Einstellungen gespeichert – "
+                        f"Cooldown: {cooldown_min} min, "
+                        f"Dauer: {duration_min} min.",
+                        type="message",
+                        duration=4,
+                    )
+                    _bump_sensor()
+                elif rv and rv.status_code == 400:
+                    detail = _json_or_none(rv) or {}
+                    ui.notification_show(
+                        detail.get("detail", "Wert überschreitet Hard-Limit."),
+                        type="error", duration=5,
+                    )
+                elif rv and rv.status_code == 422:
+                    detail = _json_or_none(rv) or {}
+                    ui.notification_show(
+                        detail.get("detail", "Ungültige Eingabe."),
+                        type="error", duration=5,
+                    )
+                else:
+                    ui.notification_show(
+                        "Speichern fehlgeschlagen.", type="error", duration=4,
+                    )
 
             # ----- Sim-Steuerung (nur im Sim-Modus sichtbar) ---------------------
             #
