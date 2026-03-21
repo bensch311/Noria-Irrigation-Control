@@ -34,6 +34,7 @@ from app_helpers import (
     _load_frontend_config,
     _read_max_valves_from_device_config,
     _read_sensors_enabled_from_device_config,
+    _read_sensor_ids_from_device_config,
     fmt_mmss,
     fmt_duration,
     fmt_weekdays,
@@ -72,6 +73,11 @@ ANZAHL_VENTILE = _read_max_valves_from_device_config(_cfg["anzahl_ventile_fallba
 # Aenderungen (Sensor hinzufuegen/entfernen) erfordern Neuinstallation + Neustart –
 # Hardware-Capabilities werden beim Deployment deklariert, nicht zur Laufzeit.
 SENSORS_ENABLED = _read_sensors_enabled_from_device_config()
+
+# Sortierte Liste der konfigurierten Sensor-IDs (z.B. [1, 2]).
+# Wird beim Start einmalig gelesen um statische Slider pro Sensor zu erzeugen.
+# Aenderungen erfordern Neustart – identisches Verhalten wie ANZAHL_VENTILE.
+SENSOR_IDS: list[int] = _read_sensor_ids_from_device_config() if SENSORS_ENABLED else []
 
 # WEEKDAY_CHOICES: importiert aus app_helpers (zusammen mit fmt_weekdays etc.)
 WEEKDAY_CHOICES = _WEEKDAY_CHOICES_IMPORT
@@ -331,11 +337,14 @@ ui.tags.head(
 
 # Initiale Defaults – werden nach dem ersten _settings_data()-Poll durch
 # die reaktiven Renderer überschrieben.
-ACCENT_COLOR_DEFAULT = "#b8902a"
-NAVBAR_TITLE_DEFAULT = "Noria - Irrigation Control"
+ACCENT_COLOR_DEFAULT       = "#b8902a"
+NAVBAR_TITLE_DEFAULT       = "Noria - Irrigation Control"
 # Hardcoded Prefix der immer in der Navbar und im Browser-Tab erscheint.
 # Der User konfiguriert nur den Teil dahinter (den "Suffix").
-NAVBAR_PREFIX = "Noria - "
+NAVBAR_PREFIX              = "Noria - "
+# Fallback-Wert für slider_max_minutes bevor User-Settings geladen sind.
+# Entspricht dem Code-Default aus config.py (60 Minuten).
+SLIDER_MAX_MINUTES_DEFAULT = 60
 
 # Initiales CSS mit Fallback-Farbe (sofort beim Laden aktiv)
 ui.tags.style(f":root {{ --accent: {ACCENT_COLOR_DEFAULT}; }}")
@@ -1260,25 +1269,11 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 drv         = cfg.get("sensor_driver", "sim")
                 mode        = cfg.get("configured_driver_mode", "sim")
                 interval_s  = int(cfg.get("polling_interval_s", 30))
-                cooldown_s  = int(cfg.get("cooldown_s", 600))
-                duration_s  = int(cfg.get("default_duration_s", 300))
                 gpio_valid  = bool(cfg.get("gpio_config_valid", True))
-                zones       = cfg.get("zones_configured", [])
-
-                # Dauer-Formatierung: Minuten wenn >= 60s, sonst Sekunden
-                def _fmt_dur(s: int) -> str:
-                    return f"{s // 60} min" if s >= 60 else f"{s} s"
 
                 config_bar = ui.div(
                     ui.tags.span(ui.tags.b("Treiber: "), drv,      class_="sensor-cfg-item"),
                     ui.tags.span(ui.tags.b("Polling: "), f"{interval_s} s", class_="sensor-cfg-item"),
-                    ui.tags.span(ui.tags.b("Cooldown: "), _fmt_dur(cooldown_s), class_="sensor-cfg-item"),
-                    ui.tags.span(ui.tags.b("Laufzeit: "), _fmt_dur(duration_s), class_="sensor-cfg-item"),
-                    ui.tags.span(
-                        ui.tags.b("Zonen: "),
-                        str(len(zones)) if zones else "–",
-                        class_="sensor-cfg-item",
-                    ),
                     class_="sensor-config-bar",
                 )
 
@@ -1327,11 +1322,11 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 cfg  = _sensor_config_data()
                 asgn = _sensor_assignments_data()
 
-                sensors        = cfg.get("sensors_configured", [])  if cfg  else []
-                readings       = d.get("readings", {})               if d    else {}
-                last_triggered = d.get("last_triggered", {})         if d    else {}
-                cooldown_s     = int(d.get("cooldown_s", 600))       if d    else 600
-                assignments    = asgn.get("assignments", {})         if asgn else {}
+                sensors         = cfg.get("sensors_configured", [])  if cfg  else []
+                readings        = d.get("readings", {})               if d    else {}
+                last_triggered  = d.get("last_triggered", {})         if d    else {}
+                sensor_settings = d.get("sensor_settings", {})        if d    else {}
+                assignments     = asgn.get("assignments", {})         if asgn else {}
 
                 if not sensors:
                     return ui.div(
@@ -1361,6 +1356,9 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     moisture = readings.get(s_key)
                     elapsed  = last_triggered.get(s_key)
                     zones    = assignments.get(s_key, [])
+                    # Per-Sensor-Cooldown aus den aktuellen Readings holen
+                    s_cfg      = sensor_settings.get(s_key, {})
+                    cooldown_s = int(s_cfg.get("cooldown_s", 3600))
 
                     if moisture is None:
                         dot_class, status_text, status_cls = (
@@ -1442,21 +1440,20 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
                 return ui.div(*cards, class_="sensor-grid")
 
-            # ----- Sensor-Einstellungen (Cooldown + Bewässerungsdauer) ----------
+            # ----- Sensor-Einstellungen (pro Sensor: Cooldown + Bewässerungsdauer) --
             #
-            # Dieselbe Statik-Pattern wie der Settings-Tab:
+            # STATIK-PATTERN – identisch zu Settings-Tab und Sim-Panel:
             #
-            #   1. STATISCHE ui.input_slider()-Deklarationen – nie in @render.ui.
-            #      Kein Poll-Reset möglich, Nutzereingaben bleiben erhalten.
+            #   1. Für jeden Sensor in SENSOR_IDS werden die Slider STATISCH beim
+            #      Start deklariert (id="sensor_<sid>_cooldown", "sensor_<sid>_dur").
+            #      Kein @render.ui → kein Poll-Reset, Nutzereingaben bleiben erhalten.
             #
-            #   2. _sensor_settings_initialized-Guard: @reactive.effect
-            #      aktualisiert Slider-Werte nur einmal beim ersten verfügbaren
-            #      API-Fetch – danach niemals erneut (analog _settings_initialized
-            #      im Settings-Tab). Reset nur explizit via Speichern.
+            #   2. Guard-Flag _sensor_settings_initialized: @reactive.effect setzt
+            #      alle Slider EINMAL beim ersten verfügbaren API-Fetch (analog zu
+            #      _settings_initialized im Settings-Tab).
             #
-            #   3. Speichern via PATCH /sensors/settings; reaktiviert den Guard
-            #      NICHT – Slider bleiben auf den gespeicherten Werten bis zum
-            #      nächsten manuellen Reset oder Neustart.
+            #   3. Speichern via PATCH /sensors/settings sendet alle Sensoren auf
+            #      einmal; reaktiviert den Guard NICHT.
 
             _sensor_settings_initialized: reactive.Value = reactive.Value(False)
 
@@ -1468,41 +1465,55 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     style="font-weight:700;",
                 )
                 with ui.div(class_="card-body", style="padding:1rem;"):
-                    ui.tags.p(
-                        "Cooldown und Bewässerungsdauer gelten für alle Sensoren. "
-                        "Änderungen werden sofort wirksam und dauerhaft gespeichert.",
-                        class_="text-muted small",
-                        style="margin-bottom:1.25rem;",
-                    )
-                    with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap;"):
-                        with ui.div(style="flex:1; min-width:220px;"):
-                            ui.input_slider(
-                                "sensor_cooldown_min",
-                                label=ui.div(
-                                    ui.tags.b("Cooldown"),
-                                    ui.tags.span(
-                                        " – Wartezeit nach einem Sensor-Trigger",
-                                        class_="text-muted",
-                                        style="font-weight:normal; font-size:0.88rem;",
-                                    ),
-                                ),
-                                min=0, max=240, value=60, step=5,
-                                post=" min",
+                    # Statische Slider für jeden Sensor – erzeugt zur Ladezeit
+                    for _sid in SENSOR_IDS:
+                        with ui.div(
+                            class_="card bslib-card mb-3",
+                            style="background:var(--bs-body-bg);",
+                        ):
+                            ui.div(
+                                ui.tags.i(class_="bi bi-moisture me-2",
+                                          style="color:#6b7280; font-size:0.9rem;"),
+                                f"Sensor {_sid}",
+                                class_="card-header",
+                                style="font-size:0.95rem; font-weight:600;",
                             )
-                        with ui.div(style="flex:1; min-width:220px;"):
-                            ui.input_slider(
-                                "sensor_duration_min",
-                                label=ui.div(
-                                    ui.tags.b("Bewässerungsdauer"),
-                                    ui.tags.span(
-                                        " – Standard-Laufzeit bei Auslösung",
-                                        class_="text-muted",
-                                        style="font-weight:normal; font-size:0.88rem;",
-                                    ),
-                                ),
-                                min=1, max=60, value=10, step=1,
-                                post=" min",
-                            )
+                            with ui.div(
+                                class_="card-body",
+                                style="padding:0.75rem 1rem; display:flex; gap:2rem; flex-wrap:wrap;",
+                            ):
+                                with ui.div(style="flex:1; min-width:200px;"):
+                                    ui.input_slider(
+                                        f"sensor_{_sid}_dur",
+                                        label=ui.div(
+                                            ui.tags.b("Bewässerungsdauer"),
+                                            ui.tags.span(
+                                                " – Laufzeit bei Auslösung",
+                                                class_="text-muted",
+                                                style="font-weight:normal; font-size:0.88rem;",
+                                            ),
+                                        ),
+                                        min=1, max=SLIDER_MAX_MINUTES_DEFAULT,
+                                        value=10, step=1,
+                                        post=" min",
+                                    )
+                                                                    
+                                with ui.div(style="flex:1; min-width:200px;"):
+                                    ui.input_slider(
+                                        f"sensor_{_sid}_cooldown",
+                                        label=ui.div(
+                                            ui.tags.b("Cooldown"),
+                                            ui.tags.span(
+                                                " – Wartezeit nach Auslösung",
+                                                class_="text-muted",
+                                                style="font-weight:normal; font-size:0.88rem;",
+                                            ),
+                                        ),
+                                        min=0, max=240, value=60, step=5,
+                                        post=" min",
+                                    )
+
+
                     ui.input_action_button(
                         "btn_sensor_settings_save",
                         ui.div(
@@ -1510,57 +1521,68 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                             "Einstellungen speichern",
                         ),
                         class_="btn btn-sm btn-primary",
-                        style="margin-top:1rem;",
+                        style="margin-top:0.5rem;",
                     )
 
             @reactive.effect
             def _init_sensor_settings_sliders():
-                """Initialisiert Slider einmalig mit den Werten aus dem Backend.
+                """Initialisiert alle Sensor-Slider einmalig mit Backend-Werten.
 
-                Guard-Flag _sensor_settings_initialized verhindert Reset bei
-                jedem Poll-Tick – identisches Muster wie _settings_initialized
-                im Settings-Tab. Sobald der erste gueltige Config-Fetch vorliegt,
-                werden Slider einmalig gesetzt und der Flag auf True gesetzt.
+                Liest sensor_settings aus /sensors/readings (wird dort pro Sensor
+                mitgeliefert). Guard-Flag verhindert Reset bei jedem Poll-Tick –
+                identisches Muster wie _settings_initialized im Settings-Tab.
+
+                slider_max_minutes kommt aus den User-Settings (gleiche Quelle
+                wie Ventil-/Queue-/Zeitplan-Slider) und wird aus _settings_data()
+                gelesen.
                 """
                 if _sensor_settings_initialized.get():
                     return
-                cfg = _sensor_config_data()
-                if not cfg:
+                d    = _sensor_readings_data()
+                s    = _settings_data()
+                if not d or not s:
                     return
-                cooldown_min  = int(cfg.get("cooldown_s",         3600)) // 60
-                duration_min  = int(cfg.get("default_duration_s",  600)) // 60
-                # Clamp auf Slider-Grenzen (defensiv gegen out-of-range Werte in Config)
-                cooldown_min  = max(0,  min(240, cooldown_min))
-                duration_min  = max(1,  min(60,  duration_min))
-                ui.update_slider("sensor_cooldown_min",  value=cooldown_min)
-                ui.update_slider("sensor_duration_min",  value=duration_min)
+                sensor_settings = d.get("sensor_settings", {})
+                slider_max      = int(s.get("slider_max_minutes", SLIDER_MAX_MINUTES_DEFAULT))
+                for sid in SENSOR_IDS:
+                    s_key       = str(sid)
+                    cfg         = sensor_settings.get(s_key, {})
+                    cooldown_min = max(0,  min(240,        int(cfg.get("cooldown_s", 3600)) // 60))
+                    duration_min = max(1,  min(slider_max, int(cfg.get("duration_s",  600)) // 60))
+                    ui.update_slider(f"sensor_{sid}_cooldown", value=cooldown_min)
+                    ui.update_slider(f"sensor_{sid}_dur",
+                                     value=duration_min, max=slider_max)
                 _sensor_settings_initialized.set(True)
 
             @reactive.effect
             @reactive.event(input.btn_sensor_settings_save)
             def _h_sensor_settings_save():
-                """Sendet Slider-Werte an PATCH /sensors/settings und loggt Ergebnis."""
+                """Sendet alle Sensor-Slider-Werte an PATCH /sensors/settings."""
+                payload: dict[str, dict] = {}
                 try:
-                    cooldown_min  = int(input.sensor_cooldown_min())
-                    duration_min  = int(input.sensor_duration_min())
+                    for sid in SENSOR_IDS:
+                        cooldown_min = int(getattr(input, f"sensor_{sid}_cooldown")())
+                        duration_min = int(getattr(input, f"sensor_{sid}_dur")())
+                        payload[str(sid)] = {
+                            "cooldown_s":  cooldown_min * 60,
+                            "duration_s":  duration_min * 60,
+                        }
                 except Exception:
                     ui.notification_show(
                         "Fehler beim Lesen der Slider-Werte.", type="error", duration=4,
                     )
                     return
 
-                rv = _patch("/sensors/settings", json={
-                    "cooldown_s":         cooldown_min  * 60,
-                    "default_duration_s": duration_min  * 60,
-                })
+                rv = _patch("/sensors/settings", json={"settings": payload})
 
                 if rv and rv.ok:
+                    parts = [
+                        f"Sensor {sid}: {v['cooldown_s']//60} min / {v['duration_s']//60} min"
+                        for sid, v in payload.items()
+                    ]
                     ui.notification_show(
-                        f"Einstellungen gespeichert – "
-                        f"Cooldown: {cooldown_min} min, "
-                        f"Dauer: {duration_min} min.",
-                        type="message",
-                        duration=4,
+                        "Gespeichert – " + " | ".join(parts),
+                        type="message", duration=4,
                     )
                     _bump_sensor()
                 elif rv and rv.status_code == 400:
@@ -2316,8 +2338,9 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
             @render.ui
             def _settings_sysinfo():
-                d  = _settings_data()
-                si = _sysinfo_data()
+                d   = _settings_data()
+                si  = _sysinfo_data()
+                cfg = _sensor_config_data() if SENSORS_ENABLED else None
 
                 backend_max  = d.get("max_valves",   "?") if d else "?"
                 valve_driver = d.get("valve_driver", "?") if d else "?"
@@ -2366,6 +2389,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ("Slow-Poll",            f"{POLL_SLOW_S} s"),
                     ("Backend-Fail-Schwelle", f"{BACKEND_FAIL_THRESHOLD} Fehlschlaege"),
                 ]
+
                 sys_rows = [
                     ("Uptime",       uptime_str),
                     ("RAM",          mem_str),
@@ -2393,6 +2417,23 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         )
                     )
 
+                # Sensor-Block: erst hier aufbauen, NACHDEM _section_header und
+                # _make_rows definiert sind. Python markiert beide als lokale
+                # Variablen sobald sie irgendwo im Funktionskörper definiert werden –
+                # jeder Aufruf vor der Definition würde UnboundLocalError auslösen.
+                sensor_section = []
+                if SENSORS_ENABLED and cfg:
+                    sensor_drv  = cfg.get("sensor_driver",   "sim")
+                    sensor_poll = int(cfg.get("polling_interval_s", 30))
+                    sensor_section = [
+                        _section_header("Sensoren"),
+                        *_make_rows([
+                            ("Sensor-Treiber", sensor_drv),
+                            ("Sensor-Polling", f"{sensor_poll} s"),
+                            ("Sensor-Anzahl",  str(len(SENSOR_IDS))),
+                        ]),
+                    ]
+
                 return ui.div(
                     ui.tags.img(
                         src="noria-logo-animated-light.svg",
@@ -2408,6 +2449,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         ui.tags.tbody(
                             _section_header("Konfiguration"),
                             *_make_rows(config_rows),
+                            *sensor_section,
                             _section_header("System"),
                             *_make_rows(sys_rows),
                         ),
@@ -2602,6 +2644,14 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             # Zeitplaene-Tab
             ui.update_slider("sch_dur", min=1, max=slider_max, value=dur)
             ui.update_radio_buttons("sch_unit", selected=unit)
+
+            # Sensoren-Tab: nur max= aktualisieren, value= beibehalten.
+            # Die gespeicherten per-Sensor-Dauern sind keine Defaults die bei
+            # jeder Settings-Änderung zurückgesetzt werden sollen – sie haben
+            # einen eigenen Speicher-Workflow (Sensor-Einstellungen speichern).
+            # Shiny clampt den aktuellen value= automatisch wenn er max= übersteigt.
+            for _sid in SENSOR_IDS:
+                ui.update_slider(f"sensor_{_sid}_dur", min=1, max=slider_max)
 
         # Helper: Color-Picker DOM-Wert via JS setzen
         def _apply_color_picker(color: str):

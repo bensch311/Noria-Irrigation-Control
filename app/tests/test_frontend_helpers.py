@@ -573,3 +573,71 @@ class TestReadSensorsEnabled:
             json.dumps(full_cfg), encoding="utf-8"
         )
         assert h._read_sensors_enabled_from_device_config() is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _read_sensor_ids_from_device_config
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReadSensorIds:
+    """_read_sensor_ids_from_device_config() → sortierte Liste von Sensor-IDs."""
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        """Fehlende device_config.json → leere Liste."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        assert h._read_sensor_ids_from_device_config() == []
+
+    def test_two_sensors_returns_sorted_ids(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"sensors": {"IRRIGATION_SENSOR_PINS": {"2": 15, "1": 14}}}),
+            encoding="utf-8",
+        )
+        result = h._read_sensor_ids_from_device_config()
+        assert result == [1, 2]
+
+    def test_single_sensor_returns_list_of_one(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"sensors": {"IRRIGATION_SENSOR_PINS": {"1": 14}}}),
+            encoding="utf-8",
+        )
+        assert h._read_sensor_ids_from_device_config() == [1]
+
+    def test_empty_pins_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"sensors": {"IRRIGATION_SENSOR_PINS": {}}}),
+            encoding="utf-8",
+        )
+        assert h._read_sensor_ids_from_device_config() == []
+
+    def test_missing_sensors_key_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"device": {"MAX_VALVES": 6}}),
+            encoding="utf-8",
+        )
+        assert h._read_sensor_ids_from_device_config() == []
+
+    def test_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            "{corrupt!!!", encoding="utf-8"
+        )
+        assert h._read_sensor_ids_from_device_config() == []
+
+    def test_result_is_sorted(self, tmp_path, monkeypatch):
+        """IDs werden sortiert zurückgegeben, egal wie sie in der Datei stehen."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"sensors": {"IRRIGATION_SENSOR_PINS": {"3": 16, "1": 14, "2": 15}}}),
+            encoding="utf-8",
+        )
+        assert h._read_sensor_ids_from_device_config() == [1, 2, 3]

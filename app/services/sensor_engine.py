@@ -63,9 +63,13 @@ def _process_sensor_cycle_locked(
     if state.sensor_last_triggered is None:
         state.sensor_last_triggered = {}
 
-    cooldown_s         = max(0, int(getattr(state, "sensor_cooldown_s", 600)))
-    default_duration_s = max(1, int(getattr(state, "sensor_default_duration_s", 300)))
-    assignments        = dict(state.sensor_zone_assignments or {})
+    # Globale Fallback-Werte (aus device_config.json, statisch pro Restart).
+    # Werden verwendet wenn kein per-Sensor-Setting in sensor_settings_by_id vorhanden.
+    global_cooldown_s         = max(0, int(getattr(state, "sensor_cooldown_s", 3600)))
+    global_default_duration_s = max(1, int(getattr(state, "sensor_default_duration_s", 600)))
+    sensor_settings_by_id     = dict(getattr(state, "sensor_settings_by_id", {}) or {})
+
+    assignments = dict(state.sensor_zone_assignments or {})
 
     new_readings: dict[int, bool] = {}
     items_to_queue: list[QueueItem] = []
@@ -81,6 +85,12 @@ def _process_sensor_cycle_locked(
     for reading in readings:
         sensor_id = reading.zone  # zone-Feld trägt die sensor_id
         new_readings[sensor_id] = reading.needs_irrigation
+
+        # Per-Sensor-Betriebsparameter: Fallback auf globale Defaults wenn
+        # kein Eintrag in sensor_settings_by_id vorhanden ist.
+        per_sensor_cfg  = sensor_settings_by_id.get(sensor_id, {})
+        cooldown_s      = max(0, int(per_sensor_cfg.get("cooldown_s",  global_cooldown_s)))
+        default_duration_s = max(1, int(per_sensor_cfg.get("duration_s", global_default_duration_s)))
 
         if not reading.needs_irrigation:
             continue

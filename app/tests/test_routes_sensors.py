@@ -28,7 +28,7 @@ class TestGetSensorReadings:
 
     def test_required_fields(self, client):
         data = client.get("/sensors/readings").json()
-        for f in ["sensor_driver","sensors_configured","readings","cooldown_s","last_triggered","polling_interval_s"]:
+        for f in ["sensor_driver","sensors_configured","readings","sensor_settings","last_triggered","polling_interval_s"]:
             assert f in data
 
     def test_sensors_configured_from_gpio_pins(self, client):
@@ -88,7 +88,7 @@ class TestGetSensorConfig:
     def test_required_fields(self, client):
         data = client.get("/sensors/config").json()
         for f in ["sensor_driver","configured_driver_mode","sensors_configured",
-                  "polling_interval_s","cooldown_s","default_duration_s",
+                  "polling_interval_s","sensor_settings",
                   "gpio_config_valid","invalid_pins","duplicate_pins"]:
             assert f in data
 
@@ -268,94 +268,137 @@ class TestPostSensorsSimSet:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PATCH /sensors/settings
+# PATCH /sensors/settings  (per-Sensor)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPatchSensorSettings:
-    """PATCH /sensors/settings – Cooldown und Standard-Bewässerungsdauer setzen."""
+    """PATCH /sensors/settings – pro Sensor Cooldown und Bewässerungsdauer."""
+
+    # Neues Request-Format: {"settings": {sensor_id: {cooldown_s, duration_s}}}
+    def _body(self, sid=1, cooldown_s=3600, duration_s=600):
+        return {"settings": {str(sid): {"cooldown_s": cooldown_s, "duration_s": duration_s}}}
 
     def test_returns_200(self, client):
-        with patch("services.persistence.save_sensor_settings_to_disk"):
-            resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 3600, "default_duration_s": 600})
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=self._body())
         assert resp.status_code == 200
 
     def test_requires_api_key(self, client):
         resp = client.patch("/sensors/settings",
-                            json={"cooldown_s": 3600, "default_duration_s": 600},
+                            json=self._body(),
                             headers={"X-API-Key": ""})
         assert resp.status_code == 401
 
-    def test_response_fields(self, client):
-        with patch("services.persistence.save_sensor_settings_to_disk"):
+    def test_response_ok_and_settings(self, client):
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
             resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 1800, "default_duration_s": 300})
+                                json=self._body(cooldown_s=1800, duration_s=300))
         data = resp.json()
         assert data["ok"] is True
-        assert data["cooldown_s"]         == 1800
-        assert data["default_duration_s"] == 300
+        assert data["settings"]["1"]["cooldown_s"] == 1800
+        assert data["settings"]["1"]["duration_s"] == 300
 
     def test_updates_state(self, client):
-        with patch("services.persistence.save_sensor_settings_to_disk"):
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
             client.patch("/sensors/settings",
-                         json={"cooldown_s": 7200, "default_duration_s": 120})
+                         json=self._body(sid=2, cooldown_s=7200, duration_s=120))
         with state_lock:
-            assert state.sensor_cooldown_s         == 7200
-            assert state.sensor_default_duration_s == 120
+            cfg = (state.sensor_settings_by_id or {}).get(2, {})
+        assert cfg.get("cooldown_s") == 7200
+        assert cfg.get("duration_s") == 120
+
+    def test_multiple_sensors(self, client):
+        body = {
+            "settings": {
+                "1": {"cooldown_s": 3600, "duration_s": 600},
+                "2": {"cooldown_s": 7200, "duration_s": 300},
+            }
+        }
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=body)
+        assert resp.status_code == 200
+        with state_lock:
+            s = state.sensor_settings_by_id or {}
+        assert s[1]["cooldown_s"] == 3600
+        assert s[2]["duration_s"] == 300
 
     def test_zero_cooldown_accepted(self, client):
         """Cooldown = 0 bedeutet: kein Cooldown. Muss akzeptiert werden."""
-        with patch("services.persistence.save_sensor_settings_to_disk"):
-            resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 0, "default_duration_s": 60})
-        assert resp.status_code == 200
-        assert resp.json()["cooldown_s"] == 0
-
-    def test_max_cooldown_accepted(self, client):
-        """Maximaler Cooldown 86400 s (24 h) muss akzeptiert werden."""
-        with patch("services.persistence.save_sensor_settings_to_disk"):
-            resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 86400, "default_duration_s": 60})
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=self._body(cooldown_s=0))
         assert resp.status_code == 200
 
-    def test_cooldown_exceeds_max_returns_422(self, client):
-        """Cooldown > 86400 s → 422 (Pydantic-Limit le=86400)."""
-        resp = client.patch("/sensors/settings",
-                            json={"cooldown_s": 86401, "default_duration_s": 60})
+    def test_max_cooldown_14400_accepted(self, client):
+        """Maximaler Cooldown 14400 s (4 Stunden) muss akzeptiert werden."""
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=self._body(cooldown_s=14400))
+        assert resp.status_code == 200
+
+    def test_cooldown_exceeds_14400_returns_422(self, client):
+        """Cooldown > 14400 s → 422 (Pydantic-Limit le=14400)."""
+        resp = client.patch("/sensors/settings", json=self._body(cooldown_s=14401))
         assert resp.status_code == 422
 
-    def test_duration_below_minimum_returns_422(self, client):
-        """default_duration_s < 60 → 422 (Pydantic-Limit ge=60)."""
-        resp = client.patch("/sensors/settings",
-                            json={"cooldown_s": 3600, "default_duration_s": 59})
+    def test_duration_below_60_returns_422(self, client):
+        """duration_s < 60 → 422 (Pydantic-Limit ge=60)."""
+        resp = client.patch("/sensors/settings", json=self._body(duration_s=59))
         assert resp.status_code == 422
 
     def test_duration_exceeds_hard_max_returns_400(self, client):
-        """default_duration_s > hard_max_runtime_s → 400 (dynamische Prüfung im Handler)."""
+        """duration_s > hard_max_runtime_s → 400 (dynamische Prüfung im Handler)."""
         with state_lock:
-            state.hard_max_runtime_s = 600   # 10 Minuten Hard-Limit
-        with patch("services.persistence.save_sensor_settings_to_disk"):
-            resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 0, "default_duration_s": 601})
+            state.hard_max_runtime_s = 600
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=self._body(duration_s=601))
         assert resp.status_code == 400
 
     def test_duration_equal_to_hard_max_accepted(self, client):
-        """default_duration_s == hard_max_runtime_s → 200 (Grenzwert exakt erlaubt)."""
+        """duration_s == hard_max_runtime_s → 200 (Grenzwert exakt erlaubt)."""
         with state_lock:
             state.hard_max_runtime_s = 3600
-        with patch("services.persistence.save_sensor_settings_to_disk"):
-            resp = client.patch("/sensors/settings",
-                                json={"cooldown_s": 0, "default_duration_s": 3600})
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json=self._body(duration_s=3600))
         assert resp.status_code == 200
 
-    def test_missing_field_returns_422(self, client):
-        """Fehlende Pflichtfelder → 422."""
-        resp = client.patch("/sensors/settings", json={"cooldown_s": 60})
+    def test_invalid_sensor_id_string_returns_422(self, client):
+        """Sensor-ID kein Integer → 422."""
+        body = {"settings": {"abc": {"cooldown_s": 60, "duration_s": 60}}}
+        resp = client.patch("/sensors/settings", json=body)
         assert resp.status_code == 422
 
-    def test_persistence_called(self, client):
-        """save_sensor_settings_to_disk() muss genau einmal aufgerufen werden."""
-        with patch("services.persistence.save_sensor_settings_to_disk") as mock_save:
-            client.patch("/sensors/settings",
-                         json={"cooldown_s": 3600, "default_duration_s": 600})
+    def test_zero_sensor_id_returns_422(self, client):
+        """Sensor-ID = 0 → 422 (muss >= 1 sein)."""
+        body = {"settings": {"0": {"cooldown_s": 60, "duration_s": 60}}}
+        resp = client.patch("/sensors/settings", json=body)
+        assert resp.status_code == 422
+
+    def test_empty_settings_accepted(self, client):
+        """Leere settings-Map ist gültig."""
+        with patch("services.persistence.save_sensor_assignments_to_disk"):
+            resp = client.patch("/sensors/settings", json={"settings": {}})
+        assert resp.status_code == 200
+
+    def test_persistence_called_once(self, client):
+        """save_sensor_assignments_to_disk() muss genau einmal aufgerufen werden."""
+        with patch("services.persistence.save_sensor_assignments_to_disk") as mock_save:
+            client.patch("/sensors/settings", json=self._body())
         mock_save.assert_called_once()
+
+    def test_readings_endpoint_returns_sensor_settings(self, client):
+        """GET /sensors/readings liefert sensor_settings pro Sensor."""
+        with state_lock:
+            state.sensor_gpio_pins      = {1: 24}
+            state.sensor_settings_by_id = {1: {"cooldown_s": 1800, "duration_s": 300}}
+        data = client.get("/sensors/readings").json()
+        assert "sensor_settings" in data
+        assert data["sensor_settings"]["1"]["cooldown_s"] == 1800
+        assert data["sensor_settings"]["1"]["duration_s"] == 300
+
+    def test_config_endpoint_returns_sensor_settings(self, client):
+        """GET /sensors/config liefert sensor_settings pro Sensor."""
+        with state_lock:
+            state.sensor_gpio_pins      = {1: 24}
+            state.sensor_settings_by_id = {1: {"cooldown_s": 900, "duration_s": 120}}
+        data = client.get("/sensors/config").json()
+        assert "sensor_settings" in data
+        assert data["sensor_settings"]["1"]["cooldown_s"] == 900

@@ -98,6 +98,26 @@ def _read_sensors_enabled_from_device_config() -> bool:
         return False
 
 
+def _read_sensor_ids_from_device_config() -> list[int]:
+    """Liest die sortierten Sensor-IDs aus data/device_config.json.
+
+    Gibt eine sortierte Liste der konfigurierten Sensor-IDs zurueck
+    (entspricht den Schluessel-Integern aus IRRIGATION_SENSOR_PINS).
+
+    Gibt [] zurueck bei fehlender Datei, fehlenden Schluessel oder korruptem JSON.
+    Wird von app.py beim Start genutzt um Slider statisch zu generieren.
+    """
+    try:
+        raw = (Path(__file__).parent / "data" / "device_config.json").read_text(encoding="utf-8")
+        cfg = _json.loads(raw)
+        pins = cfg.get("sensors", {}).get("IRRIGATION_SENSOR_PINS", {})
+        if not isinstance(pins, dict):
+            return []
+        return sorted(int(k) for k in pins.keys())
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Formatierungsfunktionen – Zeit und Dauer
 # ---------------------------------------------------------------------------

@@ -438,18 +438,49 @@ def _default_sensor_assignments_payload() -> dict:
         "version": 1,
         "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "assignments": {},  # {"1": [1, 2, 3], ...} sensor_id: [zone, ...]
+        "settings":    {},  # {"1": {"cooldown_s": 3600, "duration_s": 600}, ...}
+    }
+
+
+def _init_sensor_settings_defaults() -> dict[int, dict]:
+    """Gibt Default-Betriebsparameter für alle konfigurierten Sensoren zurück.
+
+    Liest sensor_gpio_pins aus state (muss unter state_lock sein ODER vor dem Lock
+    mit gelesenen Werten aufgerufen werden). Nutzt globale Defaults aus state.
+
+    WICHTIG: Muss OHNE state_lock aufgerufen werden wenn danach der Lock geholt wird,
+    oder MIT state_lock wenn der Lock bereits gehalten wird. Die Funktion holt den Lock
+    selbst NICHT – sie liest state-Werte direkt.
+
+    Aufgerufen aus load_sensor_assignments_from_disk() direkt vor dem state_lock-Block
+    oder als Hilfsfunktion innerhalb eines Lock-Blocks.
+    """
+    # Ohne Lock lesen – race-condition ist hier tolerierbar, da nur Defaults gesetzt werden.
+    # Worst case: ein leicht abweichender Default, der beim nächsten Speichern überschrieben wird.
+    pins        = dict(getattr(state, "sensor_gpio_pins", {}) or {})
+    cooldown_s  = max(0, int(getattr(state, "sensor_cooldown_s", 3600)))
+    duration_s  = max(1, int(getattr(state, "sensor_default_duration_s", 600)))
+    return {
+        sid: {"cooldown_s": cooldown_s, "duration_s": duration_s}
+        for sid in pins.keys()
     }
 
 
 def load_sensor_assignments_from_disk():
-    """Lädt Sensor-Zonen-Zuordnung aus sensor_assignments.json.
+    """Lädt Sensor-Zonen-Zuordnung UND Sensor-Betriebsparameter aus sensor_assignments.json.
 
-    Fehlt die Datei (Erstinstallation) → leere Zuordnung, kein Fehler.
-    Korrupte Datei → Backup + leere Zuordnung.
+    Fehlt die Datei (Erstinstallation) → leere Zuordnung, Defaults für Betriebsparameter.
+    Korrupte Datei → Backup + leere Zuordnung, Defaults.
+
+    Sensor-Betriebsparameter (cooldown_s, duration_s) werden pro Sensor geladen.
+    Für jeden Sensor der in state.sensor_gpio_pins konfiguriert ist, aber kein
+    gespeichertes Setting hat, werden globale Defaults verwendet (aus device_config.json,
+    bereits in state.sensor_cooldown_s / state.sensor_default_duration_s geladen).
     """
     if not os.path.exists(SENSOR_ASSIGNMENTS_FILE):
         with state_lock:
-            state.sensor_zone_assignments = {}
+            state.sensor_zone_assignments  = {}
+            state.sensor_settings_by_id    = _init_sensor_settings_defaults()
             state.sensor_assignments_dirty = False
         return
 
@@ -461,10 +492,12 @@ def load_sensor_assignments_from_disk():
         log_event("sensor_assignments_corrupt", level="error", source="system")
         _backup_corrupt_file(SENSOR_ASSIGNMENTS_FILE)
         with state_lock:
-            state.sensor_zone_assignments = {}
+            state.sensor_zone_assignments  = {}
+            state.sensor_settings_by_id    = _init_sensor_settings_defaults()
             state.sensor_assignments_dirty = False
         return
 
+    # Zuordnungen laden
     raw = payload.get("assignments", {})
     assignments: dict[int, list[int]] = {}
     if isinstance(raw, dict):
@@ -476,77 +509,57 @@ def load_sensor_assignments_from_disk():
             except Exception:
                 continue
 
+    # Betriebsparameter laden
+    raw_settings = payload.get("settings", {})
+    settings_by_id: dict[int, dict] = {}
+    if isinstance(raw_settings, dict):
+        for sid_str, cfg in raw_settings.items():
+            try:
+                sid = int(sid_str)
+                if sid >= 1 and isinstance(cfg, dict):
+                    settings_by_id[sid] = {
+                        "cooldown_s": max(0, int(cfg.get("cooldown_s", 3600))),
+                        "duration_s": max(1, int(cfg.get("duration_s", 600))),
+                    }
+            except Exception:
+                continue
+
+    # Sensoren ohne gespeichertes Setting mit globalen Defaults auffüllen
     with state_lock:
-        state.sensor_zone_assignments = assignments
+        defaults = _init_sensor_settings_defaults()
+        for sid, default_cfg in defaults.items():
+            if sid not in settings_by_id:
+                settings_by_id[sid] = default_cfg
+
+        state.sensor_zone_assignments  = assignments
+        state.sensor_settings_by_id    = settings_by_id
         state.sensor_assignments_dirty = False
 
     log_event(
         "sensor_assignments_loaded",
         source="system",
         sensor_count=len(assignments),
+        settings_count=len(settings_by_id),
     )
 
 
 def save_sensor_assignments_to_disk():
-    """Schreibt Sensor-Zonen-Zuordnung atomar auf Disk."""
+    """Schreibt Sensor-Zonen-Zuordnung UND Sensor-Betriebsparameter atomar auf Disk."""
     with state_lock:
-        assignments = dict(state.sensor_zone_assignments or {})
+        assignments     = dict(state.sensor_zone_assignments or {})
+        settings_by_id  = dict(state.sensor_settings_by_id  or {})
         state.sensor_assignments_dirty = False
 
     # Schlüssel müssen Strings sein für JSON
     payload = _default_sensor_assignments_payload()
     payload["assignments"] = {str(sid): zones for sid, zones in assignments.items()}
+    payload["settings"]    = {
+        str(sid): {"cooldown_s": int(cfg.get("cooldown_s", 3600)),
+                   "duration_s": int(cfg.get("duration_s", 600))}
+        for sid, cfg in settings_by_id.items()
+    }
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(SENSOR_ASSIGNMENTS_FILE, payload)
-
-
-def save_sensor_settings_to_disk():
-    """Schreibt Sensor-Betriebsparameter (Cooldown, Standardlaufzeit) in device_config.json.
-
-    Bewusste Ausnahme vom Prinzip "device_config.json ist im Betrieb read-only":
-    Cooldown und Standard-Bewässerungsdauer sind operative Parameter, die der
-    Operator im UI anpassen soll – ohne Neuinstallation.
-
-    Klar abgegrenzt von den Hardware-Parametern (Pins, Treiber, Pull-Up, Polling),
-    die nur via install.sh gesetzt werden und nach Änderung einen Neustart erfordern.
-
-    Implementierung als Partial-Update: liest die aktuelle device_config.json,
-    ändert ausschliesslich IRRIGATION_SENSOR_COOLDOWN_S und
-    IRRIGATION_SENSOR_DEFAULT_DURATION_S, und schreibt atomar zurück.
-    Alle anderen Felder (Ventile, Hard-Limits, Hardware-Parameter) bleiben unberührt.
-    """
-    with state_lock:
-        cooldown_s         = int(getattr(state, "sensor_cooldown_s", 3600))
-        default_duration_s = int(getattr(state, "sensor_default_duration_s", 600))
-
-    # Aktuelle Config lesen (Fallback auf Defaults wenn nicht vorhanden oder korrupt)
-    try:
-        with open(DEVICE_CONFIG_FILE, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if not isinstance(payload, dict):
-            raise ValueError("Kein dict")
-    except Exception:
-        logger.exception("save_sensor_settings_to_disk: Lesen fehlgeschlagen, schreibe Default")
-        payload = _default_device_config_payload()
-
-    # sensors-Block sicherstellen (Defensiv gegen ältere device_config-Versionen
-    # ohne sensors-Schlüssel)
-    if not isinstance(payload.get("sensors"), dict):
-        payload["sensors"] = _default_device_config_payload()["sensors"]
-
-    # Ausschliesslich die zwei Betriebsparameter aktualisieren
-    payload["sensors"]["IRRIGATION_SENSOR_COOLDOWN_S"]         = cooldown_s
-    payload["sensors"]["IRRIGATION_SENSOR_DEFAULT_DURATION_S"] = default_duration_s
-    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
-
-    _atomic_write_json(DEVICE_CONFIG_FILE, payload)
-
-    log_event(
-        "sensor_settings_saved",
-        source="system",
-        cooldown_s=cooldown_s,
-        default_duration_s=default_duration_s,
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -118,6 +118,7 @@ class RunState:
       - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins,
                                 sensor_internal_pull_up, sensor_polling_interval_s,
                                 sensor_cooldown_s, sensor_default_duration_s
+      - Sensor-Betriebsparameter: sensor_settings_by_id (pro Sensor: cooldown_s, duration_s)
       - Sensor-Zuordnung:       sensor_zone_assignments (sensor_id → [zone, ...])
       - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered
       - User-Settings:          max_history_items, navbar_title, accent_color, …
@@ -200,6 +201,12 @@ class RunState:
     # Wird aus sensor_assignments.json geladen und via POST /sensors/assignments
     # gespeichert. None = noch nicht geladen.
     sensor_zone_assignments: Dict[int, list] | None = None
+
+    # Sensor-Betriebsparameter: Cooldown und Standard-Bewässerungsdauer pro Sensor.
+    # {sensor_id: {"cooldown_s": int, "duration_s": int}}
+    # Wird zusammen mit sensor_zone_assignments in sensor_assignments.json persistiert.
+    # Nicht vorhanden = noch nicht geladen; bei Erststart mit globalen Defaults befüllt.
+    sensor_settings_by_id: Dict[int, dict] | None = None
 
     # Dirty-Flag für persistence_loop
     sensor_assignments_dirty: bool = False

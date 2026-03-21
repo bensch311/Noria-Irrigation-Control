@@ -195,6 +195,51 @@ class SensorSettingsRequest(BaseModel):
     default_duration_s:  int = Field(..., ge=60, le=3600)
 
 
+class SensorSingleSettings(BaseModel):
+    """Betriebsparameter für einen einzelnen Sensor.
+
+    cooldown_s  : Sperrzeit nach einem Sensor-Trigger in Sekunden.
+                  0 = kein Cooldown. Maximum 14400 s (4 Stunden).
+    duration_s  : Bewässerungsdauer bei Sensor-Trigger in Sekunden.
+                  Minimum 60 s (1 Minute). Absolutes Pydantic-Cap 3600 s (1 Stunde);
+                  dynamische Prüfung gegen hard_max_runtime_s erfolgt im Route-Handler.
+    """
+    cooldown_s:  int = Field(..., ge=0, le=14400)
+    duration_s:  int = Field(..., ge=60, le=3600)
+
+
+class SensorSettingsRequest(BaseModel):
+    """Request-Modell für PATCH /sensors/settings.
+
+    Setzt Cooldown und Bewässerungsdauer für jeden Sensor individuell.
+    PUT-Semantik: die gesamte bisherige settings-Map wird ersetzt.
+
+    settings: Dict sensor_id (str) → SensorSingleSettings.
+              Leerer Dict = alle Einstellungen zurücksetzen (nicht empfohlen).
+              Sensor-IDs die nicht in IRRIGATION_SENSOR_PINS konfiguriert sind
+              werden akzeptiert und gespeichert – der Route-Handler warnt nicht
+              (analog zur assignments-Logik).
+
+    Beispiel: {"1": {"cooldown_s": 3600, "duration_s": 600},
+               "2": {"cooldown_s": 7200, "duration_s": 300}}
+    """
+    settings: dict[str, SensorSingleSettings] = Field(default_factory=dict)
+
+    @field_validator("settings")
+    @classmethod
+    def validate_sensor_ids(cls, v: dict) -> dict:
+        for sid_str in v:
+            try:
+                sid = int(sid_str)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Sensor-ID muss eine ganze Zahl sein, bekommen: {sid_str!r}"
+                )
+            if sid < 1:
+                raise ValueError(f"Sensor-ID muss >= 1 sein, bekommen: {sid}")
+        return v
+
+
 class SensorAssignmentRequest(BaseModel):
     """Request-Modell für POST /sensors/assignments.
 

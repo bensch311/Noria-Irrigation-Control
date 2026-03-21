@@ -351,3 +351,92 @@ class TestReadAllSensors:
 
     def test_empty_list_returns_empty(self, sim_sensor_driver):
         assert _read_all_sensors([]) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-Sensor-Betriebsparameter (sensor_settings_by_id)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPerSensorSettings:
+    """Cooldown und duration_s werden pro Sensor aus sensor_settings_by_id gelesen."""
+
+    def test_per_sensor_duration_used(self):
+        """Sensor 1 hat eigene duration_s → wird für QueueItem verwendet."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_settings_by_id = {1: {"cooldown_s": 0, "duration_s": 240}}
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert items[0].duration == 240
+
+    def test_per_sensor_cooldown_blocks(self):
+        """Sensor 1 hat eigenen cooldown_s=600 → blockiert wenn nicht abgelaufen."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_settings_by_id    = {1: {"cooldown_s": 600, "duration_s": 60}}
+            state.sensor_last_triggered    = {1: now_m - 60.0}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        assert items == []
+
+    def test_per_sensor_cooldown_allows_after_elapsed(self):
+        """Sensor 1 eigener cooldown_s=600, 700s vergangen → durchgelassen."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_settings_by_id    = {1: {"cooldown_s": 600, "duration_s": 60}}
+            state.sensor_last_triggered    = {1: now_m - 700.0}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        assert len(items) == 1
+
+    def test_different_settings_per_sensor(self):
+        """Sensor 1 und 2 haben unterschiedliche cooldown_s."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1], 2: [2]})
+        with state_lock:
+            state.sensor_settings_by_id = {
+                1: {"cooldown_s": 600, "duration_s": 60},   # Sensor 1: langer Cooldown
+                2: {"cooldown_s": 30,  "duration_s": 120},  # Sensor 2: kurzer Cooldown
+            }
+            state.sensor_last_triggered = {
+                1: now_m - 60.0,   # Sensor 1: im Cooldown
+                2: now_m - 40.0,   # Sensor 2: Cooldown abgelaufen
+            }
+        items, _ = _run_cycle(
+            [_make_reading(1, True), _make_reading(2, True)], now_m=now_m
+        )
+        zones = {i.zone for i in items}
+        assert 1 not in zones   # Sensor 1 blockiert
+        assert 2 in zones       # Sensor 2 durch
+
+    def test_different_duration_per_sensor(self):
+        """Zwei Sensoren haben unterschiedliche duration_s."""
+        _set_assignments({1: [1], 2: [2]})
+        with state_lock:
+            state.sensor_settings_by_id = {
+                1: {"cooldown_s": 0, "duration_s": 180},
+                2: {"cooldown_s": 0, "duration_s": 360},
+            }
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        dur_by_zone = {i.zone: i.duration for i in items}
+        assert dur_by_zone[1] == 180
+        assert dur_by_zone[2] == 360
+
+    def test_global_fallback_when_no_per_sensor_setting(self):
+        """Kein Eintrag in sensor_settings_by_id → globale Defaults werden verwendet."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_settings_by_id    = {}    # leer → Fallback
+            state.sensor_cooldown_s         = 0
+            state.sensor_default_duration_s = 99
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert items[0].duration == 99
+
+    def test_none_settings_dict_uses_global_fallback(self):
+        """sensor_settings_by_id ist None → globale Defaults."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_settings_by_id    = None
+            state.sensor_cooldown_s         = 0
+            state.sensor_default_duration_s = 77
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert items[0].duration == 77
