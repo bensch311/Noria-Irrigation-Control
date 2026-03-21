@@ -2483,6 +2483,49 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
         # Lösung: Save setzt Flag zurück → nächster Poll lädt Werte neu.
         # (Implementierung: _h_save_settings setzt _settings_initialized.set(False))
         # ----- Sensor-Zonen-Zuordnung ------------------------------------
+        #
+        # Korrekte Loesung fuer das Checkbox-Poll-Problem:
+        #
+        # _sensor_asgn_state speichert {sensors, assignments} als reactive.Value.
+        # @render.ui liest direkt aus _sensor_asgn_state und setzt selected=
+        # mit den echten Werten – kein ui.update_* noetig.
+        #
+        # _sensor_asgn_state aendert sich nur zweimal im Normalfall:
+        #   - Beim ersten Load (None → Daten): @render.ui rendert mit richtigen Werten.
+        #   - Nach jedem Save (Daten → None → Daten): bestaetigt gespeicherte Werte.
+        #
+        # Beim regulaeren 5s-Poll aendert sich _sensor_asgn_state NICHT →
+        # kein Re-Render, Nutzer-Checkboxen bleiben unveraendert.
+
+        # None = noch nicht geladen; {} = geladen (auch wenn leer)
+        _sensor_asgn_state: reactive.Value = reactive.Value(None)
+
+        @reactive.effect
+        def _load_asgn_state():
+            """Laedt Zuordnungs-Daten einmalig in _sensor_asgn_state.
+
+            Laeuft bei jedem Poll, tut aber nichts solange State gesetzt ist.
+            Reset auf None erfolgt nur nach erfolgreichem Save – dann laedt
+            dieser Effect beim naechsten Poll die bestaetigt gespeicherten Werte.
+            """
+            if _sensor_asgn_state.get() is not None:
+                return  # bereits geladen – Nutzereingaben nicht ueberschreiben
+
+            cfg  = _sensor_config_data()
+            asgn = _sensor_assignments_data()
+
+            # Warten bis beide API-Calls geantwortet haben
+            if not cfg or not asgn:
+                return
+
+            sensors     = cfg.get("sensors_configured", [])
+            assignments = asgn.get("assignments", {})
+
+            _sensor_asgn_state.set({
+                "sensors":     sensors,
+                "assignments": assignments,
+            })
+
         with ui.card(class_="mt-3"):
             ui.card_header("Sensor-Zonen-Zuordnung")
 
@@ -2495,15 +2538,31 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
 
             @render.ui
             def _sensor_assignment_rows():
-                cfg  = _sensor_config_data()
-                asgn = _sensor_assignments_data()
-                sensors     = cfg.get("sensors_configured", [])  if cfg  else []
-                assignments = asgn.get("assignments", {})         if asgn else {}
+                """Rendert Zeilen mit KORREKTEN selected-Werten.
+
+                Haengt ausschliesslich an _sensor_asgn_state – NICHT am
+                5s-Poll-Calc. Re-rendert nur wenn _sensor_asgn_state sich
+                aendert (Erstladen + nach Save). Kein Poll-Reset moeglich.
+
+                selected= wird hier direkt aus den gespeicherten Daten
+                gesetzt – kein ui.update_* noetig oder erlaubt.
+                """
+                state = _sensor_asgn_state.get()
+
+                if state is None:
+                    # Noch nicht geladen – neutrales Platzhalter-Element
+                    return ui.p("Lade...", class_="text-muted small")
+
+                sensors     = state.get("sensors", [])
+                assignments = state.get("assignments", {})
+
                 if not sensors:
                     return ui.p("Keine Sensoren konfiguriert.", class_="text-muted small")
+
                 zone_choices = {str(i): f"Zone {i}" for i in range(1, ANZAHL_VENTILE + 1)}
                 rows = []
                 for sid in sensors:
+                    selected = [str(z) for z in assignments.get(str(sid), [])]
                     rows.append(
                         ui.div(
                             ui.tags.b(f"Sensor {sid}",
@@ -2512,7 +2571,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                                 f"asgn_sensor_{sid}",
                                 label=None,
                                 choices=zone_choices,
-                                selected=[str(z) for z in assignments.get(str(sid), [])],
+                                selected=selected,  # echte Werte direkt hier
                                 inline=True,
                             ),
                             class_="settings-section",
@@ -2544,6 +2603,9 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     ui.notification_show(
                         "Sensor-Zuordnung gespeichert.", type="message", duration=3,
                     )
+                    # State auf None → _load_asgn_state laedt beim naechsten
+                    # Poll die gespeicherten Werte → @render.ui zeigt Bestaetigung.
+                    _sensor_asgn_state.set(None)
                     _bump_sensor()
                 else:
                     ui.notification_show(
