@@ -33,6 +33,7 @@ from app_helpers import (
     WEEKDAY_CHOICES as _WEEKDAY_CHOICES_IMPORT,
     _load_frontend_config,
     _read_max_valves_from_device_config,
+    _read_sensors_enabled_from_device_config,
     fmt_mmss,
     fmt_duration,
     fmt_weekdays,
@@ -64,6 +65,13 @@ NAVBAR_LOGO_PATH: str = (
 # Single Source of Truth: device_config.json → MAX_VALVES.
 # Aenderungen erfordern Neustart des Frontends (MAX_VALVES ist Hardware-Konfig).
 ANZAHL_VENTILE = _read_max_valves_from_device_config(_cfg["anzahl_ventile_fallback"])
+
+# Single Source of Truth: device_config.json → Sensoren aktiviert.
+# True wenn mindestens ein Sensor-Pin in IRRIGATION_SENSOR_PINS konfiguriert ist.
+# Steuert ob der Sensoren-Tab in der Navigation sichtbar ist.
+# Aenderungen (Sensor hinzufuegen/entfernen) erfordern Neuinstallation + Neustart –
+# Hardware-Capabilities werden beim Deployment deklariert, nicht zur Laufzeit.
+SENSORS_ENABLED = _read_sensors_enabled_from_device_config()
 
 # WEEKDAY_CHOICES: importiert aus app_helpers (zusammen mit fmt_weekdays etc.)
 WEEKDAY_CHOICES = _WEEKDAY_CHOICES_IMPORT
@@ -1227,376 +1235,377 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 )
             _bump_queue()
 
-    # =========================================================================
-    # TAB 4 - SENSOREN
-    # =========================================================================
-    with ui.nav_panel("Sensoren", value="sensoren"):
+    if SENSORS_ENABLED:
+        # =========================================================================
+        # TAB 4 - SENSOREN
+        # =========================================================================
+        with ui.nav_panel("Sensoren", value="sensoren"):
 
-        # ----- Konfigurations-Banner -----------------------------------------
-        # Zeigt Treiber, Intervall, Cooldown und eventuelle Warnungen.
-        # Render-Funktion statt statischem UI: damit Warnbanner (ungueltige Pins,
-        # Sim-Fallback) reaktiv auftauchen ohne Seiten-Reload.
-        @render.ui
-        def _sensor_config_banner():
-            cfg = _sensor_config_data()
-            if not cfg:
-                return ui.div()
+            # ----- Konfigurations-Banner -----------------------------------------
+            # Zeigt Treiber, Intervall, Cooldown und eventuelle Warnungen.
+            # Render-Funktion statt statischem UI: damit Warnbanner (ungueltige Pins,
+            # Sim-Fallback) reaktiv auftauchen ohne Seiten-Reload.
+            @render.ui
+            def _sensor_config_banner():
+                cfg = _sensor_config_data()
+                if not cfg:
+                    return ui.div()
 
-            drv         = cfg.get("sensor_driver", "sim")
-            mode        = cfg.get("configured_driver_mode", "sim")
-            interval_s  = int(cfg.get("polling_interval_s", 30))
-            cooldown_s  = int(cfg.get("cooldown_s", 600))
-            duration_s  = int(cfg.get("default_duration_s", 300))
-            gpio_valid  = bool(cfg.get("gpio_config_valid", True))
-            zones       = cfg.get("zones_configured", [])
+                drv         = cfg.get("sensor_driver", "sim")
+                mode        = cfg.get("configured_driver_mode", "sim")
+                interval_s  = int(cfg.get("polling_interval_s", 30))
+                cooldown_s  = int(cfg.get("cooldown_s", 600))
+                duration_s  = int(cfg.get("default_duration_s", 300))
+                gpio_valid  = bool(cfg.get("gpio_config_valid", True))
+                zones       = cfg.get("zones_configured", [])
 
-            # Dauer-Formatierung: Minuten wenn >= 60s, sonst Sekunden
-            def _fmt_dur(s: int) -> str:
-                return f"{s // 60} min" if s >= 60 else f"{s} s"
+                # Dauer-Formatierung: Minuten wenn >= 60s, sonst Sekunden
+                def _fmt_dur(s: int) -> str:
+                    return f"{s // 60} min" if s >= 60 else f"{s} s"
 
-            config_bar = ui.div(
-                ui.tags.span(ui.tags.b("Treiber: "), drv,      class_="sensor-cfg-item"),
-                ui.tags.span(ui.tags.b("Polling: "), f"{interval_s} s", class_="sensor-cfg-item"),
-                ui.tags.span(ui.tags.b("Cooldown: "), _fmt_dur(cooldown_s), class_="sensor-cfg-item"),
-                ui.tags.span(ui.tags.b("Laufzeit: "), _fmt_dur(duration_s), class_="sensor-cfg-item"),
-                ui.tags.span(
-                    ui.tags.b("Zonen: "),
-                    str(len(zones)) if zones else "–",
-                    class_="sensor-cfg-item",
-                ),
-                class_="sensor-config-bar",
-            )
-
-            # Warnbanner aufbauen (mehrere Warnungen moeglich)
-            warn_items = []
-
-            # rpi_switch konfiguriert, aber Treiber ist sim → Init-Fehler beim Start
-            if mode == "rpi_switch" and drv == "sim":
-                warn_items.append(
-                    ui.div(
-                        ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
-                                  style="color:#d97706;"),
-                        "Sensor-Treiber laeuft im Sim-Modus obwohl 'rpi_switch' "
-                        "konfiguriert ist – GPIO-Fehler beim Start. "
-                        "Verkabelung und lgpio-Installation pruefen.",
-                        class_="sensor-warn-bar",
-                    )
-                )
-
-            # Ungueltige oder doppelte GPIO-Pins
-            if not gpio_valid:
-                inv = cfg.get("invalid_pins", [])
-                dup = cfg.get("duplicate_pins", [])
-                details = []
-                if inv:
-                    details.append(f"ungueltige Pins: {[e['pin'] for e in inv]}")
-                if dup:
-                    details.append(f"Duplikate: {[e['pin'] for e in dup]}")
-                warn_items.append(
-                    ui.div(
-                        ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
-                                  style="color:#d97706;"),
-                        "Ungueltige Sensor-Pin-Konfiguration",
-                        (f" ({', '.join(details)})" if details else ""),
-                        ". Bitte device_config.json pruefen.",
-                        class_="sensor-warn-bar",
-                    )
-                )
-
-            return ui.div(config_bar, *warn_items)
-
-        # ----- Sensor-Karten (eine Card pro Sensor) -------------------------
-        @render.ui
-        def _sensor_zone_cards():
-            d    = _sensor_readings_data()
-            cfg  = _sensor_config_data()
-            asgn = _sensor_assignments_data()
-
-            sensors        = cfg.get("sensors_configured", [])  if cfg  else []
-            readings       = d.get("readings", {})               if d    else {}
-            last_triggered = d.get("last_triggered", {})         if d    else {}
-            cooldown_s     = int(d.get("cooldown_s", 600))       if d    else 600
-            assignments    = asgn.get("assignments", {})         if asgn else {}
-
-            if not sensors:
-                return ui.div(
-                    ui.tags.i(class_="bi bi-moisture me-2",
-                              style="font-size:1.6rem; color:rgba(15,23,42,0.22);"),
-                    ui.tags.p("Keine Sensoren konfiguriert.", class_="text-muted",
-                              style="margin-top:0.5rem;"),
-                    ui.tags.p(
-                        "In device_config.json unter 'sensors' → "
-                        "'IRRIGATION_SENSOR_PINS' eintragen "
-                        '(z.\u00a0B. {"1": 24, "2": 25}).',
-                        class_="text-muted small",
-                    ),
-                    style="text-align:center; padding:2rem 1rem;",
-                )
-
-            def _fmt_elapsed(elapsed):
-                if elapsed is None:   return "Noch kein Trigger"
-                if elapsed < 60:      return f"vor {int(elapsed)} Sek."
-                if elapsed < 3600:    return f"vor {int(elapsed / 60)} Min."
-                h = int(elapsed / 3600); m = int((elapsed % 3600) / 60)
-                return f"vor {h} Std. {m} Min."
-
-            cards = []
-            for sid in sensors:
-                s_key    = str(sid)
-                moisture = readings.get(s_key)
-                elapsed  = last_triggered.get(s_key)
-                zones    = assignments.get(s_key, [])
-
-                if moisture is None:
-                    dot_class, status_text, status_cls = (
-                        "sensor-dot unknown", "Unbekannt", "text-muted small"
-                    )
-                elif moisture:
-                    dot_class, status_text, status_cls = (
-                        "sensor-dot dry",
-                        "Trocken – Bewaesserung noetig",
-                        "sensor-status-dry small fw-bold",
-                    )
-                else:
-                    dot_class, status_text, status_cls = (
-                        "sensor-dot moist", "Feucht", "sensor-status-moist small"
-                    )
-
-                cooldown_row = ui.div()
-                if elapsed is not None and elapsed < cooldown_s:
-                    rem = int(cooldown_s - elapsed)
-                    rem_text = f"{rem // 60} min" if rem >= 60 else f"{rem} s"
-                    cooldown_row = ui.div(
-                        ui.tags.small(
-                            ui.tags.i(class_="bi bi-hourglass-split me-1",
-                                      style="color:#6b7280;"),
-                            f"Cooldown: noch {rem_text}",
-                            class_="text-muted",
-                        ),
-                        style="margin-top:0.3rem;",
-                    )
-
-                if zones:
-                    zones_text = ", ".join(f"Zone {z}" for z in sorted(zones))
-                    zones_row = ui.div(
-                        ui.tags.small(
-                            ui.tags.i(class_="bi bi-diagram-3 me-1",
-                                      style="color:#6b7280;"),
-                            zones_text, class_="text-muted",
-                        ),
-                        style="margin-top:0.3rem;",
-                    )
-                else:
-                    zones_row = ui.div(
-                        ui.tags.small(
-                            ui.tags.i(class_="bi bi-exclamation-circle me-1",
-                                      style="color:#d97706;"),
-                            "Keine Zonen zugeordnet", class_="text-muted",
-                        ),
-                        style="margin-top:0.3rem;",
-                    )
-
-                cards.append(
-                    ui.div(
-                        ui.div(
-                            ui.div(
-                                ui.tags.b(f"Sensor {sid}"),
-                                ui.span("", class_=dot_class, title=status_text,
-                                        style="margin-left:auto; display:block; flex-shrink:0;"),
-                                style="display:flex; align-items:center; width:100%;",
-                            ),
-                            class_="card-header",
-                        ),
-                        ui.div(
-                            ui.div(ui.span(status_text, class_=status_cls),
-                                   class_="sensor-status-area px-3 pt-2"),
-                            ui.div(
-                                ui.tags.small(
-                                    ui.tags.i(class_="bi bi-clock me-1",
-                                              style="color:#6b7280;"),
-                                    _fmt_elapsed(elapsed), class_="text-muted",
-                                ),
-                                zones_row,
-                                cooldown_row,
-                                class_="px-3 pb-3 pt-1",
-                            ),
-                        ),
-                        class_="card bslib-card",
-                    )
-                )
-
-            return ui.div(*cards, class_="sensor-grid")
-
-        # ----- Sim-Steuerung (nur im Sim-Modus sichtbar) ---------------------
-        #
-        # Exakt dasselbe Pattern wie _settings_initialized im Settings-Tab:
-        #
-        #   1. STATISCHER Wrapper-div mit id="sim_panel_wrap" – nie in @render.ui.
-        #      Die Checkbox-Inputs darin werden vom Poll NICHT neu initialisiert,
-        #      weil sie nicht Teil eines @render.ui-Outputs sind.
-        #
-        #   2. @render.ui _sensor_sim_visibility gibt ausschliesslich ein <style>-Tag
-        #      zurueck (display:block / display:none) – reine Render-Funktion,
-        #      kein Side-Effect, kein ui.update_*-Aufruf.
-        #
-        #   3. @reactive.effect _sync_sim_zones: einziger Ort der ui.update_*-Aufrufe.
-        #      Guard-Flag _sim_zones_initialized verhindert Reset bei jedem Poll,
-        #      analog zu _last_applied_dur_unit im Settings-Tab.
-
-        _sim_zones_initialized: reactive.Value = reactive.Value([])
-
-        # Statischer Wrapper: immer im DOM, Sichtbarkeit via CSS gesteuert.
-        # Inputs hier sind nie Teil eines @render.ui – kein Poll-Reset moeglich.
-        with ui.div(id="sim_panel_wrap", style="margin-top:1rem;"):
-            with ui.div(class_="card bslib-card"):
-                ui.div(
-                    ui.tags.i(class_="bi bi-bug me-2", style="color:#6b7280;"),
-                    "Sim-Steuerung",
+                config_bar = ui.div(
+                    ui.tags.span(ui.tags.b("Treiber: "), drv,      class_="sensor-cfg-item"),
+                    ui.tags.span(ui.tags.b("Polling: "), f"{interval_s} s", class_="sensor-cfg-item"),
+                    ui.tags.span(ui.tags.b("Cooldown: "), _fmt_dur(cooldown_s), class_="sensor-cfg-item"),
+                    ui.tags.span(ui.tags.b("Laufzeit: "), _fmt_dur(duration_s), class_="sensor-cfg-item"),
                     ui.tags.span(
-                        "nur im Sim-Modus",
-                        class_="badge text-bg-secondary app-badge ms-2",
-                        style="font-size:0.72rem; vertical-align:middle;",
+                        ui.tags.b("Zonen: "),
+                        str(len(zones)) if zones else "–",
+                        class_="sensor-cfg-item",
                     ),
-                    class_="card-header",
-                    style="font-weight:700;",
+                    class_="sensor-config-bar",
                 )
-                with ui.div(class_="card-body", style="padding:1rem;"):
-                    ui.tags.p(
-                        "Zonen manuell auf trocken oder feucht setzen. "
-                        "Der naechste Polling-Zyklus wertet den gesetzten "
-                        "Zustand aus und loest ggf. einen Bewaesserungslauf aus.",
-                        class_="text-muted small",
-                        style="margin-bottom:1rem;",
-                    )
-                    with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap; margin-bottom:1rem;"):
-                        with ui.div(style="flex:1; min-width:160px;"):
-                            ui.tags.p("Sensor trocken setzen", class_="form-section-title")
-                            # Leere choices – _sync_sim_zones fuellt sie beim ersten Poll
-                            ui.input_checkbox_group(
-                                "sim_dry_zones", label=None, choices={}, inline=True,
-                            )
-                        with ui.div(style="flex:1; min-width:160px;"):
-                            ui.tags.p("Sensor feucht setzen", class_="form-section-title")
-                            ui.input_checkbox_group(
-                                "sim_moist_zones", label=None, choices={}, inline=True,
-                            )
-                    ui.input_action_button(
-                        "btn_sim_set",
-                        ui.div(ui.tags.i(class_="bi bi-send me-1"), "Zustand setzen"),
-                        class_="btn btn-sm btn-outline-secondary",
+
+                # Warnbanner aufbauen (mehrere Warnungen moeglich)
+                warn_items = []
+
+                # rpi_switch konfiguriert, aber Treiber ist sim → Init-Fehler beim Start
+                if mode == "rpi_switch" and drv == "sim":
+                    warn_items.append(
+                        ui.div(
+                            ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
+                                      style="color:#d97706;"),
+                            "Sensor-Treiber laeuft im Sim-Modus obwohl 'rpi_switch' "
+                            "konfiguriert ist – GPIO-Fehler beim Start. "
+                            "Verkabelung und lgpio-Installation pruefen.",
+                            class_="sensor-warn-bar",
+                        )
                     )
 
-        @render.ui
-        def _sensor_sim_visibility():
-            """Steuert Sichtbarkeit von #sim_panel_wrap via injiziertem <style>-Tag.
+                # Ungueltige oder doppelte GPIO-Pins
+                if not gpio_valid:
+                    inv = cfg.get("invalid_pins", [])
+                    dup = cfg.get("duplicate_pins", [])
+                    details = []
+                    if inv:
+                        details.append(f"ungueltige Pins: {[e['pin'] for e in inv]}")
+                    if dup:
+                        details.append(f"Duplikate: {[e['pin'] for e in dup]}")
+                    warn_items.append(
+                        ui.div(
+                            ui.tags.i(class_="bi bi-exclamation-triangle-fill me-2",
+                                      style="color:#d97706;"),
+                            "Ungueltige Sensor-Pin-Konfiguration",
+                            (f" ({', '.join(details)})" if details else ""),
+                            ". Bitte device_config.json pruefen.",
+                            class_="sensor-warn-bar",
+                        )
+                    )
 
-            Pure Render-Funktion: gibt ausschliesslich ein <style>-Tag zurueck,
-            kein ui.update_*-Aufruf (Shiny-Regel: Side-Effects nur in @reactive.effect).
-            Analog zu _dynamic_accent_style im Navbar-Bereich.
-            """
-            cfg = _sensor_config_data()
-            is_sim = (
-                bool(cfg)
-                and cfg.get("sensor_driver", "") == "sim"
-                and bool(cfg.get("sensors_configured", []))
-            )
-            display = "block" if is_sim else "none"
-            return ui.tags.style(f"#sim_panel_wrap {{ display: {display} !important; }}")
+                return ui.div(config_bar, *warn_items)
 
-        @reactive.effect
-        def _sync_sim_zones():
-            """Aktualisiert Checkbox-Choices wenn sich die Zone-Liste aendert.
+            # ----- Sensor-Karten (eine Card pro Sensor) -------------------------
+            @render.ui
+            def _sensor_zone_cards():
+                d    = _sensor_readings_data()
+                cfg  = _sensor_config_data()
+                asgn = _sensor_assignments_data()
 
-            Einziger Ort fuer ui.update_checkbox_group()-Aufrufe (Side-Effect).
-            Guard-Flag _sim_zones_initialized verhindert Reset bei unveraenderter
-            Zone-Liste – identisches Muster wie _last_applied_dur_unit im Settings-Tab.
-            """
-            cfg = _sensor_config_data()
-            sensors = cfg.get("sensors_configured", []) if cfg else []
+                sensors        = cfg.get("sensors_configured", [])  if cfg  else []
+                readings       = d.get("readings", {})               if d    else {}
+                last_triggered = d.get("last_triggered", {})         if d    else {}
+                cooldown_s     = int(d.get("cooldown_s", 600))       if d    else 600
+                assignments    = asgn.get("assignments", {})         if asgn else {}
 
-            # Keine Aenderung → nichts tun, Auswahl des Nutzers bleibt erhalten
-            if _sim_zones_initialized.get() == sensors:
-                return
+                if not sensors:
+                    return ui.div(
+                        ui.tags.i(class_="bi bi-moisture me-2",
+                                  style="font-size:1.6rem; color:rgba(15,23,42,0.22);"),
+                        ui.tags.p("Keine Sensoren konfiguriert.", class_="text-muted",
+                                  style="margin-top:0.5rem;"),
+                        ui.tags.p(
+                            "In device_config.json unter 'sensors' → "
+                            "'IRRIGATION_SENSOR_PINS' eintragen "
+                            '(z.\u00a0B. {"1": 24, "2": 25}).',
+                            class_="text-muted small",
+                        ),
+                        style="text-align:center; padding:2rem 1rem;",
+                    )
 
-            _sim_zones_initialized.set(sensors)
-            sensor_choices = {str(s): f"Sensor {s}" for s in sensors}
-            ui.update_checkbox_group("sim_dry_zones",   choices=sensor_choices, selected=[])
-            ui.update_checkbox_group("sim_moist_zones", choices=sensor_choices, selected=[])
+                def _fmt_elapsed(elapsed):
+                    if elapsed is None:   return "Noch kein Trigger"
+                    if elapsed < 60:      return f"vor {int(elapsed)} Sek."
+                    if elapsed < 3600:    return f"vor {int(elapsed / 60)} Min."
+                    h = int(elapsed / 3600); m = int((elapsed % 3600) / 60)
+                    return f"vor {h} Std. {m} Min."
 
-        @reactive.effect
-        @reactive.event(input.btn_sim_set)
-        def _h_sim_set():
-            """Sendet ausgewaehlte Zonen-Zustaende an POST /sensors/sim/set."""
-            try:
-                dry_raw   = input.sim_dry_zones()   or []
-                moist_raw = input.sim_moist_zones() or []
-            except Exception:
-                ui.notification_show(
-                    "Fehler beim Lesen der Auswahl.", type="error", duration=4,
+                cards = []
+                for sid in sensors:
+                    s_key    = str(sid)
+                    moisture = readings.get(s_key)
+                    elapsed  = last_triggered.get(s_key)
+                    zones    = assignments.get(s_key, [])
+
+                    if moisture is None:
+                        dot_class, status_text, status_cls = (
+                            "sensor-dot unknown", "Unbekannt", "text-muted small"
+                        )
+                    elif moisture:
+                        dot_class, status_text, status_cls = (
+                            "sensor-dot dry",
+                            "Trocken – Bewaesserung noetig",
+                            "sensor-status-dry small fw-bold",
+                        )
+                    else:
+                        dot_class, status_text, status_cls = (
+                            "sensor-dot moist", "Feucht", "sensor-status-moist small"
+                        )
+
+                    cooldown_row = ui.div()
+                    if elapsed is not None and elapsed < cooldown_s:
+                        rem = int(cooldown_s - elapsed)
+                        rem_text = f"{rem // 60} min" if rem >= 60 else f"{rem} s"
+                        cooldown_row = ui.div(
+                            ui.tags.small(
+                                ui.tags.i(class_="bi bi-hourglass-split me-1",
+                                          style="color:#6b7280;"),
+                                f"Cooldown: noch {rem_text}",
+                                class_="text-muted",
+                            ),
+                            style="margin-top:0.3rem;",
+                        )
+
+                    if zones:
+                        zones_text = ", ".join(f"Zone {z}" for z in sorted(zones))
+                        zones_row = ui.div(
+                            ui.tags.small(
+                                ui.tags.i(class_="bi bi-diagram-3 me-1",
+                                          style="color:#6b7280;"),
+                                zones_text, class_="text-muted",
+                            ),
+                            style="margin-top:0.3rem;",
+                        )
+                    else:
+                        zones_row = ui.div(
+                            ui.tags.small(
+                                ui.tags.i(class_="bi bi-exclamation-circle me-1",
+                                          style="color:#d97706;"),
+                                "Keine Zonen zugeordnet", class_="text-muted",
+                            ),
+                            style="margin-top:0.3rem;",
+                        )
+
+                    cards.append(
+                        ui.div(
+                            ui.div(
+                                ui.div(
+                                    ui.tags.b(f"Sensor {sid}"),
+                                    ui.span("", class_=dot_class, title=status_text,
+                                            style="margin-left:auto; display:block; flex-shrink:0;"),
+                                    style="display:flex; align-items:center; width:100%;",
+                                ),
+                                class_="card-header",
+                            ),
+                            ui.div(
+                                ui.div(ui.span(status_text, class_=status_cls),
+                                       class_="sensor-status-area px-3 pt-2"),
+                                ui.div(
+                                    ui.tags.small(
+                                        ui.tags.i(class_="bi bi-clock me-1",
+                                                  style="color:#6b7280;"),
+                                        _fmt_elapsed(elapsed), class_="text-muted",
+                                    ),
+                                    zones_row,
+                                    cooldown_row,
+                                    class_="px-3 pb-3 pt-1",
+                                ),
+                            ),
+                            class_="card bslib-card",
+                        )
+                    )
+
+                return ui.div(*cards, class_="sensor-grid")
+
+            # ----- Sim-Steuerung (nur im Sim-Modus sichtbar) ---------------------
+            #
+            # Exakt dasselbe Pattern wie _settings_initialized im Settings-Tab:
+            #
+            #   1. STATISCHER Wrapper-div mit id="sim_panel_wrap" – nie in @render.ui.
+            #      Die Checkbox-Inputs darin werden vom Poll NICHT neu initialisiert,
+            #      weil sie nicht Teil eines @render.ui-Outputs sind.
+            #
+            #   2. @render.ui _sensor_sim_visibility gibt ausschliesslich ein <style>-Tag
+            #      zurueck (display:block / display:none) – reine Render-Funktion,
+            #      kein Side-Effect, kein ui.update_*-Aufruf.
+            #
+            #   3. @reactive.effect _sync_sim_zones: einziger Ort der ui.update_*-Aufrufe.
+            #      Guard-Flag _sim_zones_initialized verhindert Reset bei jedem Poll,
+            #      analog zu _last_applied_dur_unit im Settings-Tab.
+
+            _sim_zones_initialized: reactive.Value = reactive.Value([])
+
+            # Statischer Wrapper: immer im DOM, Sichtbarkeit via CSS gesteuert.
+            # Inputs hier sind nie Teil eines @render.ui – kein Poll-Reset moeglich.
+            with ui.div(id="sim_panel_wrap", style="margin-top:1rem;"):
+                with ui.div(class_="card bslib-card"):
+                    ui.div(
+                        ui.tags.i(class_="bi bi-bug me-2", style="color:#6b7280;"),
+                        "Sim-Steuerung",
+                        ui.tags.span(
+                            "nur im Sim-Modus",
+                            class_="badge text-bg-secondary app-badge ms-2",
+                            style="font-size:0.72rem; vertical-align:middle;",
+                        ),
+                        class_="card-header",
+                        style="font-weight:700;",
+                    )
+                    with ui.div(class_="card-body", style="padding:1rem;"):
+                        ui.tags.p(
+                            "Zonen manuell auf trocken oder feucht setzen. "
+                            "Der naechste Polling-Zyklus wertet den gesetzten "
+                            "Zustand aus und loest ggf. einen Bewaesserungslauf aus.",
+                            class_="text-muted small",
+                            style="margin-bottom:1rem;",
+                        )
+                        with ui.div(style="display:flex; gap:2rem; flex-wrap:wrap; margin-bottom:1rem;"):
+                            with ui.div(style="flex:1; min-width:160px;"):
+                                ui.tags.p("Sensor trocken setzen", class_="form-section-title")
+                                # Leere choices – _sync_sim_zones fuellt sie beim ersten Poll
+                                ui.input_checkbox_group(
+                                    "sim_dry_zones", label=None, choices={}, inline=True,
+                                )
+                            with ui.div(style="flex:1; min-width:160px;"):
+                                ui.tags.p("Sensor feucht setzen", class_="form-section-title")
+                                ui.input_checkbox_group(
+                                    "sim_moist_zones", label=None, choices={}, inline=True,
+                                )
+                        ui.input_action_button(
+                            "btn_sim_set",
+                            ui.div(ui.tags.i(class_="bi bi-send me-1"), "Zustand setzen"),
+                            class_="btn btn-sm btn-outline-secondary",
+                        )
+
+            @render.ui
+            def _sensor_sim_visibility():
+                """Steuert Sichtbarkeit von #sim_panel_wrap via injiziertem <style>-Tag.
+
+                Pure Render-Funktion: gibt ausschliesslich ein <style>-Tag zurueck,
+                kein ui.update_*-Aufruf (Shiny-Regel: Side-Effects nur in @reactive.effect).
+                Analog zu _dynamic_accent_style im Navbar-Bereich.
+                """
+                cfg = _sensor_config_data()
+                is_sim = (
+                    bool(cfg)
+                    and cfg.get("sensor_driver", "") == "sim"
+                    and bool(cfg.get("sensors_configured", []))
                 )
-                return
+                display = "block" if is_sim else "none"
+                return ui.tags.style(f"#sim_panel_wrap {{ display: {display} !important; }}")
 
-            dry_sensors   = [int(z) for z in dry_raw]
-            moist_sensors = [int(z) for z in moist_raw]
+            @reactive.effect
+            def _sync_sim_zones():
+                """Aktualisiert Checkbox-Choices wenn sich die Zone-Liste aendert.
 
-            overlap = set(dry_sensors) & set(moist_sensors)
-            if overlap:
-                ui.notification_show(
-                    f"Zonen {sorted(overlap)} sind in beiden Listen. "
-                    "Bitte Auswahl korrigieren.",
-                    type="warning",
-                    duration=5,
-                )
-                return
-
-            if not dry_sensors and not moist_sensors:
-                ui.notification_show(
-                    "Keine Zonen ausgewaehlt.", type="warning", duration=3,
-                )
-                return
-
-            rv = _post("/sensors/sim/set", json={
-                "dry_sensors":   dry_sensors,
-                "moist_sensors": moist_sensors,
-            })
-
-            if rv and rv.ok:
-                data = rv.json()
-                dry_now   = data.get("dry_sensors", [])
-                moist_now = []
-                parts = []
-                if dry_now:
-                    parts.append(f"Trocken: {dry_now}")
-                if moist_now:
-                    parts.append(f"Feucht: {moist_now}")
-                ui.notification_show(
-                    "Sim-Zustand gesetzt. " + (" | ".join(parts)),
-                    type="message",
-                    duration=4,
-                )
-                # Auswahl nach erfolgreichem Setzen zuruecksetzen –
-                # _sim_zones_initialized bleibt unveraendert (Zonen-Liste
-                # hat sich nicht geaendert, nur die Auswahl wird geleert).
-                cfg     = _sensor_config_data()
+                Einziger Ort fuer ui.update_checkbox_group()-Aufrufe (Side-Effect).
+                Guard-Flag _sim_zones_initialized verhindert Reset bei unveraenderter
+                Zone-Liste – identisches Muster wie _last_applied_dur_unit im Settings-Tab.
+                """
+                cfg = _sensor_config_data()
                 sensors = cfg.get("sensors_configured", []) if cfg else []
+
+                # Keine Aenderung → nichts tun, Auswahl des Nutzers bleibt erhalten
+                if _sim_zones_initialized.get() == sensors:
+                    return
+
+                _sim_zones_initialized.set(sensors)
                 sensor_choices = {str(s): f"Sensor {s}" for s in sensors}
                 ui.update_checkbox_group("sim_dry_zones",   choices=sensor_choices, selected=[])
                 ui.update_checkbox_group("sim_moist_zones", choices=sensor_choices, selected=[])
-                _bump_sensor()
-            elif rv and rv.status_code == 404:
-                ui.notification_show(
-                    "Backend ist nicht im Sim-Modus.", type="error", duration=4,
-                )
-            elif rv and rv.status_code == 422:
-                detail = _json_or_none(rv) or {}
-                ui.notification_show(
-                    detail.get("detail", "Ungueltige Eingabe."),
-                    type="error", duration=5,
-                )
-            else:
-                ui.notification_show(
-                    "Sim-Set fehlgeschlagen.", type="error", duration=4,
-                )
+
+            @reactive.effect
+            @reactive.event(input.btn_sim_set)
+            def _h_sim_set():
+                """Sendet ausgewaehlte Zonen-Zustaende an POST /sensors/sim/set."""
+                try:
+                    dry_raw   = input.sim_dry_zones()   or []
+                    moist_raw = input.sim_moist_zones() or []
+                except Exception:
+                    ui.notification_show(
+                        "Fehler beim Lesen der Auswahl.", type="error", duration=4,
+                    )
+                    return
+
+                dry_sensors   = [int(z) for z in dry_raw]
+                moist_sensors = [int(z) for z in moist_raw]
+
+                overlap = set(dry_sensors) & set(moist_sensors)
+                if overlap:
+                    ui.notification_show(
+                        f"Zonen {sorted(overlap)} sind in beiden Listen. "
+                        "Bitte Auswahl korrigieren.",
+                        type="warning",
+                        duration=5,
+                    )
+                    return
+
+                if not dry_sensors and not moist_sensors:
+                    ui.notification_show(
+                        "Keine Zonen ausgewaehlt.", type="warning", duration=3,
+                    )
+                    return
+
+                rv = _post("/sensors/sim/set", json={
+                    "dry_sensors":   dry_sensors,
+                    "moist_sensors": moist_sensors,
+                })
+
+                if rv and rv.ok:
+                    data = rv.json()
+                    dry_now   = data.get("dry_sensors", [])
+                    moist_now = []
+                    parts = []
+                    if dry_now:
+                        parts.append(f"Trocken: {dry_now}")
+                    if moist_now:
+                        parts.append(f"Feucht: {moist_now}")
+                    ui.notification_show(
+                        "Sim-Zustand gesetzt. " + (" | ".join(parts)),
+                        type="message",
+                        duration=4,
+                    )
+                    # Auswahl nach erfolgreichem Setzen zuruecksetzen –
+                    # _sim_zones_initialized bleibt unveraendert (Zonen-Liste
+                    # hat sich nicht geaendert, nur die Auswahl wird geleert).
+                    cfg     = _sensor_config_data()
+                    sensors = cfg.get("sensors_configured", []) if cfg else []
+                    sensor_choices = {str(s): f"Sensor {s}" for s in sensors}
+                    ui.update_checkbox_group("sim_dry_zones",   choices=sensor_choices, selected=[])
+                    ui.update_checkbox_group("sim_moist_zones", choices=sensor_choices, selected=[])
+                    _bump_sensor()
+                elif rv and rv.status_code == 404:
+                    ui.notification_show(
+                        "Backend ist nicht im Sim-Modus.", type="error", duration=4,
+                    )
+                elif rv and rv.status_code == 422:
+                    detail = _json_or_none(rv) or {}
+                    ui.notification_show(
+                        detail.get("detail", "Ungueltige Eingabe."),
+                        type="error", duration=5,
+                    )
+                else:
+                    ui.notification_show(
+                        "Sim-Set fehlgeschlagen.", type="error", duration=4,
+                    )
 
     # =========================================================================
     # TAB 5 - ZEITPLAENE

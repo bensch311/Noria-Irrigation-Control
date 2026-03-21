@@ -19,7 +19,7 @@
 #
 # Was dieses Script tut:
 #   1. Systemprüfung + Systempakete aktualisieren
-#   2. IP-Adresse + Ventil- + Kiosk-Konfiguration abfragen
+#   2. IP-Adresse + Ventil- + Sensor- + Kiosk-Konfiguration abfragen
 #   3. Zusammenfassung & Bestätigung
 #   4. Systembenutzer anlegen + Systempakete installieren
 #   5. Code nach /opt/noria/app deployen
@@ -70,6 +70,11 @@ FRONTEND_PORT=8080
 
 # GPIO-Standardpins (BCM-Nummerierung, handelsübliches 8-Kanal-Relaisboard)
 DEFAULT_PINS=(17 18 27 22 23 24 25 5 6 13 19 26 16 20 21 4)
+
+# Standard-Sensor-Eingangspins (BCM) – ausserhalb der Ventil-Defaults.
+# Hinweis: 2/3 = I2C (HAT), 7–11 = SPI. Diese Werte sind nur Vorschläge –
+# die Eingabe-Validierung verhindert Doppelbelegungen zuverlässig.
+DEFAULT_SENSOR_PINS=(14 15 12 11 9 8 7 3)
 
 # ── Quellverzeichnis ermitteln ────────────────────────────────────────────────
 # Das Script liegt in scripts/ innerhalb des Repos.
@@ -267,6 +272,91 @@ fi
 success "Betriebsgrenzen: max. $MAX_CONCURRENT gleichzeitig, max. ${MAX_RUNTIME}s Laufzeit"
 
 echo
+echo "─── Sensoren ───────────────────────────────────────────"
+echo "  Tensiometer-Sensoren (z.B. MMM-Tech TXS Schalttensiometer)"
+echo "  melden Bodentrockenheit über einen Schalt-Trockenkontakt."
+echo "  Jeder Sensor belegt einen GPIO-Eingangspin (BCM)."
+echo
+read -rp "  Sensoren an diesem Gerät installiert? [j/N]: " SENSOR_ANSWER
+case "${SENSOR_ANSWER,,}" in
+    j|ja) SENSORS_INSTALLED=true;  info "Sensoren: Ja" ;;
+    *)    SENSORS_INSTALLED=false; info "Sensoren: Nein – Sensor-Tab wird ausgeblendet" ;;
+esac
+
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    echo
+    read -rp "  Anzahl der Sensoren (1–8) [1]: " NUM_SENSORS
+    NUM_SENSORS="${NUM_SENSORS:-1}"
+    if ! [[ "$NUM_SENSORS" =~ ^[0-9]+$ ]] || [[ "$NUM_SENSORS" -lt 1 || "$NUM_SENSORS" -gt 8 ]]; then
+        die "Ungültige Sensoranzahl: '$NUM_SENSORS' (erlaubt: 1–8)"
+    fi
+    success "Sensoren: $NUM_SENSORS"
+
+    echo
+    echo "  GPIO-Eingangspin für jeden Sensor (BCM-Nummerierung)."
+    echo "  Der Sensor verbindet den Pin bei Trockenheit mit GND."
+    echo "  Pins die bereits für Ventile belegt sind werden abgewiesen."
+    echo
+    declare -a SENSOR_PINS
+    for (( i=1; i<=NUM_SENSORS; i++ )); do
+        DEFAULT_SENSOR_PIN="${DEFAULT_SENSOR_PINS[$((i-1))]}"
+        while true; do
+            read -rp "  Sensor $i → GPIO-Pin (BCM) [$DEFAULT_SENSOR_PIN]: " SPIN
+            SPIN="${SPIN:-$DEFAULT_SENSOR_PIN}"
+            if ! [[ "$SPIN" =~ ^[0-9]+$ ]] || [[ "$SPIN" -lt 2 || "$SPIN" -gt 27 ]]; then
+                warn "    Ungültiger Pin: $SPIN (erlaubt: BCM 2–27). Erneut eingeben."
+                continue
+            fi
+            if [[ -n "${USED_PINS[$SPIN]+x}" ]]; then
+                warn "    Pin $SPIN ist bereits belegt (${USED_PINS[$SPIN]}). Anderen Pin wählen."
+                continue
+            fi
+            SENSOR_PINS+=("$SPIN")
+            USED_PINS[$SPIN]="Sensor $i"
+            break
+        done
+    done
+    success "Sensor-Pins: ${SENSOR_PINS[*]}"
+
+    echo
+    echo "─── Sensor Hardware-Konfiguration ─────────────────────"
+    echo "  Internal Pull-Up: Der Pi schaltet intern einen Widerstand"
+    echo "  an den Eingangspin. Nur aktivieren wenn kein externer"
+    echo "  Pull-Up-Widerstand auf der Platine vorhanden ist."
+    echo
+    read -rp "  Internen Pull-Up aktivieren? [j/N]: " SENSOR_PU_ANSWER
+    case "${SENSOR_PU_ANSWER,,}" in
+        j|ja) SENSOR_INTERNAL_PULL_UP="true";  info "Sensor Pull-Up: intern (Software)" ;;
+        *)    SENSOR_INTERNAL_PULL_UP="false"; info "Sensor Pull-Up: extern (Hardware)" ;;
+    esac
+
+    echo
+    echo "─── Sensor Betriebsparameter ───────────────────────────"
+    echo "  Diese Werte steuern wann und wie lange der Sensor"
+    echo "  eine Bewässerung auslöst."
+    echo
+    read -rp "  Polling-Intervall in Sekunden [10]: " SENSOR_POLLING
+    SENSOR_POLLING="${SENSOR_POLLING:-10}"
+    if ! [[ "$SENSOR_POLLING" =~ ^[0-9]+$ ]] || [[ "$SENSOR_POLLING" -lt 1 ]]; then
+        die "Ungültiges Polling-Intervall: '$SENSOR_POLLING'"
+    fi
+
+    read -rp "  Cooldown nach Auslösung in Sekunden [60]: " SENSOR_COOLDOWN
+    SENSOR_COOLDOWN="${SENSOR_COOLDOWN:-60}"
+    if ! [[ "$SENSOR_COOLDOWN" =~ ^[0-9]+$ ]] || [[ "$SENSOR_COOLDOWN" -lt 1 ]]; then
+        die "Ungültiger Cooldown: '$SENSOR_COOLDOWN'"
+    fi
+
+    read -rp "  Standard-Bewässerungsdauer in Sekunden [30]: " SENSOR_DURATION
+    SENSOR_DURATION="${SENSOR_DURATION:-30}"
+    if ! [[ "$SENSOR_DURATION" =~ ^[0-9]+$ ]] || [[ "$SENSOR_DURATION" -lt 1 ]]; then
+        die "Ungültige Bewässerungsdauer: '$SENSOR_DURATION'"
+    fi
+
+    success "Sensor-Parameter: Polling=${SENSOR_POLLING}s, Cooldown=${SENSOR_COOLDOWN}s, Dauer=${SENSOR_DURATION}s"
+fi
+
+echo
 echo "─── Kiosk-Modus ────────────────────────────────────────"
 echo "  Im Kiosk-Modus startet Chromium nach dem Boot automatisch"
 echo "  im Vollbild und zeigt die Noria-Oberfläche an."
@@ -298,6 +388,16 @@ echo -e "  ${BOLD}GPIO-Pins (Ventil 1→N)  :${NC} ${GPIO_PINS[*]}"
 echo -e "  ${BOLD}Relais Aktiv-Low         :${NC} $RELAY_ACTIVE_LOW"
 echo -e "  ${BOLD}Max. gleichz. Ventile    :${NC} $MAX_CONCURRENT"
 echo -e "  ${BOLD}Max. Laufzeit            :${NC} ${MAX_RUNTIME}s"
+echo
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    echo -e "  ${BOLD}Sensoren                 :${NC} ${GREEN}$NUM_SENSORS installiert${NC} – Pins: ${SENSOR_PINS[*]}"
+    echo -e "  ${BOLD}Sensor Pull-Up           :${NC} $SENSOR_INTERNAL_PULL_UP"
+    echo -e "  ${BOLD}Sensor Polling           :${NC} ${SENSOR_POLLING}s"
+    echo -e "  ${BOLD}Sensor Cooldown          :${NC} ${SENSOR_COOLDOWN}s"
+    echo -e "  ${BOLD}Sensor Bewässerungsdauer :${NC} ${SENSOR_DURATION}s"
+else
+    echo -e "  ${BOLD}Sensoren                 :${NC} Keine – Sensor-Tab ausgeblendet"
+fi
 echo
 if [[ "$KIOSK_MODE" == "true" ]]; then
     echo -e "  ${BOLD}Kiosk-Modus              :${NC} ${GREEN}Ja${NC} – Chromium Vollbild (Benutzer: $KIOSK_USER)"
@@ -493,6 +593,26 @@ for (( i=1; i<=NUM_VALVES; i++ )); do
     GPIO_JSON+="\"$i\": ${GPIO_PINS[$((i-1))]}"
 done
 
+# Sensor-Pins-JSON aufbauen.
+# Wenn keine Sensoren installiert: leeres Objekt – Schlüssel existiert immer,
+# damit der Code keinen Unterschied zwischen "Schlüssel fehlt" und "leer" machen muss.
+SENSOR_PINS_JSON=""
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    SENSOR_DRIVER="rpi_switch"
+    for (( i=1; i<=NUM_SENSORS; i++ )); do
+        [[ $i -gt 1 ]] && SENSOR_PINS_JSON+=","$'\n'"      "
+        SENSOR_PINS_JSON+="\"$i\": ${SENSOR_PINS[$((i-1))]}"
+    done
+else
+    # Keine Sensoren: Treiber bleibt "sim", alle anderen Werte sind Defaults.
+    # Das Frontend liest IRRIGATION_SENSOR_PINS und blendet den Tab aus wenn leer.
+    SENSOR_DRIVER="sim"
+    SENSOR_INTERNAL_PULL_UP="false"
+    SENSOR_POLLING="10"
+    SENSOR_COOLDOWN="60"
+    SENSOR_DURATION="30"
+fi
+
 cat > "$DATA_DIR/device_config.json" << EOF
 {
   "version": 1,
@@ -503,6 +623,16 @@ cat > "$DATA_DIR/device_config.json" << EOF
     "IRRIGATION_GPIO_PINS": {
       $GPIO_JSON
     }
+  },
+  "sensors": {
+    "IRRIGATION_SENSOR_DRIVER": "$SENSOR_DRIVER",
+    "IRRIGATION_SENSOR_INTERNAL_PULL_UP": $SENSOR_INTERNAL_PULL_UP,
+    "IRRIGATION_SENSOR_PINS": {
+      $SENSOR_PINS_JSON
+    },
+    "IRRIGATION_SENSOR_POLLING_INTERVAL_S": $SENSOR_POLLING,
+    "IRRIGATION_SENSOR_COOLDOWN_S": $SENSOR_COOLDOWN,
+    "IRRIGATION_SENSOR_DEFAULT_DURATION_S": $SENSOR_DURATION
   },
   "hard_limits": {
     "MAX_RUNTIME_S": $MAX_RUNTIME,

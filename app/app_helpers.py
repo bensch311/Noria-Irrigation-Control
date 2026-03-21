@@ -6,7 +6,8 @@ Dieses Modul hat KEINE Shiny-Abhängigkeiten und kann daher direkt von
 Unit-Tests importiert werden, ohne eine Shiny-Session zu benötigen.
 
 Enthält:
-  - Konfiguration laden (_load_frontend_config, _read_max_valves_from_device_config)
+  - Konfiguration laden (_load_frontend_config, _read_max_valves_from_device_config,
+                          _read_sensors_enabled_from_device_config)
   - Formatierungsfunktionen (fmt_mmss, fmt_duration, fmt_weekdays,
                               fmt_uptime, fmt_disk, fmt_signal)
   - HTTP-Hilfsfunktion (_json_or_none)
@@ -69,6 +70,32 @@ def _read_max_valves_from_device_config(fallback: int) -> int:
         return max(1, int(cfg.get("device", {}).get("MAX_VALVES", fallback)))
     except Exception:
         return fallback
+
+
+def _read_sensors_enabled_from_device_config() -> bool:
+    """Prueft ob mindestens ein Sensor-Pin in data/device_config.json konfiguriert ist.
+
+    Gibt True zurueck wenn 'sensors.IRRIGATION_SENSOR_PINS' in device_config.json
+    existiert und mindestens einen Eintrag enthaelt.
+
+    Diese Funktion bestimmt zur Startzeit des Frontends, ob der Sensoren-Tab in der
+    Navigation angezeigt wird. Hardware-Konfiguration (welche Sensoren installiert sind)
+    kommt ausschliesslich aus device_config.json – nicht aus Runtime-State oder
+    Benutzereinstellungen. Aenderungen erfordern einen Neustart des Frontends.
+
+    Gibt False zurueck wenn:
+      - device_config.json nicht vorhanden oder nicht lesbar ist
+      - der 'sensors'-Schluessel fehlt
+      - IRRIGATION_SENSOR_PINS fehlt oder ist ein leeres Objekt
+      - die Datei korruptes JSON enthaelt
+    """
+    try:
+        raw = (Path(__file__).parent / "data" / "device_config.json").read_text(encoding="utf-8")
+        cfg = _json.loads(raw)
+        pins = cfg.get("sensors", {}).get("IRRIGATION_SENSOR_PINS", {})
+        return bool(pins)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

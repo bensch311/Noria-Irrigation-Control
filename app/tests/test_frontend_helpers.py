@@ -5,16 +5,17 @@ app_helpers.py hat keine Shiny-Abhängigkeiten und kann direkt importiert
 werden. Kein Mocking von Shiny nötig.
 
 Getestet:
-  fmt_mmss()                            – Sekunden → "M:SS"-String
-  fmt_duration()                        – Dauer-Formatierung (Sek/Min)
-  fmt_weekdays()                        – Wochentags-Liste → lesbarer String
-  fmt_uptime()                          – Uptime-Sekunden → lesbarer String
-  fmt_disk()                            – Disk-Nutzung → lesbarer String
-  fmt_memory()                          – RAM-Nutzung → lesbarer String
-  fmt_signal()                          – WLAN-Signal → lesbarer String mit Qualität
-  _json_or_none()                       – sichere JSON-Extraktion aus Response/None
-  _load_frontend_config()               – Config-Laden mit Fallback bei fehlendem File
-  _read_max_valves_from_device_config() – MAX_VALVES aus device_config.json
+  fmt_mmss()                                    – Sekunden → "M:SS"-String
+  fmt_duration()                                – Dauer-Formatierung (Sek/Min)
+  fmt_weekdays()                                – Wochentags-Liste → lesbarer String
+  fmt_uptime()                                  – Uptime-Sekunden → lesbarer String
+  fmt_disk()                                    – Disk-Nutzung → lesbarer String
+  fmt_memory()                                  – RAM-Nutzung → lesbarer String
+  fmt_signal()                                  – WLAN-Signal → lesbarer String mit Qualität
+  _json_or_none()                               – sichere JSON-Extraktion aus Response/None
+  _load_frontend_config()                       – Config-Laden mit Fallback bei fehlendem File
+  _read_max_valves_from_device_config()         – MAX_VALVES aus device_config.json
+  _read_sensors_enabled_from_device_config()    – Sensoren aktiv aus device_config.json
 """
 
 import json
@@ -421,3 +422,154 @@ class TestReadMaxValves:
             json.dumps({"other_key": 42}), encoding="utf-8"
         )
         assert h._read_max_valves_from_device_config(fallback=6) == 6
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _read_sensors_enabled_from_device_config
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReadSensorsEnabled:
+    """_read_sensors_enabled_from_device_config() → True/False"""
+
+    def test_missing_file_returns_false(self, tmp_path, monkeypatch):
+        """Fehlende device_config.json → False (kein Sensor-Tab)."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        assert h._read_sensors_enabled_from_device_config() is False
+
+    def test_sensors_with_pins_returns_true(self, tmp_path, monkeypatch):
+        """IRRIGATION_SENSOR_PINS mit Eintraegen → True."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({
+                "sensors": {
+                    "IRRIGATION_SENSOR_PINS": {"1": 14, "2": 15}
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is True
+
+    def test_sensors_empty_pins_returns_false(self, tmp_path, monkeypatch):
+        """IRRIGATION_SENSOR_PINS ist leeres Objekt → False (kein Sensor installiert)."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({
+                "sensors": {
+                    "IRRIGATION_SENSOR_DRIVER": "sim",
+                    "IRRIGATION_SENSOR_PINS": {}
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is False
+
+    def test_sensors_key_missing_returns_false(self, tmp_path, monkeypatch):
+        """Kein 'sensors'-Schluessel in device_config.json → False."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({"device": {"MAX_VALVES": 6}}),
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is False
+
+    def test_sensor_pins_key_missing_returns_false(self, tmp_path, monkeypatch):
+        """'sensors' vorhanden aber 'IRRIGATION_SENSOR_PINS' fehlt → False."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({
+                "sensors": {
+                    "IRRIGATION_SENSOR_DRIVER": "sim"
+                    # IRRIGATION_SENSOR_PINS fehlt absichtlich
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is False
+
+    def test_corrupt_json_returns_false(self, tmp_path, monkeypatch):
+        """Korruptes JSON → False, kein Crash."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            "{nicht: valides json!!!",
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is False
+
+    def test_single_sensor_returns_true(self, tmp_path, monkeypatch):
+        """Ein einzelner Sensor genuegt fuer True."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps({
+                "sensors": {
+                    "IRRIGATION_SENSOR_PINS": {"1": 14}
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert h._read_sensors_enabled_from_device_config() is True
+
+    def test_full_device_config_with_sensors(self, tmp_path, monkeypatch):
+        """Vollstaendige device_config.json wie von install.sh erzeugt – mit Sensoren."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        full_cfg = {
+            "version": 1,
+            "device": {
+                "MAX_VALVES": 6,
+                "IRRIGATION_VALVE_DRIVER": "rpi",
+                "IRRIGATION_RELAY_ACTIVE_LOW": True,
+                "IRRIGATION_GPIO_PINS": {"1": 17, "2": 18}
+            },
+            "sensors": {
+                "IRRIGATION_SENSOR_DRIVER": "rpi_switch",
+                "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
+                "IRRIGATION_SENSOR_PINS": {"1": 14, "2": 15},
+                "IRRIGATION_SENSOR_POLLING_INTERVAL_S": 10,
+                "IRRIGATION_SENSOR_COOLDOWN_S": 60,
+                "IRRIGATION_SENSOR_DEFAULT_DURATION_S": 30
+            },
+            "hard_limits": {
+                "MAX_RUNTIME_S": 3600,
+                "MAX_CONCURRENT_VALVES": 2
+            }
+        }
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps(full_cfg), encoding="utf-8"
+        )
+        assert h._read_sensors_enabled_from_device_config() is True
+
+    def test_full_device_config_without_sensors(self, tmp_path, monkeypatch):
+        """Vollstaendige device_config.json wie von install.sh erzeugt – ohne Sensoren."""
+        monkeypatch.setattr(h, "__file__", str(tmp_path / "app_helpers.py"))
+        (tmp_path / "data").mkdir()
+        full_cfg = {
+            "version": 1,
+            "device": {
+                "MAX_VALVES": 6,
+                "IRRIGATION_VALVE_DRIVER": "rpi",
+                "IRRIGATION_RELAY_ACTIVE_LOW": True,
+                "IRRIGATION_GPIO_PINS": {"1": 17, "2": 18}
+            },
+            "sensors": {
+                "IRRIGATION_SENSOR_DRIVER": "sim",
+                "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
+                "IRRIGATION_SENSOR_PINS": {},
+                "IRRIGATION_SENSOR_POLLING_INTERVAL_S": 10,
+                "IRRIGATION_SENSOR_COOLDOWN_S": 60,
+                "IRRIGATION_SENSOR_DEFAULT_DURATION_S": 30
+            },
+            "hard_limits": {
+                "MAX_RUNTIME_S": 3600,
+                "MAX_CONCURRENT_VALVES": 2
+            }
+        }
+        (tmp_path / "data" / "device_config.json").write_text(
+            json.dumps(full_cfg), encoding="utf-8"
+        )
+        assert h._read_sensors_enabled_from_device_config() is False
