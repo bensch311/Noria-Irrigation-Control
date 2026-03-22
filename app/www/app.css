@@ -620,7 +620,6 @@ input[data-sch-id]:focus {
 .ov-icon svg {
   display: block;
   margin: 0 !important;
-  vertical-align: 0 !important;
   width: 1.1rem;
   height: 1.1rem;
 }
