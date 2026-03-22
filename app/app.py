@@ -1122,6 +1122,12 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     if not items:
                         return ui.div(header, ui.p("Warteschlange ist leer.", class_="text-muted"))
 
+                    _queue_source_labels = {
+                        "manual":   "Manuell",
+                        "queue":    "Warteschlange",
+                        "schedule": "Zeitplan",
+                        "sensor":   "Sensor",
+                    }
                     rows = [
                         ui.tags.tr(
                             ui.tags.td(str(idx), class_="text-muted"),
@@ -1129,7 +1135,10 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                             ui.tags.td(fmt_duration(
                                 item.get("duration", 0), item.get("time_unit", "Sekunden")
                             )),
-                            ui.tags.td(item.get("time_unit", "")),
+                            ui.tags.td(
+                                _queue_source_labels.get(item.get("source", ""), item.get("source", "–")),
+                                class_="text-muted small",
+                            ),
                         )
                         for idx, item in enumerate(items, 1)
                     ]
@@ -1141,7 +1150,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                                     ui.tags.th("#"),
                                     ui.tags.th("Zone"),
                                     ui.tags.th("Dauer"),
-                                    ui.tags.th("Einheit"),
+                                    ui.tags.th("Quelle"),
                                 )
                             ),
                             ui.tags.tbody(*rows),

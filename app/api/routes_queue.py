@@ -45,7 +45,7 @@ def get_queue():
         return {
             "queue_state": state.queue_state,
             "queue_length": len(q),
-            "items": [{"zone": i.zone, "duration": i.duration, "time_unit": i.time_unit} for i in q],
+            "items": [{"zone": i.zone, "duration": i.duration, "time_unit": i.time_unit, "source": i.source} for i in q],
         }
 
 

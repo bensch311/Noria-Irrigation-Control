@@ -34,7 +34,7 @@ def test_get_queue_with_items(client):
     with state_lock:
         state.queue = [
             QueueItem(zone=1, duration=60, time_unit="Sekunden", source="queue"),
-            QueueItem(zone=2, duration=120, time_unit="Sekunden", source="queue"),
+            QueueItem(zone=2, duration=120, time_unit="Sekunden", source="sensor"),
         ]
 
     resp = client.get("/queue")
@@ -43,6 +43,20 @@ def test_get_queue_with_items(client):
     assert data["queue_length"] == 2
     assert data["items"][0]["zone"] == 1
     assert data["items"][1]["zone"] == 2
+    # source muss im Response enthalten sein (wird in der Queue-Tabelle als
+    # "Quelle"-Spalte angezeigt)
+    assert data["items"][0]["source"] == "queue"
+    assert data["items"][1]["source"] == "sensor"
+
+
+def test_get_queue_source_field_present(client):
+    """GET /queue liefert source-Feld fuer jedes Item."""
+    with state_lock:
+        state.queue = [
+            QueueItem(zone=1, duration=60, time_unit="Sekunden", source="manual"),
+        ]
+    data = client.get("/queue").json()
+    assert "source" in data["items"][0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
