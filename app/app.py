@@ -634,6 +634,58 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 ui.modal_remove()
             # faulted + currently_open → nichts tun, Modal bleibt offen
 
+        # Sensor-Kachel-Logik: als eigene Funktion um _overview_tiles schlank zu halten.
+        # Bekommt tile() als Callable damit keine doppelte Definition nötig ist.
+        def _sensor_overview_tile(tile_fn):
+            """Berechnet Sensor-Kachel-Inhalt aus dem aktuellen /sensors/readings-State."""
+            d         = _sensor_readings_data()
+            readings  = d.get("readings",        {}) if d else {}
+            settings  = d.get("sensor_settings", {}) if d else {}
+            triggered = d.get("last_triggered",  {}) if d else {}
+
+            total = len(SENSOR_IDS)
+            # Anzahl trockener Sensoren (needs_irrigation=True)
+            dry_count = sum(
+                1 for sid in SENSOR_IDS if readings.get(str(sid)) is True
+            )
+            # Davon: wie viele sind im Cooldown?
+            cooldown_count = 0
+            for sid in SENSOR_IDS:
+                s_key = str(sid)
+                if readings.get(s_key) is True:
+                    cooldown_s = int(settings.get(s_key, {}).get("cooldown_s", 3600))
+                    elapsed    = triggered.get(s_key)
+                    if elapsed is not None and elapsed < cooldown_s:
+                        cooldown_count += 1
+
+            # Trockene Sensoren die NICHT im Cooldown sind → aktive Auslösung
+            dry_active = dry_count - cooldown_count
+
+            # Pill-Farbe
+            if not readings:
+                # Noch keine Readings → neutral
+                sensor_pill = ui.span("–", class_="ov-pill")
+            elif dry_active > 0:
+                sensor_pill = ui.span("TROCKEN", class_="ov-pill warn")
+            elif dry_count > 0:
+                sensor_pill = ui.span("COOLDOWN", class_="ov-pill")
+            else:
+                sensor_pill = ui.span("OK", class_="ov-pill ok")
+
+            # Anzeige: "N trocken" oder "–" wenn noch kein Reading
+            if not readings:
+                val_str = "–"
+            else:
+                val_str = f"{dry_count} trocken"
+
+            return tile_fn(
+                "Sensoren",
+                val_str,
+                f"von {total} konfiguriert",
+                "leaf",
+                sensor_pill,
+            )
+
         # ===== Overview Tiles Row (NEU) =====
         @render.ui
         def _overview_tiles():
@@ -733,6 +785,18 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                     "shield-halved",
                     st,
                 ),
+                *(
+                    # Sensor-Kachel: nur wenn Sensoren installiert sind.
+                    # Zeigt Anzahl trockener Sensoren + Cooldown-Zustand.
+                    # Pill-Logik:
+                    #   OK   – alle Sensoren feucht
+                    #   WARN – mindestens ein Sensor trocken UND nicht im Cooldown
+                    #          (Bewässerung wird ausgelöst / wartet auf Auslösung)
+                    #   CD   – alle trockenen Sensoren im Cooldown
+                    #          (bereits bewässert, Wartezeit läuft)
+                    [_sensor_overview_tile(tile)]
+                    if SENSORS_ENABLED else []
+                ),
                 class_="overview-grid",
             )
 
@@ -826,6 +890,62 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                                 )
                             )
 
+                    # Sensor-Statuszeilen: nur wenn Sensoren installiert sind.
+                    # Kompakt – ein Eintrag pro Sensor mit farbigem Punkt.
+                    sensor_status_rows = []
+                    if SENSORS_ENABLED:
+                        s_d       = _sensor_readings_data()
+                        s_rdgs    = s_d.get("readings",        {}) if s_d else {}
+                        s_stgs    = s_d.get("sensor_settings", {}) if s_d else {}
+                        s_trigg   = s_d.get("last_triggered",  {}) if s_d else {}
+
+                        sensor_items = []
+                        for sid in SENSOR_IDS:
+                            s_key     = str(sid)
+                            moisture  = s_rdgs.get(s_key)   # True=trocken, False=feucht, None=unbekannt
+
+                            if moisture is None:
+                                dot_cls  = "sensor-dot unknown"
+                                lbl      = "Unbekannt"
+                                lbl_cls  = "text-muted"
+                            elif moisture:
+                                # Trocken – im Cooldown?
+                                cooldown_s = int(s_stgs.get(s_key, {}).get("cooldown_s", 3600))
+                                elapsed    = s_trigg.get(s_key)
+                                in_cd      = elapsed is not None and elapsed < cooldown_s
+                                if in_cd:
+                                    rem_min    = max(0, int(cooldown_s - elapsed)) // 60
+                                    dot_cls    = "sensor-dot unknown"   # grau = im Cooldown
+                                    lbl        = f"Trocken – Cooldown {rem_min} min"
+                                    lbl_cls    = "text-muted small"
+                                else:
+                                    dot_cls    = "sensor-dot dry"
+                                    lbl        = "Trocken"
+                                    lbl_cls    = "sensor-status-dry small fw-bold"
+                            else:
+                                dot_cls  = "sensor-dot moist"
+                                lbl      = "Feucht"
+                                lbl_cls  = "sensor-status-moist small"
+
+                            sensor_items.append(
+                                ui.div(
+                                    ui.tags.small(f"Sensor {sid}: ", class_="text-muted"),
+                                    ui.span("", class_=dot_cls,
+                                            style="display:inline-block; margin:0 0.3rem 0 0.15rem;"),
+                                    ui.tags.small(lbl, class_=lbl_cls),
+                                    style="display:inline-block; margin-right:1.5rem;",
+                                )
+                            )
+
+                        if sensor_items:
+                            sensor_status_rows = [
+                                ui.div(
+                                    ui.tags.small("Sensoren: ", class_="text-muted"),
+                                    *sensor_items,
+                                    style="margin-top:0.35rem; flex-wrap:wrap; display:flex; align-items:center;",
+                                )
+                            ]
+
                     return ui.div(
                         ui.div(badge, style="margin-bottom:0.85rem;"),
                         *zone_divs,
@@ -844,6 +964,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                                 else ui.span("AUS", class_="badge text-bg-secondary app-badge"),
                             style="margin-top:0.35rem;",
                         ),
+                        *sensor_status_rows,
                     )
 
             with ui.card():
