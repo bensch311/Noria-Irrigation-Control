@@ -553,15 +553,15 @@ input[data-sch-id]:focus {
 /* ---------- Overview Tiles (Dashboard) ---------- */
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  grid-template-columns: repeat(6, minmax(130px, 1fr));
   gap: 0.85rem;
   margin: 0.25rem 0 1rem;
 }
-@media (max-width: 1200px) {
-  .overview-grid { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
+@media (max-width: 1400px) {
+  .overview-grid { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
 }
 @media (max-width: 720px) {
-  .overview-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+  .overview-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
 }
 
 .ov-tile {
@@ -705,3 +705,70 @@ input[data-sch-id]:focus {
 
 
 
+
+/* ==========================================================================
+   Sensor-Komponenten
+   ========================================================================== */
+
+/* ---------- Sensor-Karten Grid ---------- */
+.sensor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.75rem;
+}
+
+/* ---------- Sensor-Statuspunkt ---------- */
+.sensor-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.sensor-dot.moist   { background: #22c55e; }
+.sensor-dot.dry     { background: #f59e0b; }
+.sensor-dot.unknown { background: rgba(15,23,42,0.22); }
+
+/* ---------- Sensor-Status-Text ---------- */
+.sensor-status-dry   { color: #b45309; }
+.sensor-status-moist { color: #16a34a; }
+
+/* ---------- Sensor-Konfigurations-Banner ---------- */
+.sensor-config-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  background: rgba(15,23,42,0.03);
+  border: 1px solid rgba(15,23,42,0.07);
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+.sensor-cfg-item {
+  white-space: nowrap;
+  color: rgba(15,23,42,0.65);
+}
+
+/* ---------- Sensor-Warn-Banner ---------- */
+.sensor-warn-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.22);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  color: #92400e;
+}
+
+/* ---------- Sensor-Statusbereich in Karte ---------- */
+.sensor-status-area {
+  min-height: 1.6rem;
+  display: flex;
+  align-items: center;
+}
