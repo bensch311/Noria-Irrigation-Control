@@ -138,9 +138,47 @@ def scheduler_loop():
                     )
 
                     if rule.zone == 0:
-                        # Gruppe immer in Queue (Reihenfolge sichern)
+                        # Gruppe immer in Queue (Reihenfolge sichern).
+                        # Gleiche Vier-Fall-Strategie wie sensor_engine.
                         state.queue = state.queue or []
-                        state.queue.extend(jobs)
+                        queue_had_items  = bool(state.queue)
+                        queue_is_running = (state.queue_state == "läuft")
+
+                        if queue_had_items and not queue_is_running:
+                            # Fall 3: Zeitplan-Items als Priorität vorne einstellen
+                            for job in jobs:
+                                job.priority = True
+                            state.queue = jobs + state.queue
+                            state.queue_priority_mode = True
+                            log_event(
+                                "schedule_queue_priority_prepend",
+                                source="schedule",
+                                schedule_id=rule.id,
+                                items_prepended=len(jobs),
+                                queue_length_after=len(state.queue),
+                            )
+                        elif queue_had_items and state.queue_priority_mode:
+                            # Fall 2b: Queue läuft im Prioritätsmodus – nach letztem
+                            # priority-Item einfügen (identische Logik wie sensor_engine).
+                            for job in jobs:
+                                job.priority = True
+                            insert_pos = next(
+                                (i for i, x in enumerate(state.queue) if not x.priority),
+                                len(state.queue),
+                            )
+                            state.queue[insert_pos:insert_pos] = jobs
+                            log_event(
+                                "schedule_queue_priority_insert",
+                                source="schedule",
+                                schedule_id=rule.id,
+                                items_inserted=len(jobs),
+                                insert_pos=insert_pos,
+                                queue_length_after=len(state.queue),
+                            )
+                        else:
+                            # Fall 1 (leere Queue) oder Fall 2 (Queue läuft, kein PM)
+                            state.queue.extend(jobs)
+
                         state.queue_dirty = True
                         if state.queue_state in ("bereit", "fertig"):
                             state.queue_state = "läuft"
@@ -151,8 +189,45 @@ def scheduler_loop():
                             # Merke Job für Start OHNE Lock
                             jobs_to_start.append(job)
                         else:
+                            # Kein Direktstart möglich → Queue-Einfüge-Strategie.
+                            # Gleiche Vier-Fall-Logik wie sensor_engine.
                             state.queue = state.queue or []
-                            state.queue.append(job)
+                            queue_had_items  = bool(state.queue)
+                            queue_is_running = (state.queue_state == "läuft")
+
+                            if queue_had_items and not queue_is_running:
+                                # Fall 3: Zeitplan-Item als Priorität vorne einstellen
+                                job.priority = True
+                                state.queue.insert(0, job)
+                                state.queue_priority_mode = True
+                                log_event(
+                                    "schedule_queue_priority_prepend",
+                                    source="schedule",
+                                    schedule_id=rule.id,
+                                    items_prepended=1,
+                                    queue_length_after=len(state.queue),
+                                )
+                            elif queue_had_items and state.queue_priority_mode:
+                                # Fall 2b: Queue läuft im Prioritätsmodus – nach letztem
+                                # priority-Item einfügen (identische Logik wie sensor_engine).
+                                job.priority = True
+                                insert_pos = next(
+                                    (i for i, x in enumerate(state.queue) if not x.priority),
+                                    len(state.queue),
+                                )
+                                state.queue.insert(insert_pos, job)
+                                log_event(
+                                    "schedule_queue_priority_insert",
+                                    source="schedule",
+                                    schedule_id=rule.id,
+                                    items_inserted=1,
+                                    insert_pos=insert_pos,
+                                    queue_length_after=len(state.queue),
+                                )
+                            else:
+                                # Fall 1 (leere Queue) oder Fall 2 (Queue läuft, kein PM)
+                                state.queue.append(job)
+
                             state.queue_dirty = True
                             if state.queue_state in ("bereit", "fertig"):
                                 state.queue_state = "läuft"

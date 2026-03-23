@@ -573,3 +573,143 @@ class TestTimerParallelDrain:
 
         drain_events = [e for e in logged_events if e == "parallel_disabled_waiting_for_drain"]
         assert len(drain_events) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prioritätsmodus: timer_loop stoppt NUR wenn nächstes Item non-priority ist
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTimerPriorityMode:
+    """timer_loop: Prioritätsmodus stoppt nach allen priority-Items, nicht früher."""
+
+    def test_priority_mode_does_not_stop_while_priority_items_remain(self, mock_io):
+        """Kernbug-Regression: Bei [s1(True), s2(True), manual(False)] darf
+        timer_loop nach s1-Fertigstellung NICHT stoppen – s2 muss noch laufen."""
+        import time as _time
+        now = _time.monotonic()
+
+        s1 = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                       source="sensor", priority=True)
+        s2 = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                       source="sensor", priority=True)
+        manual = QueueItem(zone=3, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+
+        with state_lock:
+            # s1 ist fertig (end_time in der Vergangenheit), s2+manual in Queue
+            state.active_runs = {
+                1: ActiveRun(
+                    zone=1, end_time=now - 1.0, time_unit="Sekunden",
+                    started_at=now - 62.0, started_source="sensor", started_planned_s=60,
+                )
+            }
+            state.queue               = [s2, manual]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+
+        _run_timer_once()
+
+        with state_lock:
+            # s1 fertig: active_runs leer, aber queue[0]=s2(True) → KEIN Stopp
+            # queue_state muss noch "läuft" sein (s2 wurde gestartet oder steht bereit)
+            assert state.queue_state != "bereit", (
+                "queue_state darf nicht 'bereit' sein wenn noch priority-Items in der Queue sind"
+            )
+            assert state.queue_priority_mode is True, (
+                "priority_mode darf nicht deaktiviert werden wenn noch priority-Items warten"
+            )
+
+    def test_priority_mode_stops_when_next_is_non_priority(self, mock_io):
+        """Nach Abarbeitung aller priority-Items stoppt die Queue bei non-priority Item."""
+        import time as _time
+        now = _time.monotonic()
+
+        manual = QueueItem(zone=3, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+
+        with state_lock:
+            # Letztes priority-Item ist fertig (active_runs leer), manual wartet
+            state.active_runs         = {}
+            state.queue               = [manual]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+
+        _run_timer_once()
+
+        with state_lock:
+            assert state.queue_state == "bereit"
+            assert state.queue_priority_mode is False
+            assert len(state.queue) == 1
+            assert state.queue[0].zone == 3
+
+    def test_priority_guard_blocks_non_priority_items(self, mock_io):
+        """Im Prioritätsmodus werden Nicht-Prioritäts-Items nicht aus der Queue gepoppt."""
+        manual = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+        with state_lock:
+            state.queue               = [manual]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+            state.active_runs         = {}
+
+        _run_timer_once()
+
+        with state_lock:
+            assert len(state.queue) == 1
+            assert state.queue[0].zone == 2
+            assert state.queue_state == "bereit"
+            assert state.queue_priority_mode is False
+
+    def test_priority_items_are_started(self, mock_io):
+        """Priority-Items werden normal aus der Queue gepoppt und gestartet."""
+        prio = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                         source="sensor", priority=True)
+        manual = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+        with state_lock:
+            state.queue               = [prio, manual]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+            state.active_runs         = {}
+
+        _run_timer_once()
+
+        with state_lock:
+            assert 1 in state.active_runs
+            assert len(state.queue) == 1
+            assert state.queue[0].zone == 2
+
+    def test_fertig_when_all_done_no_remaining(self, mock_io):
+        """Normale Beendigung: alle Items durch, Queue leer → 'fertig'."""
+        with state_lock:
+            state.queue               = []
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+            state.active_runs         = {}
+
+        _run_timer_once()
+
+        with state_lock:
+            assert state.queue_state == "fertig"
+            assert state.queue_priority_mode is False
+
+    def test_normal_mode_unaffected(self, mock_io):
+        """Ohne priority_mode: alle Items werden normal abgearbeitet (kein Regression)."""
+        item_a = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+        item_b = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                           source="manual", priority=False)
+        with state_lock:
+            state.queue               = [item_a, item_b]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = False
+            state.active_runs         = {}
+            state.parallel_enabled    = True
+            state.max_concurrent_valves = 2
+
+        _run_timer_once()
+
+        with state_lock:
+            assert 1 in state.active_runs
+            assert 2 in state.active_runs
+            assert len(state.queue) == 0

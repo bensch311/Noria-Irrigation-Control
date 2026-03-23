@@ -440,3 +440,137 @@ class TestPerSensorSettings:
             state.sensor_default_duration_s = 77
         items, _ = _run_cycle([_make_reading(1, True)])
         assert items[0].duration == 77
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fall 2b: Neuer Sensor feuert während Prioritätsmodus aktiv ist
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSensorQueueStrategyFall2b:
+    """Fall 2b: Sensor feuert während queue_priority_mode=True und queue läuft.
+
+    Ohne Fix: Items landen hinter non-priority Items → timer_loop stoppt davor.
+    Mit Fix:  Items werden mit priority=True nach dem letzten priority-Item eingefügt.
+    """
+
+    def _apply_sensor_loop_logic(self, items_to_queue: list):
+        """Simuliert den Einfüge-Block aus sensor_engine_loop direkt unter Lock."""
+        with state_lock:
+            state.queue = state.queue or []
+            queue_had_items  = bool(state.queue)
+            queue_is_running = (state.queue_state == "läuft")
+
+            if queue_had_items and not queue_is_running:
+                for item in items_to_queue:
+                    item.priority = True
+                state.queue = items_to_queue + state.queue
+                state.queue_priority_mode = True
+            elif queue_had_items and state.queue_priority_mode:
+                for item in items_to_queue:
+                    item.priority = True
+                insert_pos = next(
+                    (i for i, x in enumerate(state.queue) if not x.priority),
+                    len(state.queue),
+                )
+                state.queue[insert_pos:insert_pos] = items_to_queue
+            else:
+                state.queue.extend(items_to_queue)
+
+            state.queue_dirty = True
+            if state.queue_state in ("bereit", "fertig"):
+                state.queue_state = "läuft"
+
+    def test_bug_scenario_sensor2_fires_while_priority_mode_active(self):
+        """Reproduziert den ursprünglichen Bug:
+        Sensor 2 feuert nachdem Sensor 1 Fall 3 ausgelöst hat und die Queue
+        bereits läuft. Ohne Fix: s2_zone landet hinter manual_item.
+        """
+        manual_item = QueueItem(zone=5, duration=300, time_unit="Sekunden",
+                                source="manual", priority=False)
+        s1_zone     = QueueItem(zone=1, duration=600, time_unit="Sekunden",
+                                source="sensor", priority=True)
+
+        # Zustand nach Fall-3 Trigger von Sensor 1 + timer hat s1_zone bereits
+        # gepoppt (läuft gerade), manual_item ist noch in Queue
+        with state_lock:
+            state.queue               = [manual_item]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+
+        # Sensor 2 feuert im nächsten Polling-Zyklus
+        s2_zone = QueueItem(zone=2, duration=600, time_unit="Sekunden",
+                            source="sensor", priority=False)
+        self._apply_sensor_loop_logic([s2_zone])
+
+        with state_lock:
+            # Mit Fix: s2_zone VOR manual_item (priority=True)
+            assert state.queue[0].zone == 2
+            assert state.queue[0].priority is True
+            # manual_item bleibt hinten (priority=False)
+            assert state.queue[1].zone == 5
+            assert state.queue[1].priority is False
+            # Prioritätsmodus bleibt aktiv
+            assert state.queue_priority_mode is True
+
+    def test_fall2b_insert_after_last_priority_item(self):
+        """Fall 2b: Einfügeposition ist direkt nach dem letzten priority=True Item."""
+        p1 = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                       source="sensor", priority=True)
+        p2 = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                       source="sensor", priority=True)
+        m1 = QueueItem(zone=9, duration=60, time_unit="Sekunden",
+                       source="manual", priority=False)
+
+        with state_lock:
+            state.queue               = [p1, p2, m1]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+
+        new_item = QueueItem(zone=3, duration=60, time_unit="Sekunden",
+                             source="sensor", priority=False)
+        self._apply_sensor_loop_logic([new_item])
+
+        with state_lock:
+            zones = [item.zone for item in state.queue]
+            # Reihenfolge: p1, p2, new_item(zone=3), m1
+            assert zones == [1, 2, 3, 9]
+            assert state.queue[2].priority is True   # new_item hat priority=True
+            assert state.queue[3].priority is False  # m1 unverändert
+
+    def test_fall2b_no_non_priority_items_appends_at_end(self):
+        """Fall 2b: Wenn alle Queue-Items priority=True, wird hinten angehängt."""
+        p1 = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                       source="sensor", priority=True)
+
+        with state_lock:
+            state.queue               = [p1]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = True
+
+        new_item = QueueItem(zone=2, duration=60, time_unit="Sekunden",
+                             source="sensor", priority=False)
+        self._apply_sensor_loop_logic([new_item])
+
+        with state_lock:
+            assert len(state.queue) == 2
+            assert state.queue[1].zone == 2
+            assert state.queue[1].priority is True
+
+    def test_fall2_without_priority_mode_still_appends(self):
+        """Fall 2 ohne priority_mode: Items werden normal hinten angehängt (kein Regression)."""
+        existing = QueueItem(zone=5, duration=60, time_unit="Sekunden",
+                             source="manual", priority=False)
+        with state_lock:
+            state.queue               = [existing]
+            state.queue_state         = "läuft"
+            state.queue_priority_mode = False   # kein priority_mode
+
+        new_item = QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                             source="sensor", priority=False)
+        self._apply_sensor_loop_logic([new_item])
+
+        with state_lock:
+            assert state.queue[0].zone == 5
+            assert state.queue[1].zone == 1
+            assert state.queue[1].priority is False
+            assert state.queue_priority_mode is False

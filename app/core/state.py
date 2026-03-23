@@ -70,6 +70,13 @@ class QueueItem:
     time_unit: str
     source: str = "queue"   # "manual" | "queue" | "schedule" | "sensor" – Ursprung des Eintrags
 
+    # Prioritätsmerkmal: True wenn das Item von Sensor- oder Zeitplan-Logik
+    # vorgezogen wurde (Case 3: Queue hatte Einträge, war aber nicht gestartet).
+    # Wird vom timer_loop genutzt um nach Abarbeitung aller priority-Items
+    # anzuhalten (queue_state → "bereit"), restliche Items bleiben erhalten.
+    # Wird NICHT persistiert – nach Neustart behandelt timer_loop alle Items normal.
+    priority: bool = False
+
 
 @dataclass
 class ScheduleRule:
@@ -109,7 +116,8 @@ class RunState:
 
     Felder-Gruppen:
       - Ventil-Zustand:         paused, active_runs
-      - Queue:                  queue, queue_state, queue_state_before_valve_pause
+      - Queue:                  queue, queue_state, queue_state_before_valve_pause,
+                                queue_priority_mode
       - Zeitpläne:              schedules, automation_enabled, automation_block_run_key
       - Dirty-Flags:            schedules_dirty, queue_dirty, history_dirty
       - Hardware-Fault-Latch:   hw_faulted, hw_fault_*
@@ -139,6 +147,14 @@ class RunState:
     # Speichert queue_state unmittelbar vor einer Ventil-Pause, damit /resume
     # den korrekten Zustand ("läuft" vs "bereit") wiederherstellen kann.
     queue_state_before_valve_pause: str = "bereit"
+
+    # Prioritätsmodus: True wenn Sensor- oder Zeitplan-Items vorgezogen wurden
+    # (Queue hatte Einträge, war aber nicht gestartet – Case 3).
+    # Solange True: timer_loop startet nach den priority-Items keine weiteren
+    # Queue-Items und setzt queue_state auf "bereit" sobald active_runs leer ist.
+    # Wird auf False zurückgesetzt wenn queue_state "fertig" oder "bereit" (durch
+    # Priority-Ende) erreicht wird. Nicht persistiert – Neustart setzt auf False.
+    queue_priority_mode: bool = False
 
     # ── Zeitpläne ─────────────────────────────────────────────────────────────
     schedules: List[ScheduleRule] | None = None

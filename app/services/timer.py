@@ -97,6 +97,13 @@ def timer_loop() -> None:
                         if not can_start_more:
                             break
 
+                        # Prioritätsmodus: Nur priority-Items aus der Queue starten.
+                        # Sobald das erste Nicht-Prioritäts-Item vorne liegt, Schleife
+                        # abbrechen – dieser und alle folgenden Items warten auf den
+                        # nächsten manuellen Start durch den Operator.
+                        if state.queue_priority_mode and not state.queue[0].priority:
+                            break
+
                         next_item = state.queue.pop(0)
                         items_to_start.append(next_item)
                         collected_count += 1
@@ -267,8 +274,13 @@ def timer_loop() -> None:
                 # Queue "fertig" prüfen – erst NACH dem Entfernen abgelaufener Zonen,
                 # damit active_runs den aktuellen (korrekten) Zustand widerspiegelt.
                 if state.queue_state == "läuft":
-                    if (not state.queue) and not (state.active_runs and len(state.active_runs) > 0):
+                    no_active = not (state.active_runs and len(state.active_runs) > 0)
+                    no_queue  = not state.queue
+
+                    if no_queue and no_active:
+                        # Normale Beendigung: alle Items abgearbeitet, nichts mehr übrig.
                         state.queue_state = "fertig"
+                        state.queue_priority_mode = False   # Sicherheits-Reset
                         state.queue_dirty = True
                         log_event(
                             "queue_finished",
@@ -278,6 +290,27 @@ def timer_loop() -> None:
                             parallel_enabled=state.parallel_enabled,
                             max_concurrent_valves=state.max_concurrent_valves,
                         )
+                    elif state.queue_priority_mode and no_active and not no_queue:
+                        # Prioritätsmodus beendet: alle priority-Items abgearbeitet,
+                        # restliche Items warten in der Queue auf manuellen Start.
+                        #
+                        # WICHTIG: Diese Bedingung darf nur feuern wenn das NÄCHSTE
+                        # Item in der Queue kein priority-Item ist. Sonst würde der
+                        # timer_loop nach jeder abgeschlossenen Zone stoppen – auch
+                        # wenn noch priority-Items (z.B. vom zweiten Sensor) in der
+                        # Queue warten. Beispiel: queue=[s1(True), s2(True), manual(False)]
+                        # – nach s1 fertig: no_active=True, queue nicht leer, aber
+                        # queue[0]=s2(True) → NICHT stoppen, s2 muss noch laufen.
+                        if not state.queue[0].priority:
+                            state.queue_state = "bereit"
+                            state.queue_priority_mode = False
+                            state.queue_dirty = True
+                            log_event(
+                                "queue_priority_done",
+                                source="system",
+                                remaining_items=len(state.queue or []),
+                                parallel_enabled=state.parallel_enabled,
+                            )
 
             # ──────────────────────────────────────────────────────────────
             # SCHRITT 6: Notfall close_all (ohne Lock, via io_worker)

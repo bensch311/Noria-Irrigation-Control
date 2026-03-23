@@ -29,6 +29,18 @@ Auslöse-Bedingungen (alle müssen erfüllt sein):
   6. Zone nicht bereits in Queue (beliebige Quelle)
   7. Queue nicht voll (DoS-Schutz, MAX_QUEUE_ITEMS)
 
+Queue-Strategie (vier Fälle):
+  Fall 1 – Queue leer:             Items anhängen, Queue starten (normale Abarbeitung).
+  Fall 2 – Queue läuft, kein PM:   Items hinten anhängen, laufen mit durch.
+  Fall 2b– Queue läuft, PM aktiv:  Items mit priority=True nach letztem priority-Item
+                                    einfügen (vor non-priority Items). Ohne diesen Fall
+                                    würden neue Sensor-Items hinter non-priority Items
+                                    landen und nie vom timer_loop gestartet werden.
+  Fall 3 – Queue befüllt, idle:    Items vorne einstellen (priority=True),
+                                    queue_priority_mode=True setzen. timer_loop
+                                    stoppt nach Sensor-Items → Queue → "bereit".
+  (PM = queue_priority_mode)
+
 Cooldown-Logik:
   Der Cooldown gilt pro Sensor (nicht pro Zone). Wenn ein Sensor feuert, werden
   alle zugeordneten Zonen eingestellt und der Sensor-Cooldown startet. Erst nach
@@ -214,7 +226,66 @@ def sensor_engine_loop():
                 items_to_queue, _ = _process_sensor_cycle_locked(readings, now_m)
                 if items_to_queue:
                     state.queue = state.queue or []
-                    state.queue.extend(items_to_queue)
+
+                    # Drei-Fall-Strategie für Sensor-ausgelöste Queue-Einträge:
+                    #
+                    # Fall 1 – Queue leer:
+                    #   Items anhängen, Queue starten. Normale Abarbeitung bis Ende.
+                    #
+                    # Fall 2 – Queue läuft bereits ("läuft"):
+                    #   Items hinten anhängen. Laufen einfach mit durch.
+                    #   Kein Eingriff in laufende Prozesse.
+                    #
+                    # Fall 3 – Queue hat Einträge, ist aber nicht gestartet:
+                    #   Items vorne einstellen (priority=True), Queue starten.
+                    #   timer_loop stoppt nach Abarbeitung aller priority-Items
+                    #   (queue_priority_mode=True) – restliche Items bleiben im
+                    #   Zustand "bereit" und warten auf manuellen Start.
+
+                    queue_had_items  = bool(state.queue)
+                    queue_is_running = (state.queue_state == "läuft")
+
+                    if queue_had_items and not queue_is_running:
+                        # Fall 3: Sensor-Items als Priorität vorne einstellen
+                        for item in items_to_queue:
+                            item.priority = True
+                        state.queue = items_to_queue + state.queue
+                        state.queue_priority_mode = True
+                        log_event(
+                            "sensor_queue_priority_prepend",
+                            source="sensor",
+                            items_prepended=len(items_to_queue),
+                            queue_length_after=len(state.queue),
+                        )
+                    elif queue_had_items and state.queue_priority_mode:
+                        # Fall 2b: Queue läuft bereits im Prioritätsmodus.
+                        # Ein früherer Trigger (Sensor oder Zeitplan) hat Items mit
+                        # priority=True vorne eingestellt; der timer_loop stoppt sobald
+                        # das erste priority=False Item erreicht wird.
+                        # Neue Sensor-Items müssen deshalb ebenfalls priority=True erhalten
+                        # und NACH dem letzten vorhandenen priority-Item eingefügt werden –
+                        # sonst landen sie hinter non-priority Items und werden nie gestartet,
+                        # weil timer_loop dort abbricht.
+                        for item in items_to_queue:
+                            item.priority = True
+                        # Einfügeposition: direkt nach dem letzten priority=True Item
+                        # (= Index des ersten priority=False Items, oder Ende der Queue)
+                        insert_pos = next(
+                            (i for i, x in enumerate(state.queue) if not x.priority),
+                            len(state.queue),
+                        )
+                        state.queue[insert_pos:insert_pos] = items_to_queue
+                        log_event(
+                            "sensor_queue_priority_insert",
+                            source="sensor",
+                            items_inserted=len(items_to_queue),
+                            insert_pos=insert_pos,
+                            queue_length_after=len(state.queue),
+                        )
+                    else:
+                        # Fall 1 (leere Queue) oder Fall 2 (Queue läuft, kein Prioritätsmodus)
+                        state.queue.extend(items_to_queue)
+
                     state.queue_dirty = True
                     if state.queue_state in ("bereit", "fertig"):
                         state.queue_state = "läuft"
