@@ -111,6 +111,7 @@ def reset_global_state() -> None:
         # Sensor-Laufzeitdaten und Zuordnung initialisieren.
         state.sensor_readings = {}
         state.sensor_last_triggered = {}
+        state.sensor_pending_zones = {}
         if state.sensor_zone_assignments is None:
             state.sensor_zone_assignments = {}
 

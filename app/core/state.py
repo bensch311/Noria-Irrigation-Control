@@ -77,6 +77,16 @@ class QueueItem:
     # Wird NICHT persistiert – nach Neustart behandelt timer_loop alle Items normal.
     priority: bool = False
 
+    # Sensor-ID die dieses Item ausgelöst hat (nur gesetzt wenn source="sensor").
+    # Wird in engine.py start_valve() COMMIT-Phase genutzt um:
+    #   1. sensor_last_triggered[sensor_id] auf den tatsächlichen Ventilstart-Zeitpunkt
+    #      zu setzen (Cooldown startet erst wenn das Ventil wirklich läuft, nicht schon
+    #      beim Einreihen in die Queue).
+    #   2. die Zone aus sensor_pending_zones[sensor_id] zu entfernen.
+    # Wird NICHT persistiert – nach Neustart ist die Sensor-Zuordnung nicht
+    # rekonstruierbar; timer_loop behandelt alle Items dann ohne Sensor-Tracking.
+    sensor_id: Optional[int] = None
+
 
 @dataclass
 class ScheduleRule:
@@ -128,7 +138,7 @@ class RunState:
                                 sensor_cooldown_s, sensor_default_duration_s
       - Sensor-Betriebsparameter: sensor_settings_by_id (pro Sensor: cooldown_s, duration_s)
       - Sensor-Zuordnung:       sensor_zone_assignments (sensor_id → [zone, ...])
-      - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered
+      - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered, sensor_pending_zones
       - User-Settings:          max_history_items, navbar_title, accent_color, …
       - Hard-Limits:            hard_max_runtime_s, hard_max_concurrent_valves
       - Neustart-Erkennung:     unclean_restart, restart_detected_at
@@ -233,10 +243,28 @@ class RunState:
     #                        {sensor_id: needs_irrigation} – True = trocken.
     sensor_readings: Dict[int, bool] | None = None
 
-    # sensor_last_triggered: Monotonic-Timestamp des letzten sensor-getriggerten
-    #                        Laufstarts pro Sensor. Für Cooldown-Berechnung.
+    # sensor_last_triggered: Monotonic-Timestamp des letzten tatsächlichen
+    #                        Ventilstarts pro Sensor (gesetzt in engine.py
+    #                        start_valve COMMIT-Phase, NICHT beim Einreihen in
+    #                        die Queue). Für Cooldown-Berechnung.
     #                        None = noch kein Trigger seit Start.
     sensor_last_triggered: Dict[int, float] | None = None
+
+    # sensor_pending_zones:  Zonen, die von einem Sensor in die Queue gestellt
+    #                        wurden, aber noch nicht tatsächlich gestartet sind.
+    #                        {sensor_id: set(zone, ...)}
+    #
+    #                        Dient als Sperrmechanismus: solange noch Zonen eines
+    #                        Sensors in der Queue oder in active_runs warten, wird
+    #                        derselbe Sensor nicht erneut ausgelöst – unabhängig
+    #                        davon, ob der Cooldown bereits abgelaufen wäre. Damit
+    #                        startet die Cooldown-Zeit erst ab dem tatsächlichen
+    #                        Ventilstart, nicht schon ab dem Einreihen in die Queue.
+    #
+    #                        Wird beim Ventilstart (engine.py COMMIT) bereinigt.
+    #                        None = noch nicht initialisiert (lazy in sensor_engine).
+    #                        Nicht persistiert – nach Neustart leer (Zonen ebenfalls weg).
+    sensor_pending_zones: Dict[int, set] | None = None
 
     # ── User-Settings (aus user_settings.json) ────────────────────────────────
     max_history_items: int = 20

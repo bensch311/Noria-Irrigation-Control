@@ -22,11 +22,21 @@ Concurrency-Modell (Prepare / Execute / Commit):
   Hardware-Operationen (GPIO) laufen ausschließlich über den io_worker-Thread.
   Der state_lock wird NIE während eines Hardware-Calls gehalten, um Deadlocks
   und Lock-Contention zu vermeiden.
+
+Sensor-Cooldown-Tracking:
+  Wenn start_valve() mit sensor_id aufgerufen wird (nur via start_queue_item),
+  setzt die COMMIT-Phase:
+    1. state.sensor_last_triggered[sensor_id] = started_at
+       (Cooldown-Messung beginnt zum tatsächlichen Ventilstart-Zeitpunkt)
+    2. Entfernt die Zone aus state.sensor_pending_zones[sensor_id]
+       (gibt den Slot frei sobald das Ventil läuft)
+  Damit startet die Cooldown-Zeit erst bei realem Bewässerungsbeginn,
+  nicht schon beim Einreihen in die Queue.
 """
 
 import time
 import math
-from typing import Dict
+from typing import Dict, Optional
 from fastapi import HTTPException
 
 from core.state import state, state_lock, ActiveRun, QueueItem, HistoryItem
@@ -157,7 +167,13 @@ def _calc_actual_run_s_ar(ar: ActiveRun, now_m: float) -> int:
 
 # ==================== REFACTORED: PREPARE-EXECUTE-COMMIT ====================
 
-def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
+def start_valve(
+    zone: int,
+    duration_s: int,
+    time_unit: str,
+    source: str,
+    sensor_id: Optional[int] = None,
+):
     """Startet ein Ventil via IO-Worker mit Prepare-Execute-Commit Pattern.
 
     WICHTIG: Diese Funktion muss OHNE state_lock aufgerufen werden!
@@ -172,7 +188,11 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
         zone:       Zonen-Nummer (1..MAX_VALVES)
         duration_s: Laufzeit in Sekunden
         time_unit:  Anzeigeeinheit ("Sekunden" | "Minuten")
-        source:     Ursprung ("manual" | "queue" | "schedule")
+        source:     Ursprung ("manual" | "queue" | "schedule" | "sensor")
+        sensor_id:  Sensor-ID die dieses Ventil ausgelöst hat (nur wenn
+                    source="sensor", sonst None). Wird in der COMMIT-Phase
+                    genutzt um sensor_last_triggered zu setzen und die Zone
+                    aus sensor_pending_zones zu entfernen.
 
     Raises:
         HTTPException 409: Zone läuft bereits, parallele Kapazität erschöpft
@@ -277,6 +297,23 @@ def start_valve(zone: int, duration_s: int, time_unit: str, source: str):
             started_planned_s=int(duration_s),
         )
 
+        # Sensor-Cooldown-Tracking: Cooldown-Timestamp setzen und Zone aus
+        # Pending-Liste entfernen. Dies geschieht bewusst hier (beim echten
+        # Ventilstart), NICHT beim Einreihen in die Queue – damit verbraucht
+        # ein langer Queue-Rückstau die Cooldown-Zeit nicht vorzeitig.
+        # sensor_last_triggered wird bei jedem Ventilstart des Sensors aktualisiert
+        # (also auch beim 2. und 3. Ventil eines Sensor-Triggers), sodass der
+        # Cooldown immer vom zuletzt gestarteten Ventil dieses Triggers gemessen wird.
+        if sensor_id is not None:
+            if state.sensor_last_triggered is None:
+                state.sensor_last_triggered = {}
+            if state.sensor_pending_zones is None:
+                state.sensor_pending_zones = {}
+            state.sensor_last_triggered[sensor_id] = context["started_at"]
+            pending = state.sensor_pending_zones.get(sensor_id)
+            if pending is not None:
+                pending.discard(zone)
+
         log_event(
             "valve_start",
             source=source,
@@ -296,7 +333,7 @@ def start_queue_item(item: QueueItem):
     """Startet ein Queue-Item.
 
     Wrapper um start_valve() – stellt sicher dass das Argument-Mapping
-    konsistent bleibt.
+    konsistent bleibt, inklusive der Sensor-ID für Cooldown-Tracking.
 
     WICHTIG: Muss OHNE state_lock aufgerufen werden!
     """
@@ -305,6 +342,7 @@ def start_queue_item(item: QueueItem):
         duration_s=item.duration,
         time_unit=item.time_unit,
         source=item.source,
+        sensor_id=item.sensor_id,   # None wenn nicht sensor-ausgelöst
     )
 
 

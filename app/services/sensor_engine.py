@@ -23,11 +23,17 @@ Auslöse-Bedingungen (alle müssen erfüllt sein):
   1. Sensor meldet needs_irrigation=True
   2. Sensor hat mindestens eine Zonen-Zuordnung
   3. Kein Hardware-Fault aktiv (hw_faulted=False)
-  4. Cooldown abgelaufen (sensor_last_triggered[sensor_id] + sensor_cooldown_s < now)
+  4. Keine ausstehenden Zonen dieses Sensors in Queue oder active_runs
+     (sensor_pending_zones: verhindert Neu-Trigger während ein laufender
+     Trigger noch nicht vollständig abgearbeitet ist)
+  5. Cooldown abgelaufen (sensor_last_triggered[sensor_id] + sensor_cooldown_s < now)
+     Hinweis: sensor_last_triggered wird erst beim tatsächlichen Ventilstart
+     gesetzt (engine.py COMMIT), NICHT beim Einreihen in die Queue. Damit
+     startet die Cooldown-Messung erst ab dem realen Bewässerungsbeginn.
   Pro zugeordneter Zone zusätzlich:
-  5. Zone nicht bereits aktiv (nicht in active_runs)
-  6. Zone nicht bereits in Queue (beliebige Quelle)
-  7. Queue nicht voll (DoS-Schutz, MAX_QUEUE_ITEMS)
+  6. Zone nicht bereits aktiv (nicht in active_runs)
+  7. Zone nicht bereits in Queue (beliebige Quelle)
+  8. Queue nicht voll (DoS-Schutz, MAX_QUEUE_ITEMS)
 
 Queue-Strategie (vier Fälle):
   Fall 1 – Queue leer:             Items anhängen, Queue starten (normale Abarbeitung).
@@ -42,9 +48,15 @@ Queue-Strategie (vier Fälle):
   (PM = queue_priority_mode)
 
 Cooldown-Logik:
-  Der Cooldown gilt pro Sensor (nicht pro Zone). Wenn ein Sensor feuert, werden
-  alle zugeordneten Zonen eingestellt und der Sensor-Cooldown startet. Erst nach
-  Ablauf des Cooldowns kann derselbe Sensor erneut Zonen in die Queue stellen.
+  Der Cooldown gilt pro Sensor (nicht pro Zone). Er wird NICHT beim Einreihen
+  in die Queue gestartet, sondern erst wenn das Ventil tatsächlich öffnet
+  (engine.py start_valve COMMIT-Phase). Solange Zonen eines Sensors in der
+  Queue warten oder aktiv laufen (sensor_pending_zones), ist ein Neu-Trigger
+  gesperrt – auch wenn der Cooldown theoretisch bereits abgelaufen wäre.
+
+  Damit wird verhindert, dass ein langer Queue-Rückstau die Cooldown-Zeit
+  "vorverbraucht" und nach dem eigentlichen Lauf ein sofortiger Neu-Trigger
+  folgt.
 
 Naming-Konvention:
   _process_sensor_cycle_locked() MUSS unter state_lock aufgerufen werden.
@@ -74,6 +86,8 @@ def _process_sensor_cycle_locked(
         state.sensor_readings = {}
     if state.sensor_last_triggered is None:
         state.sensor_last_triggered = {}
+    if state.sensor_pending_zones is None:
+        state.sensor_pending_zones = {}
 
     # Globale Fallback-Werte (aus device_config.json, statisch pro Restart).
     # Werden verwendet wenn kein per-Sensor-Setting in sensor_settings_by_id vorhanden.
@@ -118,7 +132,25 @@ def _process_sensor_cycle_locked(
             log_event("sensor_skip_hw_faulted", source="sensor", sensor_id=sensor_id)
             continue
 
-        # Bedingung 4: Cooldown pro Sensor
+        # Bedingung 4: Ausstehende Zonen dieses Sensors
+        # Solange Zonen, die von diesem Sensor ausgelöst wurden, noch in der
+        # Queue warten oder aktiv laufen, ist ein Neu-Trigger gesperrt.
+        # Der Cooldown-Timestamp (sensor_last_triggered) wird erst beim
+        # tatsächlichen Ventilstart gesetzt (engine.py COMMIT), nicht hier.
+        # Damit "verbraucht" ein langer Queue-Rückstau die Cooldown-Zeit nicht
+        # vorzeitig und es kommt zu keiner Doppelbewässerung nach dem Lauf.
+        pending_for_sensor = state.sensor_pending_zones.get(sensor_id, set())
+        still_pending      = pending_for_sensor & (queue_zones | active_zones)
+        if still_pending:
+            log_event(
+                "sensor_skip_zones_pending",
+                source="sensor",
+                sensor_id=sensor_id,
+                pending_zones=sorted(still_pending),
+            )
+            continue
+
+        # Bedingung 5: Cooldown pro Sensor
         last_triggered = state.sensor_last_triggered.get(sensor_id, 0.0)
         elapsed = now_m - last_triggered
         if elapsed < cooldown_s:
@@ -154,13 +186,18 @@ def _process_sensor_cycle_locked(
                 duration=default_duration_s,
                 time_unit="Sekunden",
                 source="sensor",
+                sensor_id=sensor_id,   # Sensor-ID für Cooldown-Tracking in start_valve
             ))
             queue_zones.add(zone)
             zones_queued.append(zone)
 
         if zones_queued:
-            # Cooldown-Timestamp NUR setzen wenn mindestens eine Zone eingestellt wurde
-            state.sensor_last_triggered[sensor_id] = now_m
+            # Zonen als ausstehend markieren: der Cooldown (sensor_last_triggered)
+            # wird NICHT hier gesetzt, sondern erst beim tatsächlichen Ventilstart
+            # in engine.py start_valve COMMIT-Phase. Solange Zonen in
+            # sensor_pending_zones eingetragen sind UND sich noch in Queue oder
+            # active_runs befinden, ist ein Neu-Trigger für diesen Sensor gesperrt.
+            state.sensor_pending_zones.setdefault(sensor_id, set()).update(zones_queued)
             log_event(
                 "sensor_trigger",
                 source="sensor",

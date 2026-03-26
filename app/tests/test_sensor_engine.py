@@ -7,12 +7,16 @@ Getestet werden:
     - Trockener Sensor mit Zuordnung → Items für alle zugeordneten Zonen
     - Trockener Sensor ohne Zuordnung → kein Item (sensor_skip_no_assignment)
     - Cooldown pro Sensor: blockiert; nach Ablauf: feuert
+    - Pending-Zones-Sperre: Sensor blockiert solange eigene Zonen in Queue/active_runs
     - Zone bereits aktiv → wird übersprungen, andere Zonen laufen durch
     - Zone bereits in Queue → wird übersprungen
     - hw_faulted → alle Sensoren blockiert
     - Queue-Limit → weitere Items werden übersprungen
     - sensor_readings State-Update immer (auch bei Skip)
-    - sensor_last_triggered NUR gesetzt wenn >= 1 Zone eingestellt
+    - sensor_last_triggered NICHT in _process_sensor_cycle_locked gesetzt
+      (erst in engine.py start_valve COMMIT-Phase)
+    - sensor_pending_zones wird beim Trigger befüllt
+    - sensor_id wird in QueueItem gesetzt
     - Mehrere Sensoren: unabhängig voneinander
   - _read_all_sensors  (Fehlerresistenz)
 """
@@ -168,18 +172,27 @@ class TestCooldown:
         items, _ = _run_cycle([_make_reading(1, True)])
         assert len(items) == 1
 
-    def test_last_triggered_set_on_successful_queue(self):
+    def test_last_triggered_NOT_set_by_process_cycle(self):
+        """_process_sensor_cycle_locked setzt sensor_last_triggered NICHT mehr.
+
+        Der Cooldown-Timestamp wird erst beim tatsächlichen Ventilstart gesetzt
+        (engine.py start_valve COMMIT-Phase), damit ein langer Queue-Rückstau
+        die Cooldown-Zeit nicht vorzeitig verbraucht.
+        """
         now_m = time.monotonic()
         _set_assignments({1: [1]})
         with state_lock:
             state.sensor_last_triggered = {}
         _run_cycle([_make_reading(1, True)], now_m=now_m)
         with state_lock:
-            assert abs(state.sensor_last_triggered.get(1, -1) - now_m) < 0.01
+            # Sensor hat Zonen in die Queue gestellt, aber last_triggered bleibt leer –
+            # erst start_valve (COMMIT) setzt den Timestamp beim Ventilöffnen.
+            assert 1 not in state.sensor_last_triggered
 
     def test_last_triggered_NOT_set_when_all_zones_skipped(self):
         """Wenn alle Zonen des Sensors übersprungen werden (z.B. alle aktiv),
-        darf sensor_last_triggered NICHT gesetzt werden."""
+        darf sensor_last_triggered NICHT gesetzt werden.
+        Gilt nach wie vor: _process_sensor_cycle_locked setzt last_triggered nie."""
         now_m = time.monotonic()
         _set_assignments({1: [1]})
         with state_lock:
@@ -219,6 +232,202 @@ class TestCooldown:
         zones = {i.zone for i in items}
         assert 1 not in zones  # Sensor 1 blockiert
         assert 2 in zones      # Sensor 2 durchgelassen
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pending-Zones-Sperre (neu: Cooldown startet erst beim Ventilstart)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPendingZonesBlock:
+    """Sensor-Sperre über sensor_pending_zones.
+
+    Solange Zonen, die von einem Sensor ausgelöst wurden, noch in der Queue
+    warten oder aktiv laufen, darf derselbe Sensor nicht erneut feuern –
+    unabhängig davon, ob der Cooldown bereits abgelaufen wäre.
+
+    Dies ist der Kern-Fix für das Doppelbewässerungs-Problem: War die Queue
+    voll und lief der Cooldown ab während Zonen noch warteten, konnte der
+    Sensor sofort nach dem Lauf erneut triggern. Jetzt startet der Cooldown
+    erst beim tatsächlichen Ventilstart (engine.py COMMIT).
+    """
+
+    def test_sensor_blocked_while_own_zone_in_queue(self):
+        """Sensor hat Zone in Queue → Neu-Trigger gesperrt, auch wenn kein Cooldown."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0           # kein Cooldown
+            state.sensor_last_triggered = {}
+            state.sensor_pending_zones  = {1: {1}}  # Zone 1 durch Sensor 1 eingestellt
+            state.queue = [QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                                     source="sensor", sensor_id=1)]
+        items, _ = _run_cycle([_make_reading(1, True)])
+        # Sensor 1 hat Zone 1 noch pending → gesperrt
+        assert items == []
+
+    def test_sensor_blocked_while_own_zone_in_active_runs(self):
+        """Zone ist aus Queue gestartet (active_runs) → Sensor immer noch gesperrt."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_last_triggered = {}
+            state.sensor_pending_zones  = {1: {1}}  # Zone 1 noch als pending markiert
+            state.active_runs = {
+                1: ActiveRun(zone=1, end_time=now_m+60, time_unit="Sekunden",
+                             started_at=now_m, started_source="sensor",
+                             started_planned_s=60)
+            }
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        assert items == []
+
+    def test_sensor_allowed_when_pending_zones_cleared(self):
+        """Sobald keine eigenen Zonen mehr pending/aktiv → Sensor darf wieder feuern."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_last_triggered = {}
+            # Pending-Set vorhanden, aber Zone 1 ist nicht mehr in Queue/active_runs
+            state.sensor_pending_zones = {1: {1}}
+            state.queue = []       # Zone 1 wurde bereits abgearbeitet
+            state.active_runs = {}
+        items, _ = _run_cycle([_make_reading(1, True)])
+        # Keine aktiven Pending-Zonen → Sensor kann erneut feuern
+        assert len(items) == 1
+
+    def test_pending_check_uses_only_own_sensor_zones(self):
+        """Sensor 2 wird nicht durch Pending-Zonen von Sensor 1 blockiert."""
+        _set_assignments({1: [1], 2: [2]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_last_triggered = {}
+            state.sensor_pending_zones  = {1: {1}}  # Sensor 1 hat Zone 1 pending
+            state.queue = [QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                                     source="sensor", sensor_id=1)]
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        zones = {i.zone for i in items}
+        # Sensor 1 blockiert (eigene Pending-Zone), Sensor 2 frei
+        assert 1 not in zones
+        assert 2 in zones
+
+    def test_manual_active_zone_does_not_block_sensor_for_other_zones(self):
+        """Zone 1 läuft manuell → Sensor 1 darf Zone 2 noch in Queue stellen.
+
+        sensor_pending_zones ist leer (Sensor hat nie gefeuert), also greift
+        die Pending-Sperre nicht. Zone 2 wird eingestellt, Zone 1 übersprungen.
+        """
+        now_m = time.monotonic()
+        _set_assignments({1: [1, 2]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_last_triggered = {}
+            state.sensor_pending_zones  = {}  # keine Sensor-eigenen Pending-Zonen
+            state.active_runs = {
+                1: ActiveRun(zone=1, end_time=now_m+60, time_unit="Sekunden",
+                             started_at=now_m, started_source="manual",
+                             started_planned_s=60)
+            }
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        zones = {i.zone for i in items}
+        # Zone 1 aktiv (übersprungen), Zone 2 frei → eingereihtt
+        assert 1 not in zones
+        assert 2 in zones
+
+    def test_pending_zones_populated_on_trigger(self):
+        """Nach einem erfolgreichen Trigger enthält sensor_pending_zones die Zonen."""
+        _set_assignments({1: [1, 2]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_pending_zones = {}
+        _run_cycle([_make_reading(1, True)])
+        with state_lock:
+            pending = state.sensor_pending_zones.get(1, set())
+        assert 1 in pending
+        assert 2 in pending
+
+    def test_pending_zones_not_populated_when_all_zones_skipped(self):
+        """Wenn alle Zonen übersprungen werden, bleibt sensor_pending_zones leer."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_pending_zones = {}
+            state.active_runs = {
+                1: ActiveRun(zone=1, end_time=now_m+60, time_unit="Sekunden",
+                             started_at=now_m, started_source="manual",
+                             started_planned_s=60)
+            }
+        _run_cycle([_make_reading(1, True)], now_m=now_m)
+        with state_lock:
+            pending = state.sensor_pending_zones.get(1, set())
+        assert len(pending) == 0
+
+    def test_cooldown_expired_but_pending_zone_still_blocks(self):
+        """Kernfall: Cooldown ist abgelaufen, Zone ist aber noch in Queue → gesperrt.
+
+        Dies reproduziert das ursprüngliche Doppelbewässerungs-Problem:
+        Ohne den Fix konnte ein Sensor nach Ablauf des Cooldowns erneut feuern,
+        obwohl die erste Trigger-Runde noch nicht vollständig abgearbeitet war.
+        """
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 600
+            # Simuliere: Cooldown wurde irgendwann in der Vergangenheit gesetzt
+            # und ist jetzt abgelaufen – aber Zone 1 ist noch in Queue
+            state.sensor_last_triggered = {1: now_m - 700.0}  # Cooldown abgelaufen
+            state.sensor_pending_zones  = {1: {1}}
+            state.queue = [QueueItem(zone=1, duration=600, time_unit="Sekunden",
+                                     source="sensor", sensor_id=1)]
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        # Trotz abgelaufenem Cooldown: Pending-Zone blockiert Neu-Trigger
+        assert items == []
+
+    def test_sensor_can_fire_after_pending_zone_runs_and_cooldown_expires(self):
+        """Nach Ablauf aller Pending-Zonen und Cooldown ist Sensor wieder frei."""
+        now_m = time.monotonic()
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 600
+            # Ventil hat bereits gelaufen: last_triggered gesetzt, pending leer,
+            # keine aktiven Läufe, keine Queue-Einträge
+            state.sensor_last_triggered = {1: now_m - 700.0}  # Cooldown abgelaufen
+            state.sensor_pending_zones  = {1: set()}           # leer = alles erledigt
+            state.queue = []
+            state.active_runs = {}
+        items, _ = _run_cycle([_make_reading(1, True)], now_m=now_m)
+        assert len(items) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sensor_id in QueueItem
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSensorIdInQueueItem:
+    """Sensor-ausgelöste QueueItems tragen die sensor_id des auslösenden Sensors.
+
+    Diese ID wird in engine.py start_valve COMMIT-Phase genutzt um
+    sensor_last_triggered zu setzen und die Zone aus sensor_pending_zones
+    zu entfernen.
+    """
+
+    def test_queued_items_carry_sensor_id(self):
+        """Alle Items, die Sensor 1 auslöst, haben sensor_id=1."""
+        _set_assignments({1: [1, 2, 3]})
+        items, _ = _run_cycle([_make_reading(1, True)])
+        assert all(i.sensor_id == 1 for i in items)
+
+    def test_sensor_id_matches_triggering_sensor(self):
+        """Zwei Sensoren feuern; Items haben jeweils die richtige sensor_id."""
+        _set_assignments({1: [1], 2: [2]})
+        items, _ = _run_cycle([_make_reading(1, True), _make_reading(2, True)])
+        by_zone = {i.zone: i.sensor_id for i in items}
+        assert by_zone[1] == 1
+        assert by_zone[2] == 2
+
+    def test_sensor_id_none_for_non_sensor_items(self):
+        """QueueItems die nicht von Sensor stammen, haben sensor_id=None."""
+        item = QueueItem(zone=1, duration=60, time_unit="Sekunden", source="manual")
+        assert item.sensor_id is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +530,19 @@ class TestLogging:
             _run_cycle([_make_reading(1, True)], now_m=now_m)
         events = [c.args[0] for c in mock_log.call_args_list if c.args]
         assert "sensor_skip_cooldown" in events
+
+    def test_pending_zones_skip_logged(self):
+        """sensor_skip_zones_pending wird geloggt wenn Pending-Zonen Trigger sperren."""
+        _set_assignments({1: [1]})
+        with state_lock:
+            state.sensor_cooldown_s = 0
+            state.sensor_pending_zones = {1: {1}}
+            state.queue = [QueueItem(zone=1, duration=60, time_unit="Sekunden",
+                                     source="sensor", sensor_id=1)]
+        with patch("services.sensor_engine.log_event") as mock_log:
+            _run_cycle([_make_reading(1, True)])
+        events = [c.args[0] for c in mock_log.call_args_list if c.args]
+        assert "sensor_skip_zones_pending" in events
 
 
 # ─────────────────────────────────────────────────────────────────────────────
