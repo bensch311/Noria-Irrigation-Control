@@ -385,6 +385,23 @@ def set_sensor_driver(driver: BaseSensorDriver) -> None:
     )
 
 
+def cleanup_sensor_driver_if_initialized() -> None:
+    """Gibt Hardware-Ressourcen des Sensor-Drivers frei, falls er initialisiert wurde.
+
+    Sicherere Alternative zu get_sensor_driver().cleanup() im Shutdown-Pfad:
+    Wenn _sensor_driver None ist (kein Sensor konfiguriert → sensor_engine_loop
+    hat get_sensor_driver() nie aufgerufen), wird KEIN neuer Driver instantiiert.
+    Das verhindert eine unbeabsichtigte Lazy-Initialisierung beim Shutdown, die
+    im rpi_switch-Modus einen gpiochip-Handle öffnen und sofort wieder schließen
+    würde – unnötig und irreführend im Log.
+
+    Wirft Exceptions durch (lifecycle.py fängt sie).
+    """
+    if _sensor_driver is None:
+        return
+    _sensor_driver.cleanup()
+
+
 def _read_sensor_settings_from_state() -> dict[str, Any]:
     """Liest Sensor-Driver-Settings aus dem globalen State.
 

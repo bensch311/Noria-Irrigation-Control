@@ -36,6 +36,7 @@ from services.sensor_driver import (
     get_sensor_driver,
     reset_sensor_driver,
     set_sensor_driver,
+    cleanup_sensor_driver_if_initialized,
 )
 from core.state import state, state_lock
 
@@ -627,3 +628,92 @@ class TestGetSensorDriver:
         assert len(fallback_events) == 1
         assert fallback_events[0].kwargs.get("level") == "warning"
         reset_sensor_driver()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cleanup_sensor_driver_if_initialized
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCleanupSensorDriverIfInitialized:
+    """
+    Testet cleanup_sensor_driver_if_initialized().
+
+    Kernaussage: Die Funktion ruft cleanup() NUR auf wenn _sensor_driver nicht
+    None ist. Ist er None (Driver wurde im Run nie benutzt), passiert gar nichts –
+    kein Lazy-Init, kein Log, keine Exception.
+    """
+
+    def setup_method(self):
+        """Vor jedem Test Singleton zurücksetzen."""
+        reset_sensor_driver()
+
+    def teardown_method(self):
+        """Nach jedem Test Singleton zurücksetzen."""
+        reset_sensor_driver()
+
+    def test_noop_when_driver_not_initialized(self):
+        """Wenn _sensor_driver None ist → kein Driver wird initialisiert."""
+        # Sicherstellen dass kein Driver existiert
+        reset_sensor_driver()
+
+        # cleanup_sensor_driver_if_initialized darf get_sensor_driver() NICHT aufrufen
+        with patch("services.sensor_driver.log_event") as mock_log:
+            cleanup_sensor_driver_if_initialized()
+
+        # Kein sensor_driver_init Event darf geloggt worden sein
+        init_events = [
+            c for c in mock_log.call_args_list
+            if c.args and "sensor_driver_init" in c.args[0]
+        ]
+        assert init_events == [], (
+            "cleanup_sensor_driver_if_initialized darf keinen Driver initialisieren"
+        )
+
+        # Singleton bleibt None – get_sensor_driver() würde jetzt neu initialisieren
+        import services.sensor_driver as sd_mod
+        assert sd_mod._sensor_driver is None
+
+    def test_calls_cleanup_on_sim_driver(self):
+        """Wenn SimSensorDriver gesetzt ist → cleanup() wird aufgerufen (no-op)."""
+        sim = SimSensorDriver()
+        sim.cleanup = MagicMock()  # Spy auf cleanup()
+        set_sensor_driver(sim)
+
+        cleanup_sensor_driver_if_initialized()
+
+        sim.cleanup.assert_called_once()
+
+    def test_calls_cleanup_on_rpi_driver(self):
+        """Wenn RpiGpioSwitchSensorDriver gesetzt ist → gpiochip_close wird aufgerufen."""
+        driver, lgpio_mock = _make_rpi_sensor_driver({1: 17})
+        set_sensor_driver(driver)
+
+        cleanup_sensor_driver_if_initialized()
+
+        lgpio_mock.gpiochip_close.assert_called_once_with(_TEST_HANDLE)
+
+    def test_does_not_reset_singleton_after_cleanup(self):
+        """Nach cleanup_sensor_driver_if_initialized bleibt der Singleton gesetzt.
+
+        Das ist erwartetes Verhalten: lifecycle.py ruft cleanup auf und danach
+        endet der Prozess. Der Singleton-Reset erfolgt beim nächsten Startup via
+        reset_sensor_driver() – nicht hier.
+        """
+        sim = SimSensorDriver()
+        set_sensor_driver(sim)
+
+        cleanup_sensor_driver_if_initialized()
+
+        import services.sensor_driver as sd_mod
+        assert sd_mod._sensor_driver is sim
+
+    def test_exception_in_cleanup_propagates(self):
+        """Exceptions aus cleanup() werden nicht verschluckt – lifecycle.py fängt sie."""
+        broken_driver = MagicMock(spec=BaseSensorDriver)
+        broken_driver.cleanup.side_effect = RuntimeError("GPIO kaputt")
+
+        import services.sensor_driver as sd_mod
+        sd_mod._sensor_driver = broken_driver
+
+        with pytest.raises(RuntimeError, match="GPIO kaputt"):
+            cleanup_sensor_driver_if_initialized()

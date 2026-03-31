@@ -423,9 +423,15 @@ async def lifespan(app: FastAPI):
     # Sensor-Driver: GPIO-Handle freigeben.
     # SimSensorDriver.cleanup() ist ein No-Op.
     # Sensor-Engine-Thread ist bereits gejoint (Schritt 5) → kein Use-after-Free.
+    # cleanup_sensor_driver_if_initialized() statt get_sensor_driver().cleanup():
+    # Wenn der Driver im gesamten Run nie initialisiert wurde (kein Sensor konfiguriert
+    # → sensor_engine_loop hat get_sensor_driver() nie aufgerufen), bleibt _sensor_driver
+    # None. get_sensor_driver().cleanup() würde hier einen neuen Driver lazy-initialisieren,
+    # nur um cleanup() darauf aufzurufen – unnötig, irreführend im Log und im rpi_switch-
+    # Modus würde ein gpiochip-Handle geöffnet und sofort wieder geschlossen.
     try:
-        from services.sensor_driver import get_sensor_driver
-        get_sensor_driver().cleanup()
+        from services.sensor_driver import cleanup_sensor_driver_if_initialized
+        cleanup_sensor_driver_if_initialized()
     except Exception as e:
         logger.exception("sensor driver cleanup failed")
         log_event(
