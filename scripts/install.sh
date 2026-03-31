@@ -706,8 +706,13 @@ cat > "$SYSTEMD_DIR/noria-backend.service" << EOF
 
 [Unit]
 Description=Noria Backend (FastAPI/uvicorn)
-After=network.target
-Wants=network.target
+# time-sync.target: Wartet auf die erste NTP-Synchronisation des Systemtakts.
+# Ohne RTC-Akku startet der Pi nach einem Stromausfall mit einer falschen Uhrzeit
+# (zuletzt gespeicherter Timestamp). Noria-Logs und Scheduler-Zeitpläne benötigen
+# eine korrekte Systemzeit. Wants= statt Requires= damit der Service auch ohne
+# Netzwerk/NTP startet (z.B. im Offline-Betrieb) – ordering bleibt erhalten.
+After=network.target time-sync.target
+Wants=network.target time-sync.target
 # Neustart-Limit: max. 5 Neustarts in 60s (verhindert Crash-Schleife)
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -865,6 +870,33 @@ else
     info "Kein Raspberry Pi Boot-Config gefunden – Hardware-Watchdog übersprungen"
     info "Aktiv: systemd-Prozess-Watchdog (WatchdogSec=30 im Service)"
 fi
+
+# ──── Persistentes systemd-Journal ───────────────────────────────────────────
+# Standard: journald schreibt in /run/log/journal (RAM → flüchtig, nach
+# Stromausfall weg). Mit Storage=persistent bleibt das Journal auf der SD-Karte
+# erhalten. Das ist für den Produktionsbetrieb unverzichtbar: Abstürze,
+# Boot-Fehler und systemd-Ereignisse (Restart-Ursachen!) sind sonst nicht
+# nachvollziehbar. SystemMaxUse begrenzt den Speicher (SD-Karte schonen).
+info "Richte persistentes systemd-Journal ein..."
+
+mkdir -p /var/log/journal
+
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/noria-journal.conf << 'JOURNAL_EOF'
+# Persistentes Journal für Noria
+# Generiert von scripts/install.sh – nicht manuell editieren.
+[Journal]
+# persistent: Journal auf Disk schreiben statt in RAM (/var/log/journal)
+Storage=persistent
+# Max. 50 MB für gesamtes Journal (SD-Karte schonen)
+SystemMaxUse=50M
+# Max. 5 MB pro Datei (journalctl bleibt schnell)
+SystemMaxFileSize=5M
+JOURNAL_EOF
+
+# Sofort wirksam – kein Neustart erforderlich
+systemctl restart systemd-journald
+success "Persistentes Journal konfiguriert (/var/log/journal, max. 50 MB)"
 
 # ──── Services aktivieren und starten ────────────────────────────────────────
 info "Services laden und aktivieren..."
