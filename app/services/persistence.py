@@ -18,7 +18,7 @@ Technische Eigenschaften:
     nie eine halbgeschriebene Zieldatei (crash-safe).
 
   Korrupte-Datei-Behandlung: Bei JSON-Parse-Fehler wird die korrupte Datei in
-    <name>.corrupt-<ts> umbenannt (max. CORRUPT_FILE_MAX_KEEP Backups),
+    <n>.corrupt-<ts> umbenannt (max. CORRUPT_FILE_MAX_KEEP Backups),
     und der State bleibt bei den Defaults/letzten bekannten Werten.
 
   Dirty-Flag-Mechanismus: Änderungen setzen state.*_dirty=True.
@@ -40,6 +40,7 @@ from core.state import state, state_lock, QueueItem, ScheduleRule, HistoryItem
 from core.config import (
     DATA_DIR, SCHEDULES_FILE, QUEUE_FILE, HISTORY_FILE,
     DEVICE_CONFIG_FILE, USER_SETTINGS_FILE, RUNTIME_STATE_FILE,
+    SENSOR_ASSIGNMENTS_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
     NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
     CORRUPT_FILE_MAX_KEEP,
@@ -115,6 +116,14 @@ def _default_device_config_payload() -> dict:
             "IRRIGATION_RELAY_ACTIVE_LOW": True,
             "IRRIGATION_GPIO_PINS": {},                # {"1": 17, ...} BCM
         },
+        "sensors": {
+            "IRRIGATION_SENSOR_DRIVER": "sim",         # sim | rpi_switch
+            "IRRIGATION_SENSOR_INTERNAL_PULL_UP": False,
+            "IRRIGATION_SENSOR_PINS": {},              # {"1": 24, ...} sensor_id: BCM-Pin
+            "IRRIGATION_SENSOR_POLLING_INTERVAL_S": 30,
+            "IRRIGATION_SENSOR_COOLDOWN_S": 600,
+            "IRRIGATION_SENSOR_DEFAULT_DURATION_S": 300,
+        },
         "hard_limits": {
             "MAX_RUNTIME_S": int(MAX_RUNTIME_S),
             "MAX_CONCURRENT_VALVES": int(MAX_CONCURRENT_VALVES),
@@ -174,6 +183,7 @@ def load_device_config_from_disk():
 
     dev = payload.get("device") if isinstance(payload.get("device"), dict) else {}
     hl = payload.get("hard_limits") if isinstance(payload.get("hard_limits"), dict) else {}
+    sens = payload.get("sensors") if isinstance(payload.get("sensors"), dict) else {}
 
     def _int(x, default):
         try:
@@ -181,6 +191,7 @@ def load_device_config_from_disk():
         except Exception:
             return default
 
+    # ── Ventil-Konfiguration ──────────────────────────────────────────────────
     max_valves = max(1, _int(dev.get("MAX_VALVES", MAX_VALVES), MAX_VALVES))
 
     drv = str(dev.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim").strip().lower()
@@ -201,10 +212,50 @@ def load_device_config_from_disk():
             except Exception:
                 continue
 
+    # ── Hard-Limits ───────────────────────────────────────────────────────────
     hard_max_runtime_s = max(1, _int(hl.get("MAX_RUNTIME_S", MAX_RUNTIME_S), MAX_RUNTIME_S))
     hard_max_conc = max(1, _int(hl.get("MAX_CONCURRENT_VALVES", MAX_CONCURRENT_VALVES), MAX_CONCURRENT_VALVES))
     hard_max_conc = min(hard_max_conc, max_valves)
 
+    # ── Sensor-Konfiguration ──────────────────────────────────────────────────
+    sensor_drv = str(
+        sens.get("IRRIGATION_SENSOR_DRIVER", "sim") or "sim"
+    ).strip().lower()
+    if sensor_drv not in ("sim", "rpi_switch"):
+        sensor_drv = "sim"
+
+    sensor_internal_pull_up = bool(
+        sens.get("IRRIGATION_SENSOR_INTERNAL_PULL_UP", False)
+    )
+
+    sensor_pins_raw = sens.get("IRRIGATION_SENSOR_PINS", {})
+    sensor_pins_norm: dict[int, int] = {}  # sensor_id → BCM-Pin
+    if isinstance(sensor_pins_raw, dict):
+        for k, v in sensor_pins_raw.items():
+            try:
+                sid = int(k)   # sensor_id, nicht zone
+                pin = int(v)
+                if sid >= 1:
+                    sensor_pins_norm[sid] = pin
+            except Exception:
+                continue
+
+    # Polling-Intervall: minimum 5s (geclampt im sensor_engine_loop, aber schon hier validiert)
+    sensor_polling_interval_s = max(
+        5, _int(sens.get("IRRIGATION_SENSOR_POLLING_INTERVAL_S", 30), 30)
+    )
+
+    # Cooldown: minimum 0s (kein negativer Cooldown möglich)
+    sensor_cooldown_s = max(
+        0, _int(sens.get("IRRIGATION_SENSOR_COOLDOWN_S", 600), 600)
+    )
+
+    # Standard-Laufzeit: minimum 1s
+    sensor_default_duration_s = max(
+        1, _int(sens.get("IRRIGATION_SENSOR_DEFAULT_DURATION_S", 300), 300)
+    )
+
+    # ── State aktualisieren ───────────────────────────────────────────────────
     with state_lock:
         state.max_valves = max_valves
         state.valve_driver_mode = drv
@@ -212,10 +263,22 @@ def load_device_config_from_disk():
         state.gpio_pins_by_zone = pins_norm
         state.hard_max_runtime_s = hard_max_runtime_s
         state.hard_max_concurrent_valves = hard_max_conc
+        state.sensor_driver_mode = sensor_drv
+        state.sensor_gpio_pins = sensor_pins_norm
+        state.sensor_internal_pull_up = sensor_internal_pull_up
+        state.sensor_polling_interval_s = sensor_polling_interval_s
+        state.sensor_cooldown_s = sensor_cooldown_s
+        state.sensor_default_duration_s = sensor_default_duration_s
 
     try:
         from services.valve_driver import reset_valve_driver
         reset_valve_driver()
+    except Exception:
+        pass
+
+    try:
+        from services.sensor_driver import reset_sensor_driver
+        reset_sensor_driver()
     except Exception:
         pass
 
@@ -364,6 +427,139 @@ def save_runtime_state_to_disk():
     payload["runtime"]["max_concurrent_valves"] = max_conc
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(RUNTIME_STATE_FILE, payload)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sensor_assignments (Sensor-Zonen-Zuordnung – via UI editierbar)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _default_sensor_assignments_payload() -> dict:
+    return {
+        "version": 1,
+        "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "assignments": {},  # {"1": [1, 2, 3], ...} sensor_id: [zone, ...]
+        "settings":    {},  # {"1": {"cooldown_s": 3600, "duration_s": 600}, ...}
+    }
+
+
+def _init_sensor_settings_defaults() -> dict[int, dict]:
+    """Gibt Default-Betriebsparameter für alle konfigurierten Sensoren zurück.
+
+    Liest sensor_gpio_pins aus state (muss unter state_lock sein ODER vor dem Lock
+    mit gelesenen Werten aufgerufen werden). Nutzt globale Defaults aus state.
+
+    WICHTIG: Muss OHNE state_lock aufgerufen werden wenn danach der Lock geholt wird,
+    oder MIT state_lock wenn der Lock bereits gehalten wird. Die Funktion holt den Lock
+    selbst NICHT – sie liest state-Werte direkt.
+
+    Aufgerufen aus load_sensor_assignments_from_disk() direkt vor dem state_lock-Block
+    oder als Hilfsfunktion innerhalb eines Lock-Blocks.
+    """
+    # Ohne Lock lesen – race-condition ist hier tolerierbar, da nur Defaults gesetzt werden.
+    # Worst case: ein leicht abweichender Default, der beim nächsten Speichern überschrieben wird.
+    pins        = dict(getattr(state, "sensor_gpio_pins", {}) or {})
+    cooldown_s  = max(0, int(getattr(state, "sensor_cooldown_s", 3600)))
+    duration_s  = max(1, int(getattr(state, "sensor_default_duration_s", 600)))
+    return {
+        sid: {"cooldown_s": cooldown_s, "duration_s": duration_s}
+        for sid in pins.keys()
+    }
+
+
+def load_sensor_assignments_from_disk():
+    """Lädt Sensor-Zonen-Zuordnung UND Sensor-Betriebsparameter aus sensor_assignments.json.
+
+    Fehlt die Datei (Erstinstallation) → leere Zuordnung, Defaults für Betriebsparameter.
+    Korrupte Datei → Backup + leere Zuordnung, Defaults.
+
+    Sensor-Betriebsparameter (cooldown_s, duration_s) werden pro Sensor geladen.
+    Für jeden Sensor der in state.sensor_gpio_pins konfiguriert ist, aber kein
+    gespeichertes Setting hat, werden globale Defaults verwendet (aus device_config.json,
+    bereits in state.sensor_cooldown_s / state.sensor_default_duration_s geladen).
+    """
+    if not os.path.exists(SENSOR_ASSIGNMENTS_FILE):
+        with state_lock:
+            state.sensor_zone_assignments  = {}
+            state.sensor_settings_by_id    = _init_sensor_settings_defaults()
+            state.sensor_assignments_dirty = False
+        return
+
+    try:
+        with open(SENSOR_ASSIGNMENTS_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        logger.exception("load_sensor_assignments_from_disk failed")
+        log_event("sensor_assignments_corrupt", level="error", source="system")
+        _backup_corrupt_file(SENSOR_ASSIGNMENTS_FILE)
+        with state_lock:
+            state.sensor_zone_assignments  = {}
+            state.sensor_settings_by_id    = _init_sensor_settings_defaults()
+            state.sensor_assignments_dirty = False
+        return
+
+    # Zuordnungen laden
+    raw = payload.get("assignments", {})
+    assignments: dict[int, list[int]] = {}
+    if isinstance(raw, dict):
+        for sid_str, zones in raw.items():
+            try:
+                sid = int(sid_str)
+                if sid >= 1 and isinstance(zones, list):
+                    assignments[sid] = [int(z) for z in zones if int(z) >= 1]
+            except Exception:
+                continue
+
+    # Betriebsparameter laden
+    raw_settings = payload.get("settings", {})
+    settings_by_id: dict[int, dict] = {}
+    if isinstance(raw_settings, dict):
+        for sid_str, cfg in raw_settings.items():
+            try:
+                sid = int(sid_str)
+                if sid >= 1 and isinstance(cfg, dict):
+                    settings_by_id[sid] = {
+                        "cooldown_s": max(0, int(cfg.get("cooldown_s", 3600))),
+                        "duration_s": max(1, int(cfg.get("duration_s", 600))),
+                    }
+            except Exception:
+                continue
+
+    # Sensoren ohne gespeichertes Setting mit globalen Defaults auffüllen
+    with state_lock:
+        defaults = _init_sensor_settings_defaults()
+        for sid, default_cfg in defaults.items():
+            if sid not in settings_by_id:
+                settings_by_id[sid] = default_cfg
+
+        state.sensor_zone_assignments  = assignments
+        state.sensor_settings_by_id    = settings_by_id
+        state.sensor_assignments_dirty = False
+
+    log_event(
+        "sensor_assignments_loaded",
+        source="system",
+        sensor_count=len(assignments),
+        settings_count=len(settings_by_id),
+    )
+
+
+def save_sensor_assignments_to_disk():
+    """Schreibt Sensor-Zonen-Zuordnung UND Sensor-Betriebsparameter atomar auf Disk."""
+    with state_lock:
+        assignments     = dict(state.sensor_zone_assignments or {})
+        settings_by_id  = dict(state.sensor_settings_by_id  or {})
+        state.sensor_assignments_dirty = False
+
+    # Schlüssel müssen Strings sein für JSON
+    payload = _default_sensor_assignments_payload()
+    payload["assignments"] = {str(sid): zones for sid, zones in assignments.items()}
+    payload["settings"]    = {
+        str(sid): {"cooldown_s": int(cfg.get("cooldown_s", 3600)),
+                   "duration_s": int(cfg.get("duration_s", 600))}
+        for sid, cfg in settings_by_id.items()
+    }
+    payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    _atomic_write_json(SENSOR_ASSIGNMENTS_FILE, payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -582,9 +778,10 @@ def persistence_loop():
             break
         try:
             with state_lock:
-                do_sched = bool(state.schedules_dirty)
-                do_queue = bool(state.queue_dirty)
-                do_hist = bool(state.history_dirty)
+                do_sched   = bool(state.schedules_dirty)
+                do_queue   = bool(state.queue_dirty)
+                do_hist    = bool(state.history_dirty)
+                do_sensors = bool(state.sensor_assignments_dirty)
 
             if do_sched:
                 save_schedules_to_disk()
@@ -595,6 +792,9 @@ def persistence_loop():
             if do_hist:
                 save_history_to_disk()
                 log_event("persist_history", source="system")
+            if do_sensors:
+                save_sensor_assignments_to_disk()
+                log_event("persist_sensor_assignments", source="system")
 
         except Exception:
             logger.exception("persistence_loop crashed")

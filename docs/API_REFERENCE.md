@@ -803,6 +803,81 @@ Werte die ihre dynamische Grenze überschreiten werden **still gekappt** (kein 4
 
 ---
 
+## Sensoren
+
+### `GET /sensors/readings`
+
+Aktueller Feuchtezustand aller konfigurierten Sensor-Zonen. Wird vom `sensor_engine_loop` im Hintergrund befüllt – frühestens `polling_interval_s` Sekunden nach dem Systemstart. Davor ist `readings` ein leeres Objekt.
+
+**Auth:** API-Key erforderlich
+
+**Response (200):**
+
+```json
+{
+  "sensor_driver": "sim",
+  "zones_configured": [1, 2],
+  "readings": {
+    "1": false,
+    "2": true
+  },
+  "cooldown_s": 600,
+  "last_triggered": {
+    "2": 127.4
+  },
+  "polling_interval_s": 30
+}
+```
+
+| Feld | Typ | Beschreibung |
+|---|---|---|
+| `sensor_driver` | string | Name des aktiven Treibers (`"sim"` \| `"rpi_switch"`) |
+| `zones_configured` | int[] | Sortierte Liste der konfigurierten Sensor-Zonen |
+| `readings` | object | `{"zone": needs_irrigation}` – `true` = trocken, `false` = feucht. Leer solange kein Polling-Zyklus gelaufen ist. |
+| `cooldown_s` | int | Konfigurierter Mindestabstand zwischen zwei Sensor-Triggern (Sekunden) |
+| `last_triggered` | object | `{"zone": elapsed_s}` – Sekunden seit letztem Sensor-Trigger. Nur Zonen mit bekanntem Trigger enthalten. |
+| `polling_interval_s` | int | Konfiguriertes Polling-Intervall (Sekunden) |
+
+---
+
+### `GET /sensors/config`
+
+Aktive Sensor-Konfiguration aus `device_config.json` inkl. GPIO-Validierung.
+
+**Auth:** API-Key erforderlich
+
+**Response (200):**
+
+```json
+{
+  "sensor_driver": "sim",
+  "configured_driver_mode": "sim",
+  "sensor_internal_pull_up": false,
+  "zones_configured": [1, 2],
+  "polling_interval_s": 30,
+  "cooldown_s": 600,
+  "default_duration_s": 300,
+  "gpio_config_valid": true,
+  "invalid_pins": [],
+  "duplicate_pins": []
+}
+```
+
+| Feld | Typ | Beschreibung |
+|---|---|---|
+| `sensor_driver` | string | Name des aktiven Treibers |
+| `configured_driver_mode` | string | Konfigurierter Modus (`"sim"` \| `"rpi_switch"`) |
+| `sensor_internal_pull_up` | bool | `true` = interner Pi-Pull-Up (~50kΩ) aktiv. Empfehlung: externer 10kΩ Pull-Up verwenden (`false`). |
+| `zones_configured` | int[] | Sortierte Liste der Zonen mit Sensor-Pin |
+| `polling_interval_s` | int | Polling-Intervall in Sekunden (min. 5) |
+| `cooldown_s` | int | Mindestabstand zwischen zwei Sensor-Triggern pro Zone (min. 0) |
+| `default_duration_s` | int | Standard-Bewässerungsdauer bei Sensor-Trigger in Sekunden (min. 1) |
+| `gpio_config_valid` | bool | `false` wenn ungültige oder doppelte Sensor-Pins konfiguriert sind (nur relevant bei `rpi_switch`) |
+| `invalid_pins` | array | Pins außerhalb des gültigen BCM-Bereichs (2..27) |
+| `duplicate_pins` | array | Pins die mehreren Zonen zugewiesen sind |
+
+---
+
 ## Polling-Empfehlung
 
 Das System bietet keine WebSocket-Verbindung. Empfohlene Polling-Strategie:
@@ -811,6 +886,7 @@ Das System bietet keine WebSocket-Verbindung. Empfohlene Polling-Strategie:
 |---|---|---|
 | Aktiver Zustand (Zone, Pause, Fault) | `/status` | Alle 1 Sekunde |
 | Zeitpläne, Verlauf, Einstellungen | `/schedule`, `/history`, `/settings` | Alle 5 Sekunden |
+| Sensor-Readings (Feuchtezustand) | `/sensors/readings` | Alle 5 Sekunden |
 | Verbindungsprüfung | `/health` | Alle 1-5 Sekunden |
 
 Das Shiny-Frontend verwendet exakt diese Strategie (`poll_status_s=1`, `poll_slow_s=5`).

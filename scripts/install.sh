@@ -19,7 +19,7 @@
 #
 # Was dieses Script tut:
 #   1. Systemprüfung + Systempakete aktualisieren
-#   2. IP-Adresse + Ventil- + Kiosk-Konfiguration abfragen
+#   2. IP-Adresse + Ventil- + Sensor- + Kiosk-Konfiguration abfragen
 #   3. Zusammenfassung & Bestätigung
 #   4. Systembenutzer anlegen + Systempakete installieren
 #   5. Code nach /opt/noria/app deployen
@@ -70,6 +70,11 @@ FRONTEND_PORT=8080
 
 # GPIO-Standardpins (BCM-Nummerierung, handelsübliches 8-Kanal-Relaisboard)
 DEFAULT_PINS=(17 18 27 22 23 24 25 5 6 13 19 26 16 20 21 4)
+
+# Standard-Sensor-Eingangspins (BCM) – ausserhalb der Ventil-Defaults.
+# Hinweis: 2/3 = I2C (HAT), 7–11 = SPI. Diese Werte sind nur Vorschläge –
+# die Eingabe-Validierung verhindert Doppelbelegungen zuverlässig.
+DEFAULT_SENSOR_PINS=(14 15 12 11 9 8 7 3)
 
 # ── Quellverzeichnis ermitteln ────────────────────────────────────────────────
 # Das Script liegt in scripts/ innerhalb des Repos.
@@ -267,6 +272,80 @@ fi
 success "Betriebsgrenzen: max. $MAX_CONCURRENT gleichzeitig, max. ${MAX_RUNTIME}s Laufzeit"
 
 echo
+echo "─── Sensoren ───────────────────────────────────────────"
+echo "  Tensiometer-Sensoren (z.B. MMM-Tech TXS Schalttensiometer)"
+echo "  melden Bodentrockenheit über einen Schalt-Trockenkontakt."
+echo "  Jeder Sensor belegt einen GPIO-Eingangspin (BCM)."
+echo
+read -rp "  Sensoren an diesem Gerät installiert? [j/N]: " SENSOR_ANSWER
+case "${SENSOR_ANSWER,,}" in
+    j|ja) SENSORS_INSTALLED=true;  info "Sensoren: Ja" ;;
+    *)    SENSORS_INSTALLED=false; info "Sensoren: Nein – Sensor-Tab wird ausgeblendet" ;;
+esac
+
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    echo
+    read -rp "  Anzahl der Sensoren (1–8) [1]: " NUM_SENSORS
+    NUM_SENSORS="${NUM_SENSORS:-1}"
+    if ! [[ "$NUM_SENSORS" =~ ^[0-9]+$ ]] || [[ "$NUM_SENSORS" -lt 1 || "$NUM_SENSORS" -gt 8 ]]; then
+        die "Ungültige Sensoranzahl: '$NUM_SENSORS' (erlaubt: 1–8)"
+    fi
+    success "Sensoren: $NUM_SENSORS"
+
+    echo
+    echo "  GPIO-Eingangspin für jeden Sensor (BCM-Nummerierung)."
+    echo "  Der Sensor verbindet den Pin bei Trockenheit mit GND."
+    echo "  Pins die bereits für Ventile belegt sind werden abgewiesen."
+    echo
+    declare -a SENSOR_PINS
+    for (( i=1; i<=NUM_SENSORS; i++ )); do
+        DEFAULT_SENSOR_PIN="${DEFAULT_SENSOR_PINS[$((i-1))]}"
+        while true; do
+            read -rp "  Sensor $i → GPIO-Pin (BCM) [$DEFAULT_SENSOR_PIN]: " SPIN
+            SPIN="${SPIN:-$DEFAULT_SENSOR_PIN}"
+            if ! [[ "$SPIN" =~ ^[0-9]+$ ]] || [[ "$SPIN" -lt 2 || "$SPIN" -gt 27 ]]; then
+                warn "    Ungültiger Pin: $SPIN (erlaubt: BCM 2–27). Erneut eingeben."
+                continue
+            fi
+            if [[ -n "${USED_PINS[$SPIN]+x}" ]]; then
+                warn "    Pin $SPIN ist bereits belegt (${USED_PINS[$SPIN]}). Anderen Pin wählen."
+                continue
+            fi
+            SENSOR_PINS+=("$SPIN")
+            USED_PINS[$SPIN]="Sensor $i"
+            break
+        done
+    done
+    success "Sensor-Pins: ${SENSOR_PINS[*]}"
+
+    echo
+    echo "─── Sensor Hardware-Konfiguration ─────────────────────"
+    echo "  Internal Pull-Up: Der Pi schaltet intern einen Widerstand"
+    echo "  an den Eingangspin. Nur aktivieren wenn kein externer"
+    echo "  Pull-Up-Widerstand auf der Platine vorhanden ist."
+    echo
+    read -rp "  Internen Pull-Up aktivieren? [j/N]: " SENSOR_PU_ANSWER
+    case "${SENSOR_PU_ANSWER,,}" in
+        j|ja) SENSOR_INTERNAL_PULL_UP="true";  info "Sensor Pull-Up: intern (Software)" ;;
+        *)    SENSOR_INTERNAL_PULL_UP="false"; info "Sensor Pull-Up: extern (Hardware)" ;;
+    esac
+
+    echo
+    echo "─── Sensor Betriebsparameter ───────────────────────────"
+    echo "  Das Polling-Intervall bestimmt wie oft der Sensor abgefragt wird."
+    echo "  Cooldown und Bewässerungsdauer können nach der Installation im"
+    echo "  Sensoren-Tab der Benutzeroberfläche eingestellt werden."
+    echo
+    read -rp "  Polling-Intervall in Sekunden [10]: " SENSOR_POLLING
+    SENSOR_POLLING="${SENSOR_POLLING:-10}"
+    if ! [[ "$SENSOR_POLLING" =~ ^[0-9]+$ ]] || [[ "$SENSOR_POLLING" -lt 1 ]]; then
+        die "Ungültiges Polling-Intervall: '$SENSOR_POLLING'"
+    fi
+
+    success "Sensor-Parameter: Polling=${SENSOR_POLLING}s (Cooldown + Dauer: im UI einstellbar)"
+fi
+
+echo
 echo "─── Kiosk-Modus ────────────────────────────────────────"
 echo "  Im Kiosk-Modus startet Chromium nach dem Boot automatisch"
 echo "  im Vollbild und zeigt die Noria-Oberfläche an."
@@ -298,6 +377,16 @@ echo -e "  ${BOLD}GPIO-Pins (Ventil 1→N)  :${NC} ${GPIO_PINS[*]}"
 echo -e "  ${BOLD}Relais Aktiv-Low         :${NC} $RELAY_ACTIVE_LOW"
 echo -e "  ${BOLD}Max. gleichz. Ventile    :${NC} $MAX_CONCURRENT"
 echo -e "  ${BOLD}Max. Laufzeit            :${NC} ${MAX_RUNTIME}s"
+echo
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    echo -e "  ${BOLD}Sensoren                 :${NC} ${GREEN}$NUM_SENSORS installiert${NC} – Pins: ${SENSOR_PINS[*]}"
+    echo -e "  ${BOLD}Sensor Pull-Up           :${NC} $SENSOR_INTERNAL_PULL_UP"
+    echo -e "  ${BOLD}Sensor Polling           :${NC} ${SENSOR_POLLING}s"
+    echo -e "  ${BOLD}Sensor Cooldown          :${NC} 60 min (Standard, im UI anpassbar)"
+    echo -e "  ${BOLD}Sensor Bewässerungsdauer :${NC} 10 min (Standard, im UI anpassbar)"
+else
+    echo -e "  ${BOLD}Sensoren                 :${NC} Keine – Sensor-Tab ausgeblendet"
+fi
 echo
 if [[ "$KIOSK_MODE" == "true" ]]; then
     echo -e "  ${BOLD}Kiosk-Modus              :${NC} ${GREEN}Ja${NC} – Chromium Vollbild (Benutzer: $KIOSK_USER)"
@@ -493,6 +582,33 @@ for (( i=1; i<=NUM_VALVES; i++ )); do
     GPIO_JSON+="\"$i\": ${GPIO_PINS[$((i-1))]}"
 done
 
+# Sensor-Pins-JSON aufbauen.
+# Wenn keine Sensoren installiert: leeres Objekt – Schlüssel existiert immer,
+# damit der Code keinen Unterschied zwischen "Schlüssel fehlt" und "leer" machen muss.
+SENSOR_PINS_JSON=""
+if [[ "$SENSORS_INSTALLED" == "true" ]]; then
+    SENSOR_DRIVER="rpi_switch"
+    for (( i=1; i<=NUM_SENSORS; i++ )); do
+        [[ $i -gt 1 ]] && SENSOR_PINS_JSON+=","$'\n'"      "
+        SENSOR_PINS_JSON+="\"$i\": ${SENSOR_PINS[$((i-1))]}"
+    done
+else
+    # Keine Sensoren: Treiber bleibt "sim", Hardware-Parameter auf Defaults setzen.
+    # Das Frontend liest IRRIGATION_SENSOR_PINS und blendet den Tab aus wenn leer.
+    SENSOR_DRIVER="sim"
+    SENSOR_INTERNAL_PULL_UP="false"
+    SENSOR_POLLING="10"
+fi
+
+# Cooldown und Standard-Bewässerungsdauer werden NICHT in der install.sh abgefragt.
+# Sie sind operative Betriebsparameter, die der Operator im Sensoren-Tab der UI
+# einstellt. Hier werden nur die sinnvollen Startwerte gesetzt:
+#   Cooldown:         60 Minuten (3600 s) – verhindert Dauerbewässerung
+#   Bewässerungsdauer: 10 Minuten (600 s) – konservativer Startwert
+# Die UI-Slider erlauben Cooldown 0–240 min und Dauer 1–60 min.
+SENSOR_COOLDOWN_DEFAULT=3600
+SENSOR_DURATION_DEFAULT=600
+
 cat > "$DATA_DIR/device_config.json" << EOF
 {
   "version": 1,
@@ -503,6 +619,16 @@ cat > "$DATA_DIR/device_config.json" << EOF
     "IRRIGATION_GPIO_PINS": {
       $GPIO_JSON
     }
+  },
+  "sensors": {
+    "IRRIGATION_SENSOR_DRIVER": "$SENSOR_DRIVER",
+    "IRRIGATION_SENSOR_INTERNAL_PULL_UP": $SENSOR_INTERNAL_PULL_UP,
+    "IRRIGATION_SENSOR_PINS": {
+      $SENSOR_PINS_JSON
+    },
+    "IRRIGATION_SENSOR_POLLING_INTERVAL_S": $SENSOR_POLLING,
+    "IRRIGATION_SENSOR_COOLDOWN_S": $SENSOR_COOLDOWN_DEFAULT,
+    "IRRIGATION_SENSOR_DEFAULT_DURATION_S": $SENSOR_DURATION_DEFAULT
   },
   "hard_limits": {
     "MAX_RUNTIME_S": $MAX_RUNTIME,
@@ -580,8 +706,13 @@ cat > "$SYSTEMD_DIR/noria-backend.service" << EOF
 
 [Unit]
 Description=Noria Backend (FastAPI/uvicorn)
-After=network.target
-Wants=network.target
+# time-sync.target: Wartet auf die erste NTP-Synchronisation des Systemtakts.
+# Ohne RTC-Akku startet der Pi nach einem Stromausfall mit einer falschen Uhrzeit
+# (zuletzt gespeicherter Timestamp). Noria-Logs und Scheduler-Zeitpläne benötigen
+# eine korrekte Systemzeit. Wants= statt Requires= damit der Service auch ohne
+# Netzwerk/NTP startet (z.B. im Offline-Betrieb) – ordering bleibt erhalten.
+After=network.target time-sync.target
+Wants=network.target time-sync.target
 # Neustart-Limit: max. 5 Neustarts in 60s (verhindert Crash-Schleife)
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -739,6 +870,33 @@ else
     info "Kein Raspberry Pi Boot-Config gefunden – Hardware-Watchdog übersprungen"
     info "Aktiv: systemd-Prozess-Watchdog (WatchdogSec=30 im Service)"
 fi
+
+# ──── Persistentes systemd-Journal ───────────────────────────────────────────
+# Standard: journald schreibt in /run/log/journal (RAM → flüchtig, nach
+# Stromausfall weg). Mit Storage=persistent bleibt das Journal auf der SD-Karte
+# erhalten. Das ist für den Produktionsbetrieb unverzichtbar: Abstürze,
+# Boot-Fehler und systemd-Ereignisse (Restart-Ursachen!) sind sonst nicht
+# nachvollziehbar. SystemMaxUse begrenzt den Speicher (SD-Karte schonen).
+info "Richte persistentes systemd-Journal ein..."
+
+mkdir -p /var/log/journal
+
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/noria-journal.conf << 'JOURNAL_EOF'
+# Persistentes Journal für Noria
+# Generiert von scripts/install.sh – nicht manuell editieren.
+[Journal]
+# persistent: Journal auf Disk schreiben statt in RAM (/var/log/journal)
+Storage=persistent
+# Max. 50 MB für gesamtes Journal (SD-Karte schonen)
+SystemMaxUse=50M
+# Max. 5 MB pro Datei (journalctl bleibt schnell)
+SystemMaxFileSize=5M
+JOURNAL_EOF
+
+# Sofort wirksam – kein Neustart erforderlich
+systemctl restart systemd-journald
+success "Persistentes Journal konfiguriert (/var/log/journal, max. 50 MB)"
 
 # ──── Services aktivieren und starten ────────────────────────────────────────
 info "Services laden und aktivieren..."

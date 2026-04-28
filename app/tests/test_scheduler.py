@@ -471,3 +471,110 @@ class TestSchedulerPhase2Failure:
             # Zone 1 muss an Index 0 stehen – vor Zone 3
             assert state.queue[0].zone == 1
             assert state.queue[1].zone == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drei-Fall-Strategie: Zeitplan-Queue-Einfüge-Logik
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSchedulerQueueStrategy:
+    """scheduler_loop: Drei-Fall-Strategie beim Einfügen in die Queue."""
+
+    def test_case3_zone0_idle_queue_jobs_prepended(self, mock_io, make_schedule):
+        """Fall 3, zone=0: Bestehende idle Queue → Jobs vorne + priority_mode."""
+        now = datetime(2025, 1, 6, 6, 0, 0, tzinfo=TZ)
+        rule = make_schedule(zone=0, weekdays=[0], start_times=["06:00"], duration_s=30)
+
+        existing = QueueItem(zone=99, duration=60, time_unit="Sekunden", source="manual")
+        with state_lock:
+            state.schedules       = [rule]
+            state.automation_enabled = True
+            state.max_valves      = 2
+            state.queue           = [existing]
+            state.queue_state     = "bereit"   # Queue befüllt aber nicht gestartet
+            state.queue_priority_mode = False
+
+        _run_scheduler_once(now)
+
+        with state_lock:
+            # Zeitplan-Items müssen vorne stehen (priority=True)
+            assert state.queue[0].priority is True
+            assert state.queue[1].priority is True
+            # Bestehender Item hinten (priority=False)
+            assert state.queue[-1].zone == 99
+            assert state.queue[-1].priority is False
+            assert state.queue_priority_mode is True
+
+    def test_case3_zone0_running_queue_jobs_appended(self, mock_io, make_schedule):
+        """Fall 2, zone=0: Laufende Queue → Jobs hinten, kein priority_mode."""
+        now = datetime(2025, 1, 6, 6, 0, 0, tzinfo=TZ)
+        rule = make_schedule(zone=0, weekdays=[0], start_times=["06:00"], duration_s=30)
+
+        existing = QueueItem(zone=99, duration=60, time_unit="Sekunden", source="manual")
+        with state_lock:
+            state.schedules       = [rule]
+            state.automation_enabled = True
+            state.max_valves      = 2
+            state.queue           = [existing]
+            state.queue_state     = "läuft"    # Queue läuft bereits
+            state.queue_priority_mode = False
+
+        _run_scheduler_once(now)
+
+        with state_lock:
+            # Bestehender Item vorne, Zeitplan-Items hinten
+            assert state.queue[0].zone == 99
+            assert all(item.priority is False for item in state.queue)
+            assert state.queue_priority_mode is False
+
+    def test_case3_single_zone_idle_queue_job_prepended(self, mock_io, make_schedule):
+        """Fall 3, zone>0: Bestehende idle Queue, kein Direktstart → vorne + priority_mode."""
+        now = datetime(2025, 1, 6, 6, 0, 0, tzinfo=TZ)
+        # Zone 2, aber Zone 1 läuft bereits (kein Direktstart möglich im Seriellmodus)
+        rule = make_schedule(zone=2, weekdays=[0], start_times=["06:00"], duration_s=60)
+
+        existing = QueueItem(zone=99, duration=60, time_unit="Sekunden", source="manual")
+        from tests.conftest import set_running_zone
+        set_running_zone(zone=1, duration_s=300)    # Seriellmodus: kein Direktstart
+
+        with state_lock:
+            state.schedules       = [rule]
+            state.automation_enabled = True
+            state.parallel_enabled = False
+            state.queue           = [existing]
+            state.queue_state     = "bereit"   # Queue befüllt aber nicht gestartet
+            state.queue_priority_mode = False
+
+        _run_scheduler_once(now)
+
+        with state_lock:
+            # Zone 2 muss vorne stehen mit priority=True
+            queue_zones = [item.zone for item in state.queue]
+            assert queue_zones[0] == 2
+            assert state.queue[0].priority is True
+            assert state.queue[-1].zone == 99
+            assert state.queue[-1].priority is False
+            assert state.queue_priority_mode is True
+
+    def test_case3_single_zone_running_queue_job_appended(self, mock_io, make_schedule):
+        """Fall 2, zone>0: Laufende Queue → Job hinten, kein priority_mode."""
+        now = datetime(2025, 1, 6, 6, 0, 0, tzinfo=TZ)
+        rule = make_schedule(zone=2, weekdays=[0], start_times=["06:00"], duration_s=60)
+
+        existing = QueueItem(zone=99, duration=60, time_unit="Sekunden", source="manual")
+        from tests.conftest import set_running_zone
+        set_running_zone(zone=1, duration_s=300)
+
+        with state_lock:
+            state.schedules       = [rule]
+            state.automation_enabled = True
+            state.parallel_enabled = False
+            state.queue           = [existing]
+            state.queue_state     = "läuft"    # Queue läuft bereits
+            state.queue_priority_mode = False
+
+        _run_scheduler_once(now)
+
+        with state_lock:
+            assert state.queue[0].zone == 99
+            assert state.queue_priority_mode is False

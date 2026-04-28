@@ -85,6 +85,44 @@ class ParallelModeRequest(BaseModel):
     enabled: bool
 
 
+class SimSensorSetRequest(BaseModel):
+    """Request-Modell für POST /sensors/sim/set.
+
+    Setzt beliebig viele Zonen gleichzeitig auf trocken oder feucht.
+    Zonen die in beiden Listen auftauchen sind ein Validierungsfehler (422).
+
+    Nur gueltig wenn sensor_driver_mode == "sim" – im Produktionsmodus
+    antwortet der Endpunkt mit 404.
+
+    dry_sensors:   Sensor-IDs die als trocken markiert werden (needs_irrigation=True).
+    moist_sensors: Sensor-IDs die als feucht markiert werden (needs_irrigation=False).
+
+    Beide Listen sind optional; ein leerer Body tut nichts und gibt den
+    aktuellen Zustand zurueck. So kann der Endpunkt auch rein zum Abfragen
+    des Sim-Zustands genutzt werden.
+    """
+    dry_sensors:   List[int] = Field(default_factory=list)
+    moist_sensors: List[int] = Field(default_factory=list)
+
+    @field_validator("dry_sensors", "moist_sensors")
+    @classmethod
+    def validate_sensor_ids_positive(cls, v: List[int]) -> List[int]:
+        for s in v:
+            if s < 1:
+                raise ValueError(
+                    f"Sensor-ID muss >= 1 sein, bekommen: {s}"
+                )
+        return v
+
+    def model_post_init(self, __context: object) -> None:
+        """Prueft dass keine Sensor-ID in beiden Listen vorkommt."""
+        overlap = set(self.dry_sensors) & set(self.moist_sensors)
+        if overlap:
+            raise ValueError(
+                f"Sensor-IDs {sorted(overlap)} kommen in dry_sensors UND moist_sensors vor."
+            )
+
+
 class SettingsUpdateRequest(BaseModel):
     """Request-Modell für POST /settings.
 
@@ -132,4 +170,110 @@ class SettingsUpdateRequest(BaseModel):
                 f"Ungueltige Akzentfarbe {v!r}: muss ein 6-stelliger Hex-Farbwert sein "
                 "(z.B. '#82372a')."
             )
+        return v
+
+class SensorSettingsRequest(BaseModel):
+    """Request-Modell für PATCH /sensors/settings.
+
+    Setzt die Sensor-Betriebsparameter Cooldown und Standard-Bewässerungsdauer.
+
+    Diese zwei Parameter sind als Operator-Einstellungen im UI editierbar.
+    Alle anderen Sensor-Parameter (Pins, Treiber, Pull-Up, Polling-Intervall)
+    sind Hardware-Admin-Konfiguration und ausschliesslich via install.sh setzbar.
+
+    cooldown_s         : Sperrzeit nach einem Sensor-Trigger in Sekunden.
+                         0 = kein Cooldown (Sensor kann sofort erneut auslösen).
+                         Maximaler sinnvoller Wert: 86400 (24 Stunden).
+
+    default_duration_s : Standard-Bewässerungsdauer bei Sensor-Trigger in Sekunden.
+                         Minimum 60 s (1 Minute), Maximum 3600 s (1 Stunde –
+                         entspricht dem Standard-Hard-Limit MAX_RUNTIME_S).
+                         Die genaue Prüfung gegen hard_max_runtime_s
+                         erfolgt im Route-Handler.
+    """
+    cooldown_s:          int = Field(..., ge=0, le=86400)
+    default_duration_s:  int = Field(..., ge=60, le=3600)
+
+
+class SensorSingleSettings(BaseModel):
+    """Betriebsparameter für einen einzelnen Sensor.
+
+    cooldown_s  : Sperrzeit nach einem Sensor-Trigger in Sekunden.
+                  0 = kein Cooldown. Maximum 14400 s (4 Stunden).
+    duration_s  : Bewässerungsdauer bei Sensor-Trigger in Sekunden.
+                  Minimum 60 s (1 Minute). Absolutes Pydantic-Cap 3600 s (1 Stunde);
+                  dynamische Prüfung gegen hard_max_runtime_s erfolgt im Route-Handler.
+    """
+    cooldown_s:  int = Field(..., ge=0, le=14400)
+    duration_s:  int = Field(..., ge=60, le=3600)
+
+
+class SensorSettingsRequest(BaseModel):
+    """Request-Modell für PATCH /sensors/settings.
+
+    Setzt Cooldown und Bewässerungsdauer für jeden Sensor individuell.
+    PUT-Semantik: die gesamte bisherige settings-Map wird ersetzt.
+
+    settings: Dict sensor_id (str) → SensorSingleSettings.
+              Leerer Dict = alle Einstellungen zurücksetzen (nicht empfohlen).
+              Sensor-IDs die nicht in IRRIGATION_SENSOR_PINS konfiguriert sind
+              werden akzeptiert und gespeichert – der Route-Handler warnt nicht
+              (analog zur assignments-Logik).
+
+    Beispiel: {"1": {"cooldown_s": 3600, "duration_s": 600},
+               "2": {"cooldown_s": 7200, "duration_s": 300}}
+    """
+    settings: dict[str, SensorSingleSettings] = Field(default_factory=dict)
+
+    @field_validator("settings")
+    @classmethod
+    def validate_sensor_ids(cls, v: dict) -> dict:
+        for sid_str in v:
+            try:
+                sid = int(sid_str)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Sensor-ID muss eine ganze Zahl sein, bekommen: {sid_str!r}"
+                )
+            if sid < 1:
+                raise ValueError(f"Sensor-ID muss >= 1 sein, bekommen: {sid}")
+        return v
+
+
+class SensorAssignmentRequest(BaseModel):
+    """Request-Modell für POST /sensors/assignments.
+
+    Setzt die Zuordnung Sensor-ID → Ventil-Zonen vollständig neu.
+    Die gesamte bisherige Zuordnung wird durch die übermittelte ersetzt.
+
+    assignments: Dict mit sensor_id (str) → Liste der zugeordneten Zonen.
+                 Leere Liste = Sensor hat keine Zonen (deaktiviert).
+                 Nicht enthaltene Sensor-IDs behalten ihre bisherige Zuordnung NICHT –
+                 die gesamte Zuordnung wird ersetzt (PUT-Semantik).
+
+    Beispiel: {"1": [1, 2, 3], "2": [4, 5]}
+    """
+    assignments: dict[str, List[int]] = Field(default_factory=dict)
+
+    @field_validator("assignments")
+    @classmethod
+    def validate_assignments(cls, v: dict) -> dict:
+        for sid_str, zones in v.items():
+            try:
+                sid = int(sid_str)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Sensor-ID muss eine ganze Zahl sein, bekommen: {sid_str!r}"
+                )
+            if sid < 1:
+                raise ValueError(f"Sensor-ID muss >= 1 sein, bekommen: {sid}")
+            for z in zones:
+                try:
+                    zi = int(z)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"Zonen-Nummer muss eine ganze Zahl sein, bekommen: {z!r}"
+                    )
+                if zi < 1:
+                    raise ValueError(f"Zonen-Nummer muss >= 1 sein, bekommen: {zi}")
         return v

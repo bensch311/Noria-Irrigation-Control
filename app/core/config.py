@@ -83,6 +83,12 @@ DEVICE_CONFIG_FILE = os.path.join(DATA_DIR, "device_config.json")
 USER_SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
 RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
 
+# Sensor-Zonen-Zuordnung: welcher Sensor welche Ventil-Zonen steuert.
+# Wird im UI konfiguriert (Einstellungen-Tab) und hier persistiert.
+# Getrennt von device_config.json (Hardware-Admin) und user_settings.json
+# (Darstellung) – ist operative Betriebskonfiguration.
+SENSOR_ASSIGNMENTS_FILE = os.path.join(DATA_DIR, "sensor_assignments.json")
+
 # Security: API-Key wird beim ersten Start generiert und hier abgelegt.
 # Datei sollte Berechtigungen 600 haben (nur Owner lesbar).
 # Niemals in git einchecken – siehe .gitignore.

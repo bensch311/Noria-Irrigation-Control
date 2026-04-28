@@ -47,7 +47,7 @@ class ActiveRun:
     end_time: float           # monotonic timestamp – Ablaufzeitpunkt (0.0 wenn pausiert)
     time_unit: str            # "Sekunden" | "Minuten" – nur für Anzeige
     started_at: float         # monotonic timestamp – Startzeitpunkt
-    started_source: str       # "manual" | "queue" | "schedule"
+    started_source: str       # "manual" | "queue" | "schedule" | "sensor"
     started_planned_s: int    # ursprünglich geplante Laufzeit in Sekunden
 
     paused_at: float = 0.0          # monotonic timestamp des letzten Pause-Zeitpunkts (0.0 = nicht pausiert)
@@ -68,7 +68,24 @@ class QueueItem:
     zone: int
     duration: int       # Laufzeit in Sekunden
     time_unit: str
-    source: str = "queue"   # "manual" | "queue" | "schedule" – Ursprung des Eintrags
+    source: str = "queue"   # "manual" | "queue" | "schedule" | "sensor" – Ursprung des Eintrags
+
+    # Prioritätsmerkmal: True wenn das Item von Sensor- oder Zeitplan-Logik
+    # vorgezogen wurde (Case 3: Queue hatte Einträge, war aber nicht gestartet).
+    # Wird vom timer_loop genutzt um nach Abarbeitung aller priority-Items
+    # anzuhalten (queue_state → "bereit"), restliche Items bleiben erhalten.
+    # Wird NICHT persistiert – nach Neustart behandelt timer_loop alle Items normal.
+    priority: bool = False
+
+    # Sensor-ID die dieses Item ausgelöst hat (nur gesetzt wenn source="sensor").
+    # Wird in engine.py start_valve() COMMIT-Phase genutzt um:
+    #   1. sensor_last_triggered[sensor_id] auf den tatsächlichen Ventilstart-Zeitpunkt
+    #      zu setzen (Cooldown startet erst wenn das Ventil wirklich läuft, nicht schon
+    #      beim Einreihen in die Queue).
+    #   2. die Zone aus sensor_pending_zones[sensor_id] zu entfernen.
+    # Wird NICHT persistiert – nach Neustart ist die Sensor-Zuordnung nicht
+    # rekonstruierbar; timer_loop behandelt alle Items dann ohne Sensor-Tracking.
+    sensor_id: Optional[int] = None
 
 
 @dataclass
@@ -96,7 +113,7 @@ class HistoryItem:
     ts_end: str         # ISO-8601-Zeitstempel des Laufendes (Europa/Berlin)
     zone: int
     duration_s: int     # tatsächlich gelaufene Sekunden
-    source: str         # "manual" | "queue" | "schedule"
+    source: str         # "manual" | "queue" | "schedule" | "sensor"
     time_unit: str = "Sekunden"
 
 
@@ -108,17 +125,24 @@ class RunState:
     Alle Felder sind unter state_lock zu lesen und zu schreiben.
 
     Felder-Gruppen:
-      - Ventil-Zustand:        paused, active_runs
-      - Queue:                 queue, queue_state, queue_state_before_valve_pause
-      - Zeitpläne:             schedules, automation_enabled, automation_block_run_key
-      - Dirty-Flags:           schedules_dirty, queue_dirty, history_dirty
-      - Hardware-Fault-Latch:  hw_faulted, hw_fault_*
-      - Parallel-Modus:        parallel_enabled, max_concurrent_valves, parallel_drain_logged
-      - Device-Konfiguration:  max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
-      - User-Settings:         max_history_items, navbar_title, accent_color, …
-      - Hard-Limits:           hard_max_runtime_s, hard_max_concurrent_valves
-      - Neustart-Erkennung:    unclean_restart, restart_detected_at
-      - Verlauf:               run_history
+      - Ventil-Zustand:         paused, active_runs
+      - Queue:                  queue, queue_state, queue_state_before_valve_pause,
+                                queue_priority_mode
+      - Zeitpläne:              schedules, automation_enabled, automation_block_run_key
+      - Dirty-Flags:            schedules_dirty, queue_dirty, history_dirty
+      - Hardware-Fault-Latch:   hw_faulted, hw_fault_*
+      - Parallel-Modus:         parallel_enabled, max_concurrent_valves, parallel_drain_logged
+      - Device-Konfiguration:   max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
+      - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins,
+                                sensor_internal_pull_up, sensor_polling_interval_s,
+                                sensor_cooldown_s, sensor_default_duration_s
+      - Sensor-Betriebsparameter: sensor_settings_by_id (pro Sensor: cooldown_s, duration_s)
+      - Sensor-Zuordnung:       sensor_zone_assignments (sensor_id → [zone, ...])
+      - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered, sensor_pending_zones
+      - User-Settings:          max_history_items, navbar_title, accent_color, …
+      - Hard-Limits:            hard_max_runtime_s, hard_max_concurrent_valves
+      - Neustart-Erkennung:     unclean_restart, restart_detected_at
+      - Verlauf:                run_history
     """
 
     # ── Ventil-Zustand ────────────────────────────────────────────────────────
@@ -133,6 +157,14 @@ class RunState:
     # Speichert queue_state unmittelbar vor einer Ventil-Pause, damit /resume
     # den korrekten Zustand ("läuft" vs "bereit") wiederherstellen kann.
     queue_state_before_valve_pause: str = "bereit"
+
+    # Prioritätsmodus: True wenn Sensor- oder Zeitplan-Items vorgezogen wurden
+    # (Queue hatte Einträge, war aber nicht gestartet – Case 3).
+    # Solange True: timer_loop startet nach den priority-Items keine weiteren
+    # Queue-Items und setzt queue_state auf "bereit" sobald active_runs leer ist.
+    # Wird auf False zurückgesetzt wenn queue_state "fertig" oder "bereit" (durch
+    # Priority-Ende) erreicht wird. Nicht persistiert – Neustart setzt auf False.
+    queue_priority_mode: bool = False
 
     # ── Zeitpläne ─────────────────────────────────────────────────────────────
     schedules: List[ScheduleRule] | None = None
@@ -172,6 +204,67 @@ class RunState:
     valve_driver_mode: str = "sim"      # "sim" | "rpi"
     relay_active_low: bool = True       # True = Relais-Board mit Active-Low-Logik
     gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
+
+    # ── Sensor-Konfiguration (aus device_config.json) ─────────────────────────
+    sensor_driver_mode: str = "sim"                    # "sim" | "rpi_switch"
+    sensor_gpio_pins: Dict[int, int] | None = None   # {sensor_id: BCM-Pin} – Hardware-Konfig
+    sensor_internal_pull_up: bool = False  # True = internen Pi-Pull-Up (~50kΩ) verwenden
+
+    # Polling-Intervall: wie oft alle Sensor-Zonen gelesen werden (Sekunden).
+    # Minimum ist 5s (wird in sensor_engine_loop geclampt).
+    sensor_polling_interval_s: int = 30
+
+    # Cooldown: Mindestabstand zwischen zwei sensor-getriggerten Läufen pro Zone (Sekunden).
+    # Verhindert Dauerbewässerung bei dauerhaft trockenem Boden oder defektem Sensor.
+    sensor_cooldown_s: int = 600
+
+    # Standard-Laufzeit sensor-getriggerter Bewässerungsläufe (Sekunden).
+    # Wird als duration in QueueItem.duration verwendet (source="sensor").
+    sensor_default_duration_s: int = 300
+
+    # Sensor-Zonen-Zuordnung: welcher Sensor welche Ventil-Zonen steuert.
+    # {sensor_id: [zone, ...]} – z.B. {1: [1, 2, 3], 2: [4, 5]}.
+    # Wird aus sensor_assignments.json geladen und via POST /sensors/assignments
+    # gespeichert. None = noch nicht geladen.
+    sensor_zone_assignments: Dict[int, list] | None = None
+
+    # Sensor-Betriebsparameter: Cooldown und Standard-Bewässerungsdauer pro Sensor.
+    # {sensor_id: {"cooldown_s": int, "duration_s": int}}
+    # Wird zusammen mit sensor_zone_assignments in sensor_assignments.json persistiert.
+    # Nicht vorhanden = noch nicht geladen; bei Erststart mit globalen Defaults befüllt.
+    sensor_settings_by_id: Dict[int, dict] | None = None
+
+    # Dirty-Flag für persistence_loop
+    sensor_assignments_dirty: bool = False
+
+    # ── Sensor-Laufzeit (rein in-memory, kein Persist) ────────────────────────
+    # sensor_readings:       Letzter bekannter Feuchtezustand pro Sensor.
+    #                        None = noch kein Lesevorgang seit Start.
+    #                        {sensor_id: needs_irrigation} – True = trocken.
+    sensor_readings: Dict[int, bool] | None = None
+
+    # sensor_last_triggered: Monotonic-Timestamp des letzten tatsächlichen
+    #                        Ventilstarts pro Sensor (gesetzt in engine.py
+    #                        start_valve COMMIT-Phase, NICHT beim Einreihen in
+    #                        die Queue). Für Cooldown-Berechnung.
+    #                        None = noch kein Trigger seit Start.
+    sensor_last_triggered: Dict[int, float] | None = None
+
+    # sensor_pending_zones:  Zonen, die von einem Sensor in die Queue gestellt
+    #                        wurden, aber noch nicht tatsächlich gestartet sind.
+    #                        {sensor_id: set(zone, ...)}
+    #
+    #                        Dient als Sperrmechanismus: solange noch Zonen eines
+    #                        Sensors in der Queue oder in active_runs warten, wird
+    #                        derselbe Sensor nicht erneut ausgelöst – unabhängig
+    #                        davon, ob der Cooldown bereits abgelaufen wäre. Damit
+    #                        startet die Cooldown-Zeit erst ab dem tatsächlichen
+    #                        Ventilstart, nicht schon ab dem Einreihen in die Queue.
+    #
+    #                        Wird beim Ventilstart (engine.py COMMIT) bereinigt.
+    #                        None = noch nicht initialisiert (lazy in sensor_engine).
+    #                        Nicht persistiert – nach Neustart leer (Zonen ebenfalls weg).
+    sensor_pending_zones: Dict[int, set] | None = None
 
     # ── User-Settings (aus user_settings.json) ────────────────────────────────
     max_history_items: int = 20
