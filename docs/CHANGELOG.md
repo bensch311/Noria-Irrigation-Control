@@ -13,6 +13,96 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [0.12.0] – I2C Relay HAT
+
+### Added
+- **`I2cRelayValveDriver`**: Neuer Hardware-Treiber für Sequent Microsystems
+  Relay HATs via I2C/SMBus (`smbus2`).
+  - Unterstützt **8-Relay HAT** (PCA9554-kompatibel, Adresse 0x38–0x3F / 0x20–0x27)
+  - Unterstützt **16-Relay HAT** (PCA9555-kompatibel, Adresse 0x20–0x27)
+  - Register-Konstanten direkt aus offiziellen C-Headern (`relay.h` / `relay8.h`)
+  - Sicherheitskritische Init-Reihenfolge: Output-Latch → Config-Register
+    (verhindert kurzes Einschalten aller Relais beim Start durch PCA955x Power-on-Default)
+  - Bitmask-State in-memory (kein I2C-Readback nötig)
+  - `close_all()` best-effort: In-memory-State wird auch bei HW-Fehler auf 0 gesetzt
+- **`validate_i2c_config()`**: Validierungsfunktion prüft HAT-Typ,
+  I2C-Bus, Adressbereich und max_valves vor Driver-Init.
+- **`smbus2`** zu `requirements.txt` ergänzt.
+- **`state.py`**: Drei neue Felder in `RunState`:
+  `relay_hat_type`, `i2c_bus`, `i2c_address`.
+- **`device_config.json`**: Drei neue Felder im `device`-Block:
+  `IRRIGATION_RELAY_HAT_TYPE`, `IRRIGATION_I2C_BUS`, `IRRIGATION_I2C_ADDRESS`.
+- **`install.sh`**: Vollständige I2C-Integration:
+  - Interaktive Treiber-Auswahl (GPIO direkt / 8-Relay HAT / 16-Relay HAT)
+  - Automatische I2C-Kernel-Aktivierung (`dtparam=i2c_arm=on`, `i2c-dev`)
+  - Bedingte GPIO-Pin- vs. I2C-Konfigurations-Sektion
+  - `device_config.json` und `.env` mit korrektem Treibermodus generiert
+  - `DeviceAllow` für `/dev/i2c-0` und `/dev/i2c-1` im systemd-Service
+
+### Fixed
+- **Sensor-Engine Cooldown auf frischen Systemen** (`sensor_engine.py`):
+  `sensor_last_triggered.get(sensor_id, 0.0)` lieferte auf CI-Runnern und
+  frisch gestarteten Pis mit Uptime < `sensor_cooldown_s` einen falschen
+  elapsed-Wert → Sensor wurde fälschlich blockiert.
+  Fix: `None`-Sentinel statt `0.0` — kein Eintrag = noch nie ausgelöst = kein Cooldown.
+
+### Changed
+- `services/valve_driver.py`: `get_valve_driver()` um `mode == "i2c"` Zweig erweitert.
+- `services/persistence.py`: `load_device_config_from_disk()` erkennt `"i2c"` als
+  gültigen Treibermodus; parst I2C-Adresse als Dezimalzahl und Hex-String.
+- `requirements.txt`: `RPi.GPIO` → `rpi-lgpio` (Pi 5 / RP1-Chip-Kompatibilität).
+- `version.py`: Bump `0.11.0 → 0.12.0`
+
+### Infrastructure
+- 47 neue Tests für `I2cRelayValveDriver` und `validate_i2c_config`
+  (`tests/test_valve_driver.py`): Init-Reihenfolge, Bitmask-Logik,
+  Register-Aufteilung Low/High-Byte, best-effort `close_all()`, cleanup.
+
+---
+
+## [0.11.0] – Sensor-Integration
+
+### Added
+- **`RpiGpioSwitchSensorDriver`**: Neuer Hardware-Treiber für digitale
+  Trockenkontakt-Sensoren (z.B. MMM TXS Schalttensiometer) via lgpio / rpi-lgpio.
+  - Liest GPIO-Eingangspins (BCM-Nummerierung) mit optionalem internen Pull-Up
+  - Lazy-Init: Treiber wird erst beim ersten Poll initialisiert
+  - `cleanup()` nur wenn tatsächlich initialisiert (vermeidet ungewollten Lazy-Init beim Shutdown)
+- **Sensor-Engine** (`sensor_engine.py`): Background-Polling-Loop mit konfigurierbarem
+  Intervall; wertet Readings aus und stellt `QueueItem`s für zugeordnete Zonen ein.
+  - Priority-Queue-Strategie: 3 Fälle (leere Queue / läuft / befüllt-idle)
+  - Cooldown pro Sensor (nicht pro Zone); `sensor_last_triggered` erst beim
+    tatsächlichen Ventilstart gesetzt (engine.py COMMIT), nicht beim Einreihen
+  - `sensor_pending_zones` als Sperrmechanismus gegen Neu-Trigger während
+    Zonen noch in Queue oder active_runs warten
+- **Sensor-Zuordnung**: `sensor_assignments.json` persistiert Sensor→Zonen-Mapping
+  und per-Sensor-Parameter (`cooldown_s`, `duration_s`).
+  Editierbar im Sensoren-Tab der Benutzeroberfläche.
+- **Sensoren-Tab** (Frontend `app.py`): Sensor-Statusanzeige, Zuordnungs-UI,
+  per-Sensor Cooldown- und Dauer-Einstellungen.
+- **`device_config.json`**: Neue Felder im `sensors`-Block:
+  `IRRIGATION_SENSOR_DRIVER`, `IRRIGATION_SENSOR_INTERNAL_PULL_UP`,
+  `IRRIGATION_SENSOR_PINS`, `IRRIGATION_SENSOR_POLLING_INTERVAL_S`,
+  `IRRIGATION_SENSOR_COOLDOWN_S`, `IRRIGATION_SENSOR_DEFAULT_DURATION_S`.
+- **`state.py`**: Neue Felder in `RunState` für Sensor-Konfiguration,
+  Sensor-Laufzeitdaten (`sensor_readings`, `sensor_last_triggered`,
+  `sensor_pending_zones`) und Sensor-Zuordnung (`sensor_zone_assignments`,
+  `sensor_settings_by_id`).
+- **`install.sh`**: Interaktive Sensor-Konfiguration (Anzahl, GPIO-Pins,
+  Pull-Up, Polling-Intervall); Sensor-Pins werden auf Duplikate mit
+  Ventil-Pins geprüft.
+
+### Changed
+- `services/persistence.py`: Lädt und speichert Sensor-Konfiguration aus
+  `device_config.json` und `sensor_assignments.json`.
+- `core/lifecycle.py`: Sensor-Engine-Thread gestartet/gestoppt.
+- `version.py`: Bump `0.10.2 → 0.11.0`
+
+### Infrastructure
+- Neue Testdateien `tests/test_sensor_engine.py` und `tests/test_sensor_driver.py`
+
+---
+
 ## [0.10.2] – System-Monitoring
 
 ### Added
@@ -113,7 +203,7 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 ## Versionshistorie (Zukunft)
 
 ```
-[0.10.x] Bugfixes aus Field Testing
+[0.12.x] Bugfixes aus Field Testing
 [1.0.0]  Production Release – nach abgeschlossener Field Testing Checkliste
 [1.1.0]  Erstes Feature-Release (z.B. Wetterintegration, Prometheus Monitoring)
 [2.0.0]  Breaking Change (z.B. Datenbankumstieg, inkompatibles Datenformat)
