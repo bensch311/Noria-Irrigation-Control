@@ -76,6 +76,24 @@ DEFAULT_PINS=(17 18 27 22 23 24 25 5 6 13 19 26 16 20 21 4)
 # die Eingabe-Validierung verhindert Doppelbelegungen zuverlässig.
 DEFAULT_SENSOR_PINS=(14 15 12 11 9 8 7 3)
 
+# ── Konfigurationsvariablen (werden in Section 2 befüllt) ─────────────────────
+# Relais-Treiber: "rpi" = GPIO direkt, "i2c" = Sequent Microsystems I2C-HAT
+VALVE_DRIVER_MODE="rpi"
+# I2C-spezifische Variablen (nur relevant wenn VALVE_DRIVER_MODE=i2c)
+RELAY_HAT_TYPE="16relay"   # "8relay" | "16relay"
+I2C_BUS=1                  # I2C-Busnummer (0 oder 1)
+I2C_ADDR_DEC=32            # I2C-Adresse dezimal (32 = 0x20)
+I2C_ADDR_HEX="0x20"        # I2C-Adresse hex (für Anzeige)
+# Max. Ventilanzahl: wird von HAT-Typ begrenzt (8relay → 8, sonst 16)
+MAX_VALVES_LIMIT=16
+# GPIO-spezifisch: Aktiv-Low-Logik (true für die meisten Relaisboards)
+RELAY_ACTIVE_LOW="true"
+# SupplementaryGroups für systemd-Service (gpio immer; i2c zusätzlich bei I2C-Modus)
+SUPP_GROUPS="gpio"
+# Verwendete Pins (Deduplizierungs-Map für GPIO- und Sensor-Pins)
+declare -a GPIO_PINS=()
+declare -A USED_PINS=()
+
 # ── Quellverzeichnis ermitteln ────────────────────────────────────────────────
 # Das Script liegt in scripts/ innerhalb des Repos.
 # Python-Quellen sind entweder im Repo-Root (flache Struktur)
@@ -209,52 +227,146 @@ fi
 success "Pi-IP: $PI_IP"
 
 echo
+echo "─── Relais-Treiber ─────────────────────────────────────"
+echo "  Welches Relais-Board ist an diesem Pi angeschlossen?"
+echo
+echo "  1) GPIO direkt      (z.B. 8-Kanal-Relaisboard über Flachbandkabel)"
+echo "  2) Sequent 8-Relay  HAT (I2C, bis zu  8 Ventile, Adresse 0x38–0x3F)"
+echo "  3) Sequent 16-Relay HAT (I2C, bis zu 16 Ventile, Adresse 0x20–0x27)"
+echo
+read -rp "  Auswahl [1/2/3] (Standard: 1): " DRV_CHOICE
+case "${DRV_CHOICE:-1}" in
+    2)
+        VALVE_DRIVER_MODE="i2c"
+        RELAY_HAT_TYPE="8relay"
+        MAX_VALVES_LIMIT=8
+        info "Treiber: Sequent Microsystems 8-Relay HAT (I2C)"
+        ;;
+    3)
+        VALVE_DRIVER_MODE="i2c"
+        RELAY_HAT_TYPE="16relay"
+        MAX_VALVES_LIMIT=16
+        info "Treiber: Sequent Microsystems 16-Relay HAT (I2C)"
+        ;;
+    *)
+        VALVE_DRIVER_MODE="rpi"
+        MAX_VALVES_LIMIT=16
+        info "Treiber: GPIO direkt (BCM-Pins)"
+        ;;
+esac
+
+echo
 echo "─── Ventile ────────────────────────────────────────────"
-read -rp "  Anzahl der Ventile (1–16) [6]: " NUM_VALVES
+read -rp "  Anzahl der Ventile (1–${MAX_VALVES_LIMIT}) [6]: " NUM_VALVES
 NUM_VALVES="${NUM_VALVES:-6}"
-if ! [[ "$NUM_VALVES" =~ ^[0-9]+$ ]] || [[ "$NUM_VALVES" -lt 1 || "$NUM_VALVES" -gt 16 ]]; then
-    die "Ungültige Ventilanzahl: '$NUM_VALVES' (erlaubt: 1–16)"
+if ! [[ "$NUM_VALVES" =~ ^[0-9]+$ ]] || [[ "$NUM_VALVES" -lt 1 || "$NUM_VALVES" -gt $MAX_VALVES_LIMIT ]]; then
+    die "Ungültige Ventilanzahl: '$NUM_VALVES' (erlaubt: 1–${MAX_VALVES_LIMIT} für gewähltes Board)"
 fi
 success "Ventile: $NUM_VALVES"
 
-echo
-echo "─── GPIO-Pins ──────────────────────────────────────────"
-echo "  BCM-Pin-Nummer für jedes Ventil eingeben."
-echo "  Enter = Standardwert übernehmen."
-echo
-declare -a GPIO_PINS
-declare -A USED_PINS
-for (( i=1; i<=NUM_VALVES; i++ )); do
-    DEFAULT_PIN="${DEFAULT_PINS[$((i-1))]}"
-    while true; do
-        read -rp "  Ventil $i  → GPIO-Pin (BCM) [$DEFAULT_PIN]: " PIN
-        PIN="${PIN:-$DEFAULT_PIN}"
-        if ! [[ "$PIN" =~ ^[0-9]+$ ]] || [[ "$PIN" -lt 2 || "$PIN" -gt 27 ]]; then
-            warn "    Ungültiger Pin: $PIN (erlaubt: BCM 2–27). Erneut eingeben."
-            continue
-        fi
-        if [[ -n "${USED_PINS[$PIN]+x}" ]]; then
-            warn "    Pin $PIN wird bereits für Ventil ${USED_PINS[$PIN]} verwendet. Anderen Pin wählen."
-            continue
-        fi
-        GPIO_PINS+=("$PIN")
-        USED_PINS[$PIN]=$i
-        break
+# ── GPIO-spezifische Konfiguration ───────────────────────────────────────────
+if [[ "$VALVE_DRIVER_MODE" == "rpi" ]]; then
+    echo
+    echo "─── GPIO-Pins ──────────────────────────────────────────"
+    echo "  BCM-Pin-Nummer für jedes Ventil eingeben."
+    echo "  Enter = Standardwert übernehmen."
+    echo
+    for (( i=1; i<=NUM_VALVES; i++ )); do
+        DEFAULT_PIN="${DEFAULT_PINS[$((i-1))]}"
+        while true; do
+            read -rp "  Ventil $i  → GPIO-Pin (BCM) [$DEFAULT_PIN]: " PIN
+            PIN="${PIN:-$DEFAULT_PIN}"
+            if ! [[ "$PIN" =~ ^[0-9]+$ ]] || [[ "$PIN" -lt 2 || "$PIN" -gt 27 ]]; then
+                warn "    Ungültiger Pin: $PIN (erlaubt: BCM 2–27). Erneut eingeben."
+                continue
+            fi
+            if [[ -n "${USED_PINS[$PIN]+x}" ]]; then
+                warn "    Pin $PIN wird bereits für Ventil ${USED_PINS[$PIN]} verwendet. Anderen Pin wählen."
+                continue
+            fi
+            GPIO_PINS+=("$PIN")
+            USED_PINS[$PIN]=$i
+            break
+        done
     done
-done
-success "GPIO-Pins: ${GPIO_PINS[*]}"
+    success "GPIO-Pins: ${GPIO_PINS[*]}"
 
-echo
-echo "─── Relais-Konfiguration ───────────────────────────────"
-echo "  Handelsübliche 8-Kanal-Relaisboards werden mit einem"
-echo "  LOW-Signal aktiviert (Aktiv-Low). Das ist die sichere"
-echo "  Standardeinstellung – im Zweifel J wählen."
-echo
-read -rp "  Relais Aktiv-Low? (Standard für die meisten Boards) [J/n]: " RELAY_AL
-case "${RELAY_AL,,}" in
-    n|nein) RELAY_ACTIVE_LOW="false"; info "Relais: Aktiv-High" ;;
-    *)      RELAY_ACTIVE_LOW="true";  info "Relais: Aktiv-Low (Standard)" ;;
-esac
+    echo
+    echo "─── Relais-Konfiguration ───────────────────────────────"
+    echo "  Handelsübliche 8-Kanal-Relaisboards werden mit einem"
+    echo "  LOW-Signal aktiviert (Aktiv-Low). Das ist die sichere"
+    echo "  Standardeinstellung – im Zweifel J wählen."
+    echo
+    read -rp "  Relais Aktiv-Low? (Standard für die meisten Boards) [J/n]: " RELAY_AL
+    case "${RELAY_AL,,}" in
+        n|nein) RELAY_ACTIVE_LOW="false"; info "Relais: Aktiv-High" ;;
+        *)      RELAY_ACTIVE_LOW="true";  info "Relais: Aktiv-Low (Standard)" ;;
+    esac
+fi
+
+# ── I2C-spezifische Konfiguration ────────────────────────────────────────────
+if [[ "$VALVE_DRIVER_MODE" == "i2c" ]]; then
+    echo
+    echo "─── I2C-Konfiguration ──────────────────────────────────"
+    if [[ "$RELAY_HAT_TYPE" == "8relay" ]]; then
+        echo "  Sequent 8-Relay HAT – Primäradresse: 0x38–0x3F"
+        echo "  (Alternativadresse: 0x20–0x27 – nur bei manuell umgelöteten Jumpern)"
+        I2C_ADDR_DEFAULT="0x38"
+    else
+        echo "  Sequent 16-Relay HAT – Adresse: 0x20–0x27"
+        echo "  (Stack 0 = 0x20, Stack 1 = 0x21, ..., Stack 7 = 0x27)"
+        I2C_ADDR_DEFAULT="0x20"
+    fi
+    echo
+    read -rp "  I2C-Bus (0 oder 1) [1]: " I2C_BUS_IN
+    I2C_BUS_IN="${I2C_BUS_IN:-1}"
+    if ! [[ "$I2C_BUS_IN" =~ ^[01]$ ]]; then
+        die "Ungültiger I2C-Bus: '$I2C_BUS_IN' (erlaubt: 0 oder 1)"
+    fi
+    I2C_BUS="$I2C_BUS_IN"
+
+    while true; do
+        read -rp "  I2C-Adresse des HAT (hex oder dezimal) [$I2C_ADDR_DEFAULT]: " I2C_ADDR_IN
+        I2C_ADDR_IN="${I2C_ADDR_IN:-$I2C_ADDR_DEFAULT}"
+
+        # Hex-String (z.B. "0x20") oder Dezimalzahl (z.B. "32") akzeptieren
+        if [[ "$I2C_ADDR_IN" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+            I2C_ADDR_DEC=$(( 16#${I2C_ADDR_IN:2} ))
+            I2C_ADDR_HEX=$(printf "0x%02X" "$I2C_ADDR_DEC")
+        elif [[ "$I2C_ADDR_IN" =~ ^[0-9]+$ ]]; then
+            I2C_ADDR_DEC=$I2C_ADDR_IN
+            I2C_ADDR_HEX=$(printf "0x%02X" "$I2C_ADDR_DEC")
+        else
+            warn "    Ungültige Eingabe: '$I2C_ADDR_IN' (erlaubt: hex wie 0x20 oder dezimal wie 32)"
+            continue
+        fi
+
+        # Adressbereich prüfen
+        ADDR_VALID=false
+        if [[ "$RELAY_HAT_TYPE" == "16relay" ]]; then
+            # 0x20–0x27
+            if [[ $I2C_ADDR_DEC -ge 32 && $I2C_ADDR_DEC -le 39 ]]; then
+                ADDR_VALID=true
+            else
+                warn "    Adresse $I2C_ADDR_HEX ungültig für 16-Relay HAT (erlaubt: 0x20–0x27 = 32–39)"
+            fi
+        else  # 8relay
+            # 0x38–0x3F = 56–63 (Primär) oder 0x20–0x27 = 32–39 (Alternativ)
+            if [[ ($I2C_ADDR_DEC -ge 56 && $I2C_ADDR_DEC -le 63) || \
+                  ($I2C_ADDR_DEC -ge 32 && $I2C_ADDR_DEC -le 39) ]]; then
+                ADDR_VALID=true
+            else
+                warn "    Adresse $I2C_ADDR_HEX ungültig für 8-Relay HAT"
+                warn "    Erlaubt: 0x38–0x3F (56–63) oder 0x20–0x27 (32–39)"
+            fi
+        fi
+        [[ "$ADDR_VALID" == "true" ]] && break
+    done
+    success "I2C: Bus $I2C_BUS, Adresse $I2C_ADDR_HEX ($I2C_ADDR_DEC dezimal), HAT: $RELAY_HAT_TYPE"
+
+    # I2C benötigt zusätzlich die Gruppe 'i2c'
+    SUPP_GROUPS="gpio i2c"
+fi
 
 echo
 echo "─── Betriebsgrenzen ────────────────────────────────────"
@@ -373,8 +485,19 @@ echo -e "  ${BOLD}Frontend (Oberfläche)    :${NC} http://$PI_IP:$FRONTEND_PORT"
 echo -e "  ${BOLD}Backend (API)            :${NC} http://$PI_IP:$BACKEND_PORT"
 echo
 echo -e "  ${BOLD}Anzahl Ventile           :${NC} $NUM_VALVES"
-echo -e "  ${BOLD}GPIO-Pins (Ventil 1→N)  :${NC} ${GPIO_PINS[*]}"
-echo -e "  ${BOLD}Relais Aktiv-Low         :${NC} $RELAY_ACTIVE_LOW"
+if [[ "$VALVE_DRIVER_MODE" == "rpi" ]]; then
+    echo -e "  ${BOLD}Relais-Treiber           :${NC} GPIO direkt (BCM)"
+    echo -e "  ${BOLD}GPIO-Pins (Ventil 1→N)  :${NC} ${GPIO_PINS[*]}"
+    echo -e "  ${BOLD}Relais Aktiv-Low         :${NC} $RELAY_ACTIVE_LOW"
+else
+    if [[ "$RELAY_HAT_TYPE" == "8relay" ]]; then
+        echo -e "  ${BOLD}Relais-Treiber           :${NC} ${GREEN}Sequent 8-Relay HAT (I2C)${NC}"
+    else
+        echo -e "  ${BOLD}Relais-Treiber           :${NC} ${GREEN}Sequent 16-Relay HAT (I2C)${NC}"
+    fi
+    echo -e "  ${BOLD}I2C-Bus                  :${NC} $I2C_BUS (/dev/i2c-${I2C_BUS})"
+    echo -e "  ${BOLD}I2C-Adresse              :${NC} $I2C_ADDR_HEX ($I2C_ADDR_DEC dezimal)"
+fi
 echo -e "  ${BOLD}Max. gleichz. Ventile    :${NC} $MAX_CONCURRENT"
 echo -e "  ${BOLD}Max. Laufzeit            :${NC} ${MAX_RUNTIME}s"
 echo
@@ -429,6 +552,48 @@ if getent group gpio &>/dev/null; then
     success "Benutzer '$APP_USER' zur Gruppe 'gpio' hinzugefügt"
 else
     warn "Gruppe 'gpio' nicht gefunden – GPIO-Zugriff evtl. nicht möglich"
+fi
+
+# I2C-Gruppe und Kernel-Modul (nur wenn I2C-Treiber gewählt)
+if [[ "$VALVE_DRIVER_MODE" == "i2c" ]]; then
+    # I2C im Kernel aktivieren (idempotent)
+    BOOT_CONFIG_EARLY=""
+    for candidate in /boot/firmware/config.txt /boot/config.txt; do
+        if [[ -f "$candidate" ]]; then
+            BOOT_CONFIG_EARLY="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$BOOT_CONFIG_EARLY" ]]; then
+        if grep -q "dtparam=i2c_arm=on" "$BOOT_CONFIG_EARLY" 2>/dev/null; then
+            info "dtparam=i2c_arm=on bereits in $BOOT_CONFIG_EARLY – keine Änderung nötig"
+        else
+            echo "dtparam=i2c_arm=on" >> "$BOOT_CONFIG_EARLY"
+            info "dtparam=i2c_arm=on zu $BOOT_CONFIG_EARLY hinzugefügt (wirksam nach Neustart)"
+        fi
+    else
+        warn "Boot-Config nicht gefunden – dtparam=i2c_arm=on bitte manuell eintragen"
+    fi
+
+    # i2c-dev Kernel-Modul beim Boot laden
+    if grep -q "^i2c-dev" /etc/modules 2>/dev/null; then
+        info "i2c-dev bereits in /etc/modules – keine Änderung nötig"
+    else
+        echo "i2c-dev" >> /etc/modules
+        info "i2c-dev zu /etc/modules hinzugefügt"
+    fi
+
+    # i2c-dev sofort laden (falls noch nicht geladen)
+    modprobe i2c-dev 2>/dev/null || true
+
+    # Gruppe 'i2c' anlegen falls nicht vorhanden, Benutzer hinzufügen
+    if ! getent group i2c &>/dev/null; then
+        groupadd --system i2c
+        info "Gruppe 'i2c' angelegt"
+    fi
+    usermod -aG i2c "$APP_USER"
+    success "Benutzer '$APP_USER' zur Gruppe 'i2c' hinzugefügt (I2C-HAT-Zugriff)"
 fi
 
 # Kiosk-spezifische Pakete und Benutzer
@@ -576,11 +741,15 @@ section "7 / 9  Konfigurationsdateien"
 
 # device_config.json generieren (wird immer neu geschrieben – Hardware-Konfiguration)
 info "Erstelle device_config.json..."
+
+# GPIO-JSON aufbauen (nur im GPIO-Modus; im I2C-Modus bleibt das Objekt leer)
 GPIO_JSON=""
-for (( i=1; i<=NUM_VALVES; i++ )); do
-    [[ $i -gt 1 ]] && GPIO_JSON+=","$'\n'"      "
-    GPIO_JSON+="\"$i\": ${GPIO_PINS[$((i-1))]}"
-done
+if [[ "$VALVE_DRIVER_MODE" == "rpi" ]]; then
+    for (( i=1; i<=NUM_VALVES; i++ )); do
+        [[ $i -gt 1 ]] && GPIO_JSON+=","$'\n'"      "
+        GPIO_JSON+="\"$i\": ${GPIO_PINS[$((i-1))]}"
+    done
+fi
 
 # Sensor-Pins-JSON aufbauen.
 # Wenn keine Sensoren installiert: leeres Objekt – Schlüssel existiert immer,
@@ -614,11 +783,14 @@ cat > "$DATA_DIR/device_config.json" << EOF
   "version": 1,
   "device": {
     "MAX_VALVES": $NUM_VALVES,
-    "IRRIGATION_VALVE_DRIVER": "rpi",
+    "IRRIGATION_VALVE_DRIVER": "$VALVE_DRIVER_MODE",
     "IRRIGATION_RELAY_ACTIVE_LOW": $RELAY_ACTIVE_LOW,
     "IRRIGATION_GPIO_PINS": {
       $GPIO_JSON
-    }
+    },
+    "IRRIGATION_RELAY_HAT_TYPE": "$RELAY_HAT_TYPE",
+    "IRRIGATION_I2C_BUS": $I2C_BUS,
+    "IRRIGATION_I2C_ADDRESS": $I2C_ADDR_DEC
   },
   "sensors": {
     "IRRIGATION_SENSOR_DRIVER": "$SENSOR_DRIVER",
@@ -672,10 +844,11 @@ cat > "$ENV_FILE" << EOF
 # Noria – Umgebungsvariablen
 # Automatisch generiert von install.sh – bei Bedarf manuell anpassen.
 
-# Treiber: rpi = echter Raspberry Pi GPIO, sim = Simulation (kein GPIO)
-IRRIGATION_VALVE_DRIVER=rpi
+# Treiber: rpi = GPIO direkt, i2c = Sequent Relay HAT, sim = Simulation (kein GPIO)
+IRRIGATION_VALVE_DRIVER=$VALVE_DRIVER_MODE
 
-# Relais-Polarität: true = LOW aktiviert Relais (Standard für die meisten Boards)
+# Relais-Polarität: true = LOW aktiviert Relais (Standard für GPIO-Boards)
+# Wird nur im GPIO-Modus (rpi) ausgewertet.
 IRRIGATION_RELAY_ACTIVE_LOW=$RELAY_ACTIVE_LOW
 
 # CORS: Von welchen Adressen darf ein Browser auf die API zugreifen?
@@ -762,9 +935,13 @@ ReadWritePaths=$APP_DIR $DATA_DIR $LOGS_DIR
 
 # GPIO-Zugriff: Pi 4 und älter nutzen /dev/gpiomem, Pi 5 (RP1-Chip) nutzt
 # /dev/gpiochip4. Beide werden erlaubt für maximale Kompatibilität.
+# I2C-Zugriff: /dev/i2c-0 und /dev/i2c-1 werden immer eingetragen –
+# schadet bei reinem GPIO-Betrieb nicht, ermöglicht reibungslosen Wechsel zu I2C.
 DeviceAllow=/dev/gpiochip0 rw
 DeviceAllow=/dev/gpiochip4 rw
-SupplementaryGroups=gpio
+DeviceAllow=/dev/i2c-0 rw
+DeviceAllow=/dev/i2c-1 rw
+SupplementaryGroups=$SUPP_GROUPS
 
 [Install]
 WantedBy=multi-user.target

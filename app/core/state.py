@@ -132,7 +132,8 @@ class RunState:
       - Dirty-Flags:            schedules_dirty, queue_dirty, history_dirty
       - Hardware-Fault-Latch:   hw_faulted, hw_fault_*
       - Parallel-Modus:         parallel_enabled, max_concurrent_valves, parallel_drain_logged
-      - Device-Konfiguration:   max_valves, valve_driver_mode, relay_active_low, gpio_pins_by_zone
+      - Device-Konfiguration:   max_valves, valve_driver_mode, relay_active_low,
+                                gpio_pins_by_zone, relay_hat_type, i2c_bus, i2c_address
       - Sensor-Konfiguration:   sensor_driver_mode, sensor_gpio_pins,
                                 sensor_internal_pull_up, sensor_polling_interval_s,
                                 sensor_cooldown_s, sensor_default_duration_s
@@ -201,9 +202,17 @@ class RunState:
 
     # ── Device-Konfiguration (aus device_config.json) ─────────────────────────
     max_valves: int = 6
-    valve_driver_mode: str = "sim"      # "sim" | "rpi"
-    relay_active_low: bool = True       # True = Relais-Board mit Active-Low-Logik
-    gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin}
+    valve_driver_mode: str = "sim"      # "sim" | "rpi" | "i2c"
+    relay_active_low: bool = True       # True = Relais-Board mit Active-Low-Logik (GPIO-Modus)
+    gpio_pins_by_zone: Dict[int, int] | None = None  # {zone: BCM-Pin} (GPIO-Modus)
+
+    # I2C-Relay-HAT-Konfiguration (für valve_driver_mode == "i2c")
+    # Unterstützte Modelle:
+    #   "8relay"  – Sequent Microsystems 8-Relay HAT  (Primäradresse 0x38–0x3F)
+    #   "16relay" – Sequent Microsystems 16-Relay HAT (Primäradresse 0x20–0x27)
+    relay_hat_type: str = "16relay"
+    i2c_bus: int = 1                    # I2C-Busnummer (0 oder 1, typisch 1 = /dev/i2c-1)
+    i2c_address: int = 0x20            # I2C-Adresse dezimal (z.B. 32 = 0x20)
 
     # ── Sensor-Konfiguration (aus device_config.json) ─────────────────────────
     sensor_driver_mode: str = "sim"                    # "sim" | "rpi_switch"
