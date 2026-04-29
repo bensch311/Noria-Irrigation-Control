@@ -2,35 +2,44 @@
 Tests für services/valve_driver.py
 
 Getestet werden:
-  - validate_gpio_pins       (valide Konfiguration, Fehler, Duplikate)
-  - SimValveDriver           (open/close/close_all – kein Fehler erwartet)
-  - RpiGpioValveDriver       (Logik: active_low, Pin-Mapping, Fehlerbehandlung)
-  - get_valve_driver         (sim-Modus, unbekannter Modus → Fallback)
+  - validate_gpio_pins         (valide Konfiguration, Fehler, Duplikate)
+  - validate_i2c_config        (hat_type, Adressbereiche, max_valves-Limits)
+  - SimValveDriver             (open/close/close_all – kein Fehler erwartet)
+  - RpiGpioValveDriver         (Logik: active_low, Pin-Mapping, Fehlerbehandlung)
+  - I2cRelayValveDriver        (Init, open/close, Bitmask-Logik, close_all, cleanup)
+  - get_valve_driver           (sim, rpi, i2c – inkl. Fallback bei Fehler)
 
-Hinweis zur Mock-Strategie:
-  RpiGpioValveDriver importiert lgpio beim __init__. Der Mock wird über
-  sys.modules["lgpio"] eingehängt, bevor der Import erfolgt, und danach
-  wieder entfernt, damit andere Tests nicht beeinflusst werden.
+Mock-Strategie für RpiGpioValveDriver:
+  lgpio wird via sys.modules["lgpio"] eingehängt bevor der Import erfolgt,
+  und danach wieder entfernt damit andere Tests nicht beeinflusst werden.
 
-  lgpio-API im Vergleich zu RPi.GPIO:
-    lgpio.gpiochip_open(0)              → handle (int)
-    lgpio.gpio_claim_output(h, pin, v)  → Pin als Output mit Initialwert
-    lgpio.gpio_write(h, pin, v)         → Wert setzen (0 oder 1)
-    lgpio.gpiochip_close(h)             → Chip-Handle freigeben (Cleanup)
+Mock-Strategie für I2cRelayValveDriver:
+  Identisches Muster: sys.modules["smbus2"] wird vor dem __init__ gesetzt
+  und danach wieder entfernt. bus_mock (der Rückgabewert von smbus2.SMBus())
+  wird für Assertions auf write_byte_data verwendet.
 """
 
 import sys
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from services.valve_driver import (
     validate_gpio_pins,
+    validate_i2c_config,
     SimValveDriver,
     RpiGpioValveDriver,
+    I2cRelayValveDriver,
     get_valve_driver,
     reset_valve_driver,
     set_valve_driver,
     ValveDriverError,
+    # Register-Konstanten (direkt importiert für Assertions)
+    _REL16_OUTPORT_REG_LO,
+    _REL16_OUTPORT_REG_HI,
+    _REL16_CFG_REG_LO,
+    _REL16_CFG_REG_HI,
+    _REL8_OUTPORT_REG,
+    _REL8_CFG_REG,
 )
 from core.state import state, state_lock
 
@@ -67,6 +76,38 @@ def _make_rpi_driver(
     # Nach der Instanziierung bleibt lgpio_mock im driver._lgpio – alle
     # späteren Aufrufe (open/close/cleanup) gehen durch diesen Mock.
     return driver, lgpio_mock
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hilfsfunktion: Erstellt einen gemockten I2cRelayValveDriver
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_i2c_driver(
+    hat_type: str = "16relay",
+    i2c_bus: int = 1,
+    i2c_address: int = 0x20,
+    num_zones: int = 4,
+) -> tuple[I2cRelayValveDriver, MagicMock]:
+    """
+    Instanziiert I2cRelayValveDriver mit einem vollständig gemockten smbus2-Modul.
+
+    Gibt (driver, bus_mock) zurück. bus_mock ist der Rückgabewert von
+    smbus2.SMBus() – alle write_byte_data/close-Aufrufe gehen darüber.
+
+    smbus2 wird nach dem Init aus sys.modules entfernt damit andere Tests
+    nicht beeinflusst werden. Der driver._bus referenziert weiterhin bus_mock.
+    """
+    smbus2_mock = MagicMock()
+    bus_mock = MagicMock()
+    smbus2_mock.SMBus.return_value = bus_mock
+
+    sys.modules["smbus2"] = smbus2_mock
+    try:
+        driver = I2cRelayValveDriver(hat_type, i2c_bus, i2c_address, num_zones)
+    finally:
+        sys.modules.pop("smbus2", None)
+
+    return driver, bus_mock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +160,113 @@ class TestValidateGpioPins:
     def test_boundary_pin_27_is_valid(self):
         result = validate_gpio_pins({1: 27})
         assert result["ok"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# validate_i2c_config
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestValidateI2cConfig:
+    # ── 16relay ──────────────────────────────────────────────────────────────
+
+    def test_16relay_valid_primary_address(self):
+        """Gültige Primäradresse 0x20 für 16-Relay HAT."""
+        result = validate_i2c_config("16relay", 1, 0x20, 8)
+        assert result["ok"] is True
+        assert result["errors"] == []
+
+    def test_16relay_valid_max_address(self):
+        """Gültige Maximaladresse 0x27 für 16-Relay HAT."""
+        result = validate_i2c_config("16relay", 1, 0x27, 16)
+        assert result["ok"] is True
+
+    def test_16relay_valid_max_valves(self):
+        """16 Zonen sind erlaubt für 16-Relay HAT."""
+        result = validate_i2c_config("16relay", 1, 0x20, 16)
+        assert result["ok"] is True
+
+    def test_16relay_address_too_low(self):
+        """Adresse unterhalb 0x20 ist für 16-Relay HAT ungültig."""
+        result = validate_i2c_config("16relay", 1, 0x1F, 8)
+        assert result["ok"] is False
+        assert len(result["errors"]) == 1
+        assert "0x1F" in result["errors"][0]
+
+    def test_16relay_address_too_high(self):
+        """Adresse 0x28 ist für 16-Relay HAT ungültig."""
+        result = validate_i2c_config("16relay", 1, 0x28, 8)
+        assert result["ok"] is False
+
+    def test_16relay_max_valves_exceeded(self):
+        """17 Zonen überschreiten die 16-Relay-Kapazität."""
+        result = validate_i2c_config("16relay", 1, 0x20, 17)
+        assert result["ok"] is False
+        assert any("max_valves" in e or "16" in e for e in result["errors"])
+
+    # ── 8relay ───────────────────────────────────────────────────────────────
+
+    def test_8relay_valid_primary_address(self):
+        """Gültige Primäradresse 0x38 für 8-Relay HAT."""
+        result = validate_i2c_config("8relay", 1, 0x38, 4)
+        assert result["ok"] is True
+        assert result["errors"] == []
+
+    def test_8relay_valid_max_primary_address(self):
+        """Gültige Primäradresse 0x3F für 8-Relay HAT."""
+        result = validate_i2c_config("8relay", 1, 0x3F, 8)
+        assert result["ok"] is True
+
+    def test_8relay_valid_alternate_address(self):
+        """Alternativadresse 0x20 ist gültig für 8-Relay HAT."""
+        result = validate_i2c_config("8relay", 1, 0x20, 4)
+        assert result["ok"] is True
+
+    def test_8relay_valid_max_alternate_address(self):
+        """Alternativadresse 0x27 ist gültig für 8-Relay HAT."""
+        result = validate_i2c_config("8relay", 1, 0x27, 8)
+        assert result["ok"] is True
+
+    def test_8relay_invalid_address(self):
+        """Adresse 0x30 liegt weder im Primär- noch im Alternativbereich."""
+        result = validate_i2c_config("8relay", 1, 0x30, 4)
+        assert result["ok"] is False
+        assert "0x30" in result["errors"][0]
+
+    def test_8relay_max_valves_exceeded(self):
+        """9 Zonen überschreiten die 8-Relay-Kapazität."""
+        result = validate_i2c_config("8relay", 1, 0x38, 9)
+        assert result["ok"] is False
+
+    def test_8relay_valid_max_valves(self):
+        """8 Zonen sind erlaubt für 8-Relay HAT."""
+        result = validate_i2c_config("8relay", 1, 0x38, 8)
+        assert result["ok"] is True
+
+    # ── Allgemein ─────────────────────────────────────────────────────────────
+
+    def test_invalid_hat_type(self):
+        """Unbekannter hat_type muss als Fehler gemeldet werden."""
+        result = validate_i2c_config("32relay", 1, 0x20, 4)
+        assert result["ok"] is False
+        assert any("hat_type" in e or "32relay" in e for e in result["errors"])
+
+    def test_invalid_i2c_bus(self):
+        """Nur I2C-Bus 0 und 1 sind gültig."""
+        result = validate_i2c_config("16relay", 2, 0x20, 4)
+        assert result["ok"] is False
+        assert any("i2c_bus" in e or "bus" in e.lower() for e in result["errors"])
+
+    def test_i2c_bus_0_is_valid(self):
+        """I2C-Bus 0 ist explizit erlaubt."""
+        result = validate_i2c_config("16relay", 0, 0x20, 4)
+        assert result["ok"] is True
+
+    def test_multiple_errors_combined(self):
+        """Mehrere Fehler werden gemeinsam gemeldet."""
+        result = validate_i2c_config("bad_type", 5, 0x10, 99)
+        assert result["ok"] is False
+        assert len(result["errors"]) >= 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -508,7 +656,380 @@ class TestRpiGpioValveDriverCloseAll:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# get_valve_driver
+# I2cRelayValveDriver – Initialisierung
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriverInit:
+    def test_smbus2_not_available_raises_valve_driver_error(self):
+        """Wenn smbus2 nicht importiert werden kann, muss ValveDriverError geworfen werden."""
+        sys.modules.pop("smbus2", None)
+        with patch.dict("sys.modules", {"smbus2": None}):
+            with pytest.raises(ValveDriverError, match="smbus2"):
+                I2cRelayValveDriver("16relay", 1, 0x20, 4)
+
+    def test_smbus_open_failure_raises_valve_driver_error(self):
+        """Wenn SMBus() fehlschlägt, muss ValveDriverError geworfen werden."""
+        smbus2_mock = MagicMock()
+        smbus2_mock.SMBus.side_effect = OSError("I2C-Bus nicht gefunden")
+        sys.modules["smbus2"] = smbus2_mock
+        try:
+            with pytest.raises(ValveDriverError, match="I2C-Bus"):
+                I2cRelayValveDriver("16relay", 1, 0x20, 4)
+        finally:
+            sys.modules.pop("smbus2", None)
+
+    def test_driver_name_is_i2c(self):
+        driver, _ = _make_i2c_driver()
+        assert driver.name == "i2c"
+
+    def test_16relay_init_writes_output_latch_before_config(self):
+        """
+        Sicherheitskritisch: Output-Latch muss VOR dem Config-Register auf 0x00
+        geschrieben werden. Falsche Reihenfolge würde alle Relais kurz einschalten.
+        Beide Register in der richtigen Sequenz prüfen.
+        """
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay")
+        write_calls = bus_mock.write_byte_data.call_args_list
+
+        # Reihenfolge der Register-Schreibvorgänge extrahieren
+        reg_sequence = [c.args[1] for c in write_calls]
+
+        # Output-Latch LO (0x02) muss vor Config LO (0x06) kommen
+        assert reg_sequence.index(_REL16_OUTPORT_REG_LO) < reg_sequence.index(_REL16_CFG_REG_LO), (
+            "Output-Latch LO muss vor Config LO geschrieben werden!"
+        )
+        # Output-Latch HI (0x03) muss vor Config HI (0x07) kommen
+        assert reg_sequence.index(_REL16_OUTPORT_REG_HI) < reg_sequence.index(_REL16_CFG_REG_HI), (
+            "Output-Latch HI muss vor Config HI geschrieben werden!"
+        )
+
+    def test_16relay_init_writes_all_registers_to_zero(self):
+        """Alle 4 Register des 16-Relay HAT müssen beim Init auf 0x00 gesetzt werden."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay")
+        write_calls = bus_mock.write_byte_data.call_args_list
+
+        written_regs = {c.args[1]: c.args[2] for c in write_calls}
+        assert written_regs.get(_REL16_OUTPORT_REG_LO) == 0x00
+        assert written_regs.get(_REL16_OUTPORT_REG_HI) == 0x00
+        assert written_regs.get(_REL16_CFG_REG_LO) == 0x00
+        assert written_regs.get(_REL16_CFG_REG_HI) == 0x00
+
+    def test_8relay_init_writes_output_latch_before_config(self):
+        """
+        8-Relay HAT: Output-Latch muss vor Config-Register auf 0x00 gesetzt werden.
+        """
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x38)
+        write_calls = bus_mock.write_byte_data.call_args_list
+        reg_sequence = [c.args[1] for c in write_calls]
+
+        assert reg_sequence.index(_REL8_OUTPORT_REG) < reg_sequence.index(_REL8_CFG_REG), (
+            "Output-Latch (0x01) muss vor Config-Register (0x03) geschrieben werden!"
+        )
+
+    def test_8relay_init_writes_both_registers_to_zero(self):
+        """Beide Register des 8-Relay HAT müssen beim Init auf 0x00 gesetzt werden."""
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x38)
+        write_calls = bus_mock.write_byte_data.call_args_list
+        written_regs = {c.args[1]: c.args[2] for c in write_calls}
+
+        assert written_regs.get(_REL8_OUTPORT_REG) == 0x00
+        assert written_regs.get(_REL8_CFG_REG) == 0x00
+
+    def test_init_hardware_failure_closes_bus(self):
+        """Wenn _init_hardware() fehlschlägt, muss bus.close() aufgerufen werden (kein Handle-Leak)."""
+        smbus2_mock = MagicMock()
+        bus_mock = MagicMock()
+        smbus2_mock.SMBus.return_value = bus_mock
+        bus_mock.write_byte_data.side_effect = OSError("I2C write error")
+
+        sys.modules["smbus2"] = smbus2_mock
+        try:
+            with pytest.raises(ValveDriverError):
+                I2cRelayValveDriver("16relay", 1, 0x20, 4)
+            bus_mock.close.assert_called_once()
+        finally:
+            sys.modules.pop("smbus2", None)
+
+    def test_initial_state_is_zero(self):
+        """Nach dem Init muss der interne Bitmask-State 0 sein (alle Relais aus)."""
+        driver, _ = _make_i2c_driver()
+        assert driver._state == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I2cRelayValveDriver – open()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriverOpen:
+    def test_open_zone1_sets_bit0(self):
+        """open(1) muss Bit 0 setzen (0x01 in Low-Byte)."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=4)
+        bus_mock.reset_mock()
+
+        driver.open(1)
+
+        # Erwarteter Low-Byte-Wert: 0x01 (nur Bit 0 gesetzt)
+        calls = bus_mock.write_byte_data.call_args_list
+        lo_calls = [c for c in calls if c.args[1] == _REL16_OUTPORT_REG_LO]
+        assert len(lo_calls) == 1
+        assert lo_calls[0].args[2] == 0x01
+
+    def test_open_zone2_sets_bit1(self):
+        """open(2) muss Bit 1 setzen (0x02 in Low-Byte)."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=4)
+        bus_mock.reset_mock()
+
+        driver.open(2)
+
+        calls = bus_mock.write_byte_data.call_args_list
+        lo_calls = [c for c in calls if c.args[1] == _REL16_OUTPORT_REG_LO]
+        assert lo_calls[0].args[2] == 0x02
+
+    def test_open_multiple_zones_accumulates_bitmask(self):
+        """Mehrere open()-Aufrufe müssen die Bitmask kumulieren, nicht überschreiben."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=4)
+        bus_mock.reset_mock()
+
+        driver.open(1)
+        driver.open(3)
+
+        # Zone 1 (Bit 0) + Zone 3 (Bit 2) = 0b0101 = 0x05
+        assert driver._state == 0x05
+
+    def test_open_zone9_sets_hi_byte(self):
+        """
+        Zone 9 (Bit 8) liegt im High-Byte → REG_HI muss 0x01 enthalten.
+        Low-Byte bleibt 0x00.
+        """
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=16)
+        bus_mock.reset_mock()
+
+        driver.open(9)
+
+        calls = bus_mock.write_byte_data.call_args_list
+        reg_to_val = {c.args[1]: c.args[2] for c in calls}
+
+        assert reg_to_val.get(_REL16_OUTPORT_REG_LO) == 0x00, "Low-Byte muss 0 bleiben"
+        assert reg_to_val.get(_REL16_OUTPORT_REG_HI) == 0x01, "High-Byte muss Bit 0 gesetzt haben"
+
+    def test_open_8relay_writes_single_register(self):
+        """8-Relay HAT: open() darf nur REG_RELAY (0x01) schreiben."""
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x38, num_zones=4)
+        bus_mock.reset_mock()
+
+        driver.open(1)
+
+        calls = bus_mock.write_byte_data.call_args_list
+        written_regs = [c.args[1] for c in calls]
+        assert written_regs == [_REL8_OUTPORT_REG]
+        assert calls[0].args[2] == 0x01
+
+    def test_open_zone_out_of_range_raises(self):
+        """open() für eine nicht konfigurierte Zone muss ValveDriverError werfen."""
+        driver, _ = _make_i2c_driver(num_zones=4)
+        with pytest.raises(ValveDriverError, match="Zone 5"):
+            driver.open(5)
+
+    def test_open_zone0_raises(self):
+        """Zone 0 ist ungültig (Zonen starten bei 1)."""
+        driver, _ = _make_i2c_driver(num_zones=4)
+        with pytest.raises(ValveDriverError):
+            driver.open(0)
+
+    def test_open_does_not_modify_state_on_error(self):
+        """Bei ungültiger Zone darf der interne State nicht verändert werden."""
+        driver, _ = _make_i2c_driver(num_zones=4)
+        initial_state = driver._state
+        with pytest.raises(ValveDriverError):
+            driver.open(99)
+        assert driver._state == initial_state
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I2cRelayValveDriver – close()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriverClose:
+    def test_close_clears_correct_bit(self):
+        """close(1) muss Bit 0 löschen ohne andere Bits zu verändern."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=4)
+        driver.open(1)
+        driver.open(2)
+        bus_mock.reset_mock()
+
+        driver.close(1)
+
+        # Nur Zone 2 (Bit 1 = 0x02) darf noch gesetzt sein
+        assert driver._state == 0x02
+        calls = bus_mock.write_byte_data.call_args_list
+        lo_calls = [c for c in calls if c.args[1] == _REL16_OUTPORT_REG_LO]
+        assert lo_calls[0].args[2] == 0x02
+
+    def test_close_zone_not_open_is_idempotent(self):
+        """close() einer bereits geschlossenen Zone darf nicht fehlschlagen."""
+        driver, bus_mock = _make_i2c_driver(num_zones=4)
+        # Zone 1 ist noch nicht geöffnet
+        driver.close(1)  # darf nicht werfen
+        assert driver._state == 0
+
+    def test_close_out_of_range_raises(self):
+        """close() für eine nicht konfigurierte Zone muss ValveDriverError werfen."""
+        driver, _ = _make_i2c_driver(num_zones=4)
+        with pytest.raises(ValveDriverError):
+            driver.close(5)
+
+    def test_open_close_results_in_zero_state(self):
+        """open() gefolgt von close() muss denselben Zustand wie initial erzeugen."""
+        driver, _ = _make_i2c_driver(num_zones=4)
+        driver.open(1)
+        driver.open(2)
+        driver.close(1)
+        driver.close(2)
+        assert driver._state == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I2cRelayValveDriver – close_all()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriverCloseAll:
+    def test_close_all_resets_internal_state(self):
+        """close_all() muss den internen _state auf 0 setzen."""
+        driver, bus_mock = _make_i2c_driver(num_zones=4)
+        driver.open(1)
+        driver.open(3)
+        assert driver._state != 0
+
+        bus_mock.reset_mock()
+        driver.close_all()
+
+        assert driver._state == 0
+
+    def test_close_all_16relay_writes_both_registers_to_zero(self):
+        """close_all() beim 16-Relay HAT muss beide Ausgangsregister auf 0x00 schreiben."""
+        driver, bus_mock = _make_i2c_driver(hat_type="16relay", num_zones=8)
+        driver.open(1)
+        bus_mock.reset_mock()
+
+        driver.close_all()
+
+        calls = bus_mock.write_byte_data.call_args_list
+        reg_to_val = {c.args[1]: c.args[2] for c in calls}
+        assert reg_to_val.get(_REL16_OUTPORT_REG_LO) == 0x00
+        assert reg_to_val.get(_REL16_OUTPORT_REG_HI) == 0x00
+
+    def test_close_all_8relay_writes_single_register_to_zero(self):
+        """close_all() beim 8-Relay HAT muss nur REG_RELAY auf 0x00 schreiben."""
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x38, num_zones=4)
+        driver.open(1)
+        bus_mock.reset_mock()
+
+        driver.close_all()
+
+        calls = bus_mock.write_byte_data.call_args_list
+        written_regs = [c.args[1] for c in calls]
+        assert written_regs == [_REL8_OUTPORT_REG]
+        assert calls[0].args[2] == 0x00
+
+    def test_close_all_best_effort_does_not_raise_on_hw_error(self):
+        """
+        Sicherheitskritisch: close_all() darf selbst bei I2C-Fehler nicht werfen.
+        Der interne State muss trotzdem auf 0 gesetzt werden.
+        """
+        driver, bus_mock = _make_i2c_driver(num_zones=4)
+        driver.open(1)
+        bus_mock.write_byte_data.side_effect = OSError("I2C-Busfehler")
+
+        driver.close_all()  # darf nicht werfen
+
+        assert driver._state == 0
+
+    def test_close_all_logs_register_errors(self):
+        """Bei I2C-Fehler in close_all() muss valve_hw_close_all_reg_error geloggt werden."""
+        driver, bus_mock = _make_i2c_driver(num_zones=4)
+        driver.open(1)
+        bus_mock.write_byte_data.side_effect = OSError("I2C-Busfehler")
+
+        with patch("services.valve_driver.log_event") as mock_log:
+            driver.close_all()
+
+        error_events = [
+            c for c in mock_log.call_args_list
+            if c.args and c.args[0] == "valve_hw_close_all_reg_error"
+        ]
+        assert len(error_events) >= 1
+        kw = error_events[0].kwargs
+        assert kw["level"] == "error"
+        assert "error" in kw
+
+    def test_close_all_summary_event_logged(self):
+        """valve_hw_close_all-Event muss nach close_all() geloggt werden."""
+        driver, bus_mock = _make_i2c_driver(num_zones=4)
+        bus_mock.reset_mock()
+
+        with patch("services.valve_driver.log_event") as mock_log:
+            driver.close_all()
+
+        summary_events = [
+            c for c in mock_log.call_args_list
+            if c.args and c.args[0] == "valve_hw_close_all"
+        ]
+        assert len(summary_events) == 1
+        assert summary_events[0].kwargs.get("failed_count") == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I2cRelayValveDriver – cleanup()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriverCleanup:
+    def test_cleanup_calls_bus_close(self):
+        """cleanup() muss bus.close() aufrufen."""
+        driver, bus_mock = _make_i2c_driver()
+        driver.cleanup()
+        bus_mock.close.assert_called_once()
+
+    def test_cleanup_sets_bus_to_none(self):
+        """Nach cleanup() muss driver._bus None sein (kein dangling Handle)."""
+        driver, _ = _make_i2c_driver()
+        driver.cleanup()
+        assert driver._bus is None
+
+    def test_cleanup_does_not_raise_on_bus_error(self):
+        """Wenn bus.close() wirft, darf cleanup() nicht werfen."""
+        driver, bus_mock = _make_i2c_driver()
+        bus_mock.close.side_effect = OSError("Bus bereits geschlossen")
+        driver.cleanup()  # kein raise erwartet
+
+    def test_cleanup_logs_error_on_bus_failure(self):
+        """Bei bus.close()-Fehler muss valve_driver_i2c_cleanup_error geloggt werden."""
+        driver, bus_mock = _make_i2c_driver()
+        bus_mock.close.side_effect = OSError("Bus bereits geschlossen")
+
+        with patch("services.valve_driver.log_event") as mock_log:
+            driver.cleanup()
+
+        error_events = [
+            c for c in mock_log.call_args_list
+            if c.args and c.args[0] == "valve_driver_i2c_cleanup_error"
+        ]
+        assert len(error_events) == 1
+        assert error_events[0].kwargs.get("level") == "error"
+
+    def test_cleanup_idempotent_after_none_bus(self):
+        """cleanup() auf einem bereits bereinigten Driver (bus=None) darf nicht werfen."""
+        driver, _ = _make_i2c_driver()
+        driver._bus = None
+        driver.cleanup()  # kein raise erwartet
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_valve_driver – Singleton & Modi
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -546,9 +1067,75 @@ class TestGetValveDriver:
         set_valve_driver(custom)
         assert get_valve_driver() is custom
 
+    def test_i2c_mode_with_valid_config_returns_i2c_driver(self):
+        """
+        Wenn valve_driver_mode='i2c' und smbus2 verfügbar ist,
+        muss ein I2cRelayValveDriver zurückgegeben werden.
+        """
+        reset_valve_driver()
+
+        smbus2_mock = MagicMock()
+        bus_mock = MagicMock()
+        smbus2_mock.SMBus.return_value = bus_mock
+
+        with state_lock:
+            state.valve_driver_mode = "i2c"
+            state.relay_hat_type = "16relay"
+            state.i2c_bus = 1
+            state.i2c_address = 0x20
+            state.max_valves = 4
+
+        sys.modules["smbus2"] = smbus2_mock
+        try:
+            drv = get_valve_driver()
+            assert drv.name == "i2c"
+            assert isinstance(drv, I2cRelayValveDriver)
+        finally:
+            sys.modules.pop("smbus2", None)
+            reset_valve_driver()
+
+    def test_i2c_mode_without_smbus2_falls_back_to_sim(self):
+        """
+        Wenn valve_driver_mode='i2c' aber smbus2 nicht verfügbar ist,
+        muss sicher auf SimValveDriver zurückgefallen werden.
+        """
+        reset_valve_driver()
+
+        with state_lock:
+            state.valve_driver_mode = "i2c"
+            state.relay_hat_type = "16relay"
+            state.i2c_bus = 1
+            state.i2c_address = 0x20
+            state.max_valves = 4
+
+        sys.modules.pop("smbus2", None)
+        with patch.dict("sys.modules", {"smbus2": None}):
+            drv = get_valve_driver()
+            assert drv.name == "sim"
+
+        reset_valve_driver()
+
+    def test_i2c_mode_with_invalid_config_falls_back_to_sim(self):
+        """
+        Wenn valve_driver_mode='i2c' aber die Konfiguration ungültig ist
+        (z.B. max_valves > 8 für 8relay), muss auf sim zurückgefallen werden.
+        """
+        reset_valve_driver()
+
+        with state_lock:
+            state.valve_driver_mode = "i2c"
+            state.relay_hat_type = "8relay"
+            state.i2c_bus = 1
+            state.i2c_address = 0x38
+            state.max_valves = 16  # zu viele für 8relay!
+
+        drv = get_valve_driver()
+        assert drv.name == "sim"
+        reset_valve_driver()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# cleanup()
+# cleanup() – Sim und Rpi
 # ─────────────────────────────────────────────────────────────────────────────
 
 

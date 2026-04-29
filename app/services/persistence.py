@@ -112,9 +112,12 @@ def _default_device_config_payload() -> dict:
         "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "device": {
             "MAX_VALVES": int(MAX_VALVES),
-            "IRRIGATION_VALVE_DRIVER": "sim",          # sim | rpi
+            "IRRIGATION_VALVE_DRIVER": "sim",          # sim | rpi | i2c
             "IRRIGATION_RELAY_ACTIVE_LOW": True,
-            "IRRIGATION_GPIO_PINS": {},                # {"1": 17, ...} BCM
+            "IRRIGATION_GPIO_PINS": {},                # {"1": 17, ...} BCM (nur rpi-Modus)
+            "IRRIGATION_RELAY_HAT_TYPE": "16relay",    # 8relay | 16relay (nur i2c-Modus)
+            "IRRIGATION_I2C_BUS": 1,                   # I2C-Busnummer (0 oder 1)
+            "IRRIGATION_I2C_ADDRESS": 32,              # I2C-Adresse dezimal (32 = 0x20)
         },
         "sensors": {
             "IRRIGATION_SENSOR_DRIVER": "sim",         # sim | rpi_switch
@@ -195,7 +198,7 @@ def load_device_config_from_disk():
     max_valves = max(1, _int(dev.get("MAX_VALVES", MAX_VALVES), MAX_VALVES))
 
     drv = str(dev.get("IRRIGATION_VALVE_DRIVER", "sim") or "sim").strip().lower()
-    if drv not in ("sim", "rpi"):
+    if drv not in ("sim", "rpi", "i2c"):
         drv = "sim"
 
     active_low = bool(dev.get("IRRIGATION_RELAY_ACTIVE_LOW", True))
@@ -211,6 +214,23 @@ def load_device_config_from_disk():
                     pins_norm[z] = p
             except Exception:
                 continue
+
+    # ── I2C-Relay-HAT-Konfiguration ───────────────────────────────────────────
+    hat_type_raw = str(dev.get("IRRIGATION_RELAY_HAT_TYPE", "16relay") or "16relay").strip().lower()
+    if hat_type_raw not in ("8relay", "16relay"):
+        hat_type_raw = "16relay"
+
+    i2c_bus = max(0, _int(dev.get("IRRIGATION_I2C_BUS", 1), 1))
+
+    # I2C-Adresse: akzeptiert dezimale Zahl (32) oder Hex-String ("0x20")
+    i2c_addr_raw = dev.get("IRRIGATION_I2C_ADDRESS", 0x20)
+    if isinstance(i2c_addr_raw, str) and i2c_addr_raw.strip().lower().startswith("0x"):
+        try:
+            i2c_address = int(i2c_addr_raw, 16)
+        except Exception:
+            i2c_address = 0x20
+    else:
+        i2c_address = _int(i2c_addr_raw, 0x20)
 
     # ── Hard-Limits ───────────────────────────────────────────────────────────
     hard_max_runtime_s = max(1, _int(hl.get("MAX_RUNTIME_S", MAX_RUNTIME_S), MAX_RUNTIME_S))
@@ -257,17 +277,20 @@ def load_device_config_from_disk():
 
     # ── State aktualisieren ───────────────────────────────────────────────────
     with state_lock:
-        state.max_valves = max_valves
-        state.valve_driver_mode = drv
-        state.relay_active_low = active_low
-        state.gpio_pins_by_zone = pins_norm
-        state.hard_max_runtime_s = hard_max_runtime_s
+        state.max_valves                = max_valves
+        state.valve_driver_mode         = drv
+        state.relay_active_low          = active_low
+        state.gpio_pins_by_zone         = pins_norm
+        state.relay_hat_type            = hat_type_raw
+        state.i2c_bus                   = i2c_bus
+        state.i2c_address               = i2c_address
+        state.hard_max_runtime_s        = hard_max_runtime_s
         state.hard_max_concurrent_valves = hard_max_conc
-        state.sensor_driver_mode = sensor_drv
-        state.sensor_gpio_pins = sensor_pins_norm
-        state.sensor_internal_pull_up = sensor_internal_pull_up
+        state.sensor_driver_mode        = sensor_drv
+        state.sensor_gpio_pins          = sensor_pins_norm
+        state.sensor_internal_pull_up   = sensor_internal_pull_up
         state.sensor_polling_interval_s = sensor_polling_interval_s
-        state.sensor_cooldown_s = sensor_cooldown_s
+        state.sensor_cooldown_s         = sensor_cooldown_s
         state.sensor_default_duration_s = sensor_default_duration_s
 
     try:

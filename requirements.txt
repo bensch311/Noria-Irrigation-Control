@@ -11,7 +11,11 @@ faicons==0.2.2
 requests==2.32.5
 
 # ── Raspberry Pi (nur auf dem Pi, auf Dev-Maschine weglassen) ────────────────
-RPi.GPIO
+# rpi-lgpio: GPIO-Treiber für Pi 5 (RP1-Chip) via lgpio-API.
+#            Ersetzt RPi.GPIO, das den RP1-I/O-Controller nicht unterstützt.
+rpi-lgpio
+# smbus2: I2C/SMBus-Kommunikation für Sequent Microsystems Relay HAT.
+smbus2
 
 psutil==6.1.1          # Disk-, RAM-, Uptime- und Netzwerk-Metriken
 
