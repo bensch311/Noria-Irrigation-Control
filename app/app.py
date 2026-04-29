@@ -338,7 +338,7 @@ ui.tags.head(
 # Initiale Defaults – werden nach dem ersten _settings_data()-Poll durch
 # die reaktiven Renderer überschrieben.
 ACCENT_COLOR_DEFAULT       = "#b8902a"
-NAVBAR_TITLE_DEFAULT       = "Noria - Irrigation Control"
+NAVBAR_TITLE_DEFAULT       = "Irrigation Control"
 # Hardcoded Prefix der immer in der Navbar und im Browser-Tab erscheint.
 # Der User konfiguriert nur den Teil dahinter (den "Suffix").
 NAVBAR_PREFIX              = "Noria - "
@@ -525,7 +525,12 @@ def _dynamic_navbar_title_js():
     d = _settings_data()
     # navbar_title enthält nur den User-konfigurierten Suffix.
     # NAVBAR_PREFIX wird hier unveränderlich vorangestellt.
+    # Sicherheitshalber: falls ein alter Wert mit Prefix gespeichert wurde
+    # (z.B. "Noria - Irrigation Control" statt "Irrigation Control"),
+    # diesen vor dem Zusammensetzen entfernen – verhindert doppeltes Prefix.
     suffix = d.get("navbar_title", NAVBAR_TITLE_DEFAULT) if d else NAVBAR_TITLE_DEFAULT
+    if suffix.startswith(NAVBAR_PREFIX):
+        suffix = suffix[len(NAVBAR_PREFIX):] or NAVBAR_TITLE_DEFAULT
     full_title = NAVBAR_PREFIX + suffix
     title_js = _json_mod.dumps(full_title)
     return ui.tags.script(f"""
@@ -555,7 +560,7 @@ def _build_navbar_brand() -> ui.Tag:
             )
         )
     children.append(
-        ui.tags.span(NAVBAR_TITLE_DEFAULT, id="navbar-title-text")
+        ui.tags.span(NAVBAR_PREFIX + NAVBAR_TITLE_DEFAULT, id="navbar-title-text")
     )
     return ui.div(*children, class_="navbar-brand-inner")
 
