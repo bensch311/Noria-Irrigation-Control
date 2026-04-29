@@ -150,18 +150,22 @@ def _process_sensor_cycle_locked(
             )
             continue
 
-        # Bedingung 5: Cooldown pro Sensor
-        last_triggered = state.sensor_last_triggered.get(sensor_id, 0.0)
-        elapsed = now_m - last_triggered
-        if elapsed < cooldown_s:
-            log_event(
-                "sensor_skip_cooldown",
-                source="sensor",
-                sensor_id=sensor_id,
-                remaining_cooldown_s=int(cooldown_s - elapsed),
-                cooldown_s=cooldown_s,
-            )
-            continue
+        # Bedingung 5: Cooldown pro Sensor.
+        # None = Sensor wurde noch nie ausgelöst → kein Cooldown.
+        # Achtung: Default 0.0 wäre falsch: auf einem frischen System (z.B. CI-Runner)
+        # ist time.monotonic() kleiner als cooldown_s → Sensor würde fälschlich blockiert.
+        last_triggered = state.sensor_last_triggered.get(sensor_id)
+        if last_triggered is not None:
+            elapsed = now_m - last_triggered
+            if elapsed < cooldown_s:
+                log_event(
+                    "sensor_skip_cooldown",
+                    source="sensor",
+                    sensor_id=sensor_id,
+                    remaining_cooldown_s=int(cooldown_s - elapsed),
+                    cooldown_s=cooldown_s,
+                )
+                continue
 
         # Zonen des Sensors einzeln prüfen und einreihen
         zones_queued: list[int] = []
