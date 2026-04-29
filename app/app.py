@@ -190,6 +190,39 @@ def _wrap_auth(r: requests.Response | None) -> requests.Response | None:
 
 # fmt_mmss, fmt_duration, fmt_weekdays: importiert aus app_helpers
 
+def _build_pause_rows(slots: list[int], parallel: bool) -> list:
+    """Erzeugt Dashboard-Zeilen für aktive Zonen-Pause-Slots.
+
+    Seriell (parallel=False): max. 1 Slot → einfache Zeile ohne Nummerierung.
+    Parallel (parallel=True):  ≥1 Slot → nummerierte Zeilen ("Slot 1", "Slot 2" …),
+                                sortiert absteigend (längster Slot zuerst).
+
+    Gibt eine leere Liste zurück wenn keine aktiven Slots vorhanden sind.
+    """
+    active = [s for s in (slots or []) if s > 0]
+    if not active:
+        return []
+
+    rows = []
+    # Slots absteigend sortieren: längster zuerst (konsistent mit API-Sortierung)
+    for i, rem in enumerate(sorted(active, reverse=True), start=1):
+        if parallel and len(active) > 1:
+            label = f"Zonenpause Slot\u00a0{i}:"
+        else:
+            label = "Zonenpause:"
+        rows.append(
+            ui.div(
+                ui.tags.small(label, class_="text-muted"),
+                ui.span(
+                    f"\u23f3\u00a0{fmt_mmss(rem)}\u00a0verbleibend",
+                    class_="badge text-bg-info app-badge",
+                ),
+                style="margin-bottom:0.35rem;",
+            )
+        )
+    return rows
+
+
 def state_badge(state_str: str) -> ui.Tag:
     label_map = {
         "laeuft":   ("success",   "Laeuft"),
@@ -955,6 +988,13 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         ui.div(badge, style="margin-bottom:0.85rem;"),
                         *zone_divs,
                         ui.tags.hr(),
+                        # Zonen-Pause: Jeden aktiven Slot einzeln anzeigen.
+                        # Seriell: max. 1 Slot → einfache Zeile.
+                        # Parallel: ggf. mehrere Slots → nummeriert.
+                        *_build_pause_rows(
+                            slots=d.get("zone_pause_slots_remaining_s") or [],
+                            parallel=parallel,
+                        ),
                         ui.div(
                             ui.tags.small("Warteschlange: ", class_="text-muted"),
                             state_badge(q_state),
@@ -2440,6 +2480,17 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                         selected="Minuten", inline=True,
                     )
 
+                    ui.p("Zonen-Pause (Minuten)", class_="fw-semibold mt-3 mb-1")
+                    ui.tags.p(
+                        "Wartezeit nach jeder Bewässerungsgruppe, bevor die nächste Zone startet. "
+                        "0 = keine Pause.",
+                        class_="text-muted small mb-1",
+                    )
+                    # Statisches Widget: value= und max= werden in _sync_settings_to_ui
+                    # (Block A) einmalig nach dem ersten Poll gesetzt.
+                    # Slider zeigt Minuten (0–60); Backend speichert Sekunden (×60).
+                    ui.input_slider("sld_zone_pause_min", None, min=0, max=60, value=0, step=1)
+
                 # --- Verlauf -------------------------------------------------
                 with ui.div(class_="settings-section"):
                     ui.p("Verlauf", class_="settings-section-title")
@@ -2665,6 +2716,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             dur_val      = input.sld_default_duration()
             unit_val     = input.rb_default_time_unit()
             slider_max_val = input.sld_slider_max_minutes()
+            zone_pause_min_val = input.sld_zone_pause_min()
 
             rv = _post("/settings", json={
                 "max_history_items":  hist_val,
@@ -2673,6 +2725,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 "default_duration":   dur_val,
                 "default_time_unit":  unit_val,
                 "slider_max_minutes": slider_max_val,
+                "zone_pause_s":       zone_pause_min_val * 60,
             })
             if rv and rv.ok:
                 ui.notification_show(
@@ -2702,7 +2755,7 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
             A) Nur einmalig beim ersten Load + nach erfolgreichem Save:
                txt_navbar_title, clr_accent_color, sld_max_history,
                sld_slider_max_minutes (inkl. max=), sld_default_duration (inkl. max=),
-               rb_default_time_unit
+               rb_default_time_unit, sld_zone_pause_min
                → _settings_initialized verhindert, dass der User-Input
                  bei jedem 5s-Poll überschrieben wird.
                → Beide Slider sind statische Widgets; max= und value= werden hier
@@ -2746,6 +2799,11 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 # gespeicherten Wert (bereits serverseitig gegen slider_max gekappt).
                 default_dur = min(max(1, int(d.get("default_duration", 5))), slider_max)
                 ui.update_slider("sld_default_duration", min=1, max=slider_max, value=default_dur)
+
+                # sld_zone_pause_min: value= auf gespeicherten Wert (zone_pause_s // 60).
+                # max= bleibt fix bei 60 (entspricht 3600 s = 60 Minuten).
+                zone_pause_s_stored = int(d.get("zone_pause_s", 0) or 0)
+                ui.update_slider("sld_zone_pause_min", value=zone_pause_s_stored // 60)
 
             # B) Slider/Radios in allen Tabs: nur bei Wertänderung ───────────
             dur        = int(d.get("default_duration", 5))

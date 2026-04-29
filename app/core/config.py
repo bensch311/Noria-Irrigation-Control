@@ -47,6 +47,12 @@ DEFAULT_TIME_UNIT = "Minuten"
 # ab Werk übereinstimmen. Vom Benutzer über die Einstellungen anpassbar.
 SLIDER_MAX_MINUTES = MAX_RUNTIME_S // 60
 
+# Pause zwischen zwei Bewässerungsvorgängen in Sekunden (0 = keine Pause).
+# Greift sobald active_runs nach dem Ende einer Zone/Gruppe leer ist und
+# noch Queue-Items warten. Vom Benutzer über die Einstellungen anpassbar.
+# Maximaler sinnvoller Wert: 3600 s (60 Minuten).
+DEFAULT_ZONE_PAUSE_S = 0
+
 MAX_CONCURRENT_VALVES = 2
 DEFAULT_PARALLEL_ENABLED = False
 

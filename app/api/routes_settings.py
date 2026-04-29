@@ -46,6 +46,7 @@ def get_settings():
             "default_duration":   int(getattr(state, "default_duration", 5)),
             "default_time_unit":  str(getattr(state, "default_time_unit", "Minuten")),
             "slider_max_minutes": int(getattr(state, "slider_max_minutes", 60)),
+            "zone_pause_s":       int(getattr(state, "zone_pause_s", 0)),
             "max_valves":         int(getattr(state, "max_valves", 6)),        # readonly
             "valve_driver":       str(getattr(state, "valve_driver_mode", "?")),  # readonly
             "hard_max_runtime_s": int(getattr(state, "hard_max_runtime_s", 3600)),  # readonly
@@ -81,6 +82,7 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         state.default_duration   = clamped_default_dur
         state.default_time_unit  = req.default_time_unit
         state.slider_max_minutes = clamped_slider_max
+        state.zone_pause_s       = req.zone_pause_s
 
     save_user_settings_to_disk()
 
@@ -93,6 +95,7 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         default_duration=clamped_default_dur,
         default_time_unit=req.default_time_unit,
         slider_max_minutes=clamped_slider_max,
+        zone_pause_s=req.zone_pause_s,
     )
 
     return {
@@ -103,4 +106,5 @@ def update_settings(request: Request, req: SettingsUpdateRequest):
         "default_duration":   clamped_default_dur,
         "default_time_unit":  req.default_time_unit,
         "slider_max_minutes": clamped_slider_max,
+        "zone_pause_s":       req.zone_pause_s,
     }

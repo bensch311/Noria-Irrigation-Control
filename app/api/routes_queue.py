@@ -203,6 +203,10 @@ def queue_clear(request: Request):
         state.queue = state.queue or []
         state.queue.clear()
         state.queue_dirty = True
+        # Zonen-Pause aufheben: Wenn die Queue geleert wird, gibt es keine
+        # Items mehr auf die gewartet werden müsste. Alle Pause-Slots werden
+        # gelöscht, da sie gegenstandslos sind.
+        state.zone_pause_slot_expires = []
 
     log_event("queue_clear", source="manual", queue_state=state.queue_state, queue_length=0)
     return {"ok": True, "queue_state": state.queue_state, "queue_length": 0}

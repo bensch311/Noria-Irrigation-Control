@@ -79,20 +79,37 @@ def timer_loop() -> None:
                         state.parallel_drain_logged = False
 
                 # Queue-Items sammeln
-                if state.queue_state == "läuft" and not state.paused and state.queue_state != "pausiert":
+                # ── Zonen-Pause: abgelaufene Slots bereinigen ──────────────
+                # Jede fertig gewordene Zone hat unabhängig einen Slot-Eintrag
+                # in zone_pause_slot_expires hinterlassen. Abgelaufene Einträge
+                # werden hier entfernt; verbleibende zählen als "belegte Slots"
+                # und reduzieren die verfügbare Parallelkapazität.
+                _now_qf = time.monotonic()
+                _slot_expires = list(getattr(state, "zone_pause_slot_expires", None) or [])
+                _slot_expires = [t for t in _slot_expires if t > _now_qf]
+                state.zone_pause_slot_expires = _slot_expires
+                _pausing_slots = len(_slot_expires)
+
+                if (state.queue_state == "läuft"
+                        and not state.paused
+                        and state.queue_state != "pausiert"):
                     collected_count = 0
                     while state.queue:
                         current_running = len(state.active_runs or {})
                         future_running = current_running + collected_count
 
+                        # Pausing-Slots belegen Kapazität wie laufende Zonen:
+                        # effective_running = bereits laufend + geplant + pausierend.
+                        effective_running = future_running + _pausing_slots
+
                         can_start_more = False
                         if getattr(state, "hw_faulted", False):
                             can_start_more = False
                         elif not state.parallel_enabled:
-                            can_start_more = (future_running == 0)
+                            can_start_more = (effective_running == 0)
                         else:
                             max_conc = max(1, int(state.max_concurrent_valves))
-                            can_start_more = (future_running < max_conc)
+                            can_start_more = (effective_running < max_conc)
 
                         if not can_start_more:
                             break
@@ -258,6 +275,30 @@ def timer_loop() -> None:
                             time_unit=ar.time_unit,
                         )
                         del state.active_runs[zone]
+
+                        # Zonen-Pause: Jede fertig gewordene Zone öffnet
+                        # unabhängig ein Pause-Fenster für ihren Slot.
+                        # Im Parallel-Modus laufen mehrere Slots unabhängig:
+                        #   Zone 1 (10 min) + Zone 2 (5 min) →
+                        #   Zone 2 fertig → Slot 2 pausiert zone_pause_s
+                        #   Zone 1 fertig → Slot 1 pausiert zone_pause_s
+                        # Die Pause greift nur wenn noch Queue-Items warten.
+                        _zp_s = int(getattr(state, "zone_pause_s", 0))
+                        if (
+                            _zp_s > 0
+                            and state.queue                    # noch Items warten
+                            and state.queue_state == "läuft"  # Queue aktiv
+                        ):
+                            if state.zone_pause_slot_expires is None:
+                                state.zone_pause_slot_expires = []
+                            state.zone_pause_slot_expires.append(now_m + _zp_s)
+                            log_event(
+                                "zone_pause_started",
+                                source="system",
+                                zone=zone,
+                                pause_s=_zp_s,
+                                active_pause_slots=len(state.zone_pause_slot_expires),
+                            )
 
                         log_event(
                             "valve_stop",

@@ -13,6 +13,52 @@ Versionierung folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [0.13.0] – Zonen-Pause
+
+### Added
+- **Zonen-Pause** (`zone_pause_s`): Konfigurierbare Wartepause zwischen zwei
+  Bewässerungsgruppen (0–3600 Sekunden = 0–60 Minuten). Greift sobald
+  `active_runs` nach dem Ende einer Zone oder parallelen Gruppe leer wird
+  und noch Queue-Items warten.
+  - Im **Parallel-Modus** gilt: erst wenn *alle* parallelen Zonen fertig sind,
+    startet die Pause – nicht nach jeder einzelnen Zone.
+  - Gilt für **alle Quellen**: Queue, Zeitplan (`schedule`), Sensor-Trigger.
+  - `zone_pause_s` wird in `user_settings.json` persistiert (Schlüssel
+    `ZONE_PAUSE_S`). Default: 0 (keine Pause).
+  - Neues State-Feld `state.zone_pause_until` (rein in-memory, nicht
+    persistiert): monotonic-Timestamp bis wann keine neuen Items gestartet
+    werden dürfen.
+- **`/status`-Antwort**: zwei neue Felder:
+  - `zone_pause_s` – konfigurierte Pause in Sekunden.
+  - `zone_pause_remaining_s` – verbleibende Pause-Zeit in Sekunden (0 wenn
+    keine Pause aktiv).
+- **`GET /settings`**: liefert jetzt `zone_pause_s`.
+- **`POST /settings`**: akzeptiert jetzt `zone_pause_s` (0–3600).
+- **Dashboard** (Frontend): zeigt `⏳ MM:SS verbleibend`-Badge während eine
+  Zonen-Pause aktiv ist.
+- **Einstellungen-Tab** (Frontend): neuer Slider `sld_zone_pause_min` (0–60 Min).
+
+### Changed
+- **`/stop`**: setzt `state.zone_pause_until = 0.0` zurück, damit ein
+  manueller Stop eine laufende Zonen-Pause sofort aufhebt.
+- **`/queue/clear`**: setzt `state.zone_pause_until = 0.0` zurück, da ohne
+  Queue-Items kein Pause-Fenster mehr benötigt wird.
+- **`core/config.py`**: neue Konstante `DEFAULT_ZONE_PAUSE_S = 0`.
+- **`models/requests.py`**: `SettingsUpdateRequest` um `zone_pause_s`
+  (0–3600, Pydantic-geprüft) erweitert.
+- **`services/persistence.py`**: `_default_user_settings_payload`,
+  `load_user_settings_from_disk` und `save_user_settings_to_disk` um
+  `ZONE_PAUSE_S` erweitert.
+- **`services/timer.py`**: Queue-Fill-Block prüft `zone_pause_until` vor dem
+  Starten neuer Items; setzt `zone_pause_until` nach erfolgreichem Schließen
+  wenn `active_runs` leer wird und Queue noch Items enthält.
+- **`services/engine.py`**: `engine_status_payload_locked` liefert
+  `zone_pause_s` und `zone_pause_remaining_s` in beiden Status-Branches.
+- **`core/state.py`**: `RunState` um `zone_pause_s` (User-Setting) und
+  `zone_pause_until` (In-Memory-Timestamp) erweitert.
+
+---
+
 ## [0.12.0] – I2C Relay HAT
 
 ### Added

@@ -125,6 +125,10 @@ def stop(request: Request):
     with state_lock:
         if not state.active_runs:
             # Invariant: active_runs is the source of truth; nothing to stop.
+            # Zonen-Pause trotzdem zurücksetzen: ein expliziter Stop-Befehl des
+            # Operators überschreibt ein laufendes Pause-Fenster auch dann, wenn
+            # gerade keine Ventile aktiv sind.
+            state.zone_pause_slot_expires = []
             return {"ok": True, "stopped_zones": []}
 
         now_m = time.monotonic()
@@ -218,6 +222,10 @@ def stop(request: Request):
 
         if not state.active_runs:
             state.queue_state_before_valve_pause = "bereit"
+
+        # Zonen-Pause aufheben: Ein manueller Stop löscht alle laufenden
+        # Pause-Slots. Nach dem Stop hat der Operator die Queue-Kontrolle.
+        state.zone_pause_slot_expires = []
 
 
         log_event(

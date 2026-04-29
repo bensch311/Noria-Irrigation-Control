@@ -25,10 +25,15 @@ WICHTIG – active_runs ist die einzige Quelle der Wahrheit für Ventilzustand:
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
-from core.config import MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED, NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES
+from core.config import (
+    MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
+    NAVBAR_TITLE, ACCENT_COLOR,
+    DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
+    DEFAULT_ZONE_PAUSE_S,
+)
 
 shutdown_event = threading.Event()
 threads: list[threading.Thread] = []
@@ -141,9 +146,11 @@ class RunState:
       - Sensor-Zuordnung:       sensor_zone_assignments (sensor_id → [zone, ...])
       - Sensor-Laufzeit:        sensor_readings, sensor_last_triggered, sensor_pending_zones
       - User-Settings:          max_history_items, navbar_title, accent_color, …
+                                zone_pause_s
       - Hard-Limits:            hard_max_runtime_s, hard_max_concurrent_valves
       - Neustart-Erkennung:     unclean_restart, restart_detected_at
       - Verlauf:                run_history
+      - Zonen-Pause (in-memory): zone_pause_slot_expires
     """
 
     # ── Ventil-Zustand ────────────────────────────────────────────────────────
@@ -286,6 +293,11 @@ class RunState:
     # übersteigen (wird beim Laden und beim POST /settings geprüft).
     slider_max_minutes: int = SLIDER_MAX_MINUTES
 
+    # Pause zwischen zwei Bewässerungsvorgängen in Sekunden (0 = keine Pause).
+    # Greift wenn active_runs nach dem Ende einer Zone/Gruppe leer wird und
+    # noch Queue-Items warten. Einstellbar von 0 bis 3600 s (60 Minuten).
+    zone_pause_s: int = DEFAULT_ZONE_PAUSE_S
+
     # ── Hard-Limits (aus device_config.json) ──────────────────────────────────
     # Diese Limits überschreiben User-Eingaben im Route-Handler.
     hard_max_runtime_s: int = 60 * 60           # maximale Einzellaufzeit in Sekunden
@@ -301,6 +313,17 @@ class RunState:
 
     # ── Verlauf ───────────────────────────────────────────────────────────────
     run_history: List[HistoryItem] | None = None
+
+    # ── Zonen-Pause (rein in-memory, kein Persist) ────────────────────────────
+    # Liste von monotonic-Timestamps, je einen pro Slot der gerade pausiert.
+    # Jede fertig gewordene Zone fügt unabhängig einen Eintrag ein
+    # (Expires = now + zone_pause_s). Abgelaufene Einträge werden im
+    # timer_loop-Schritt 1 bereinigt. Pausing-Slots belegen Kapazität
+    # genauso wie laufende Zonen, sodass im Parallel-Modus jeder Slot
+    # seine eigene Pause macht – unabhängig von anderen Slots.
+    #
+    # Wird bei /stop und /queue/clear explizit auf [] zurückgesetzt.
+    zone_pause_slot_expires: List[float] = field(default_factory=list)
 
 
 state = RunState()

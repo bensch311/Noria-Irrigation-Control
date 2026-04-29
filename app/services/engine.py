@@ -379,6 +379,13 @@ def engine_status_payload_locked() -> dict:
     primary_ar = active_runs.get(primary_zone) if primary_zone is not None else None
 
     if not active_runs:
+        _now_s = time.monotonic()
+        _slot_exp = getattr(state, "zone_pause_slot_expires", None) or []
+        _slots_rem = sorted(
+            [max(0, int(t - _now_s)) for t in _slot_exp if t > _now_s],
+            reverse=True,
+        )
+        _zp_rem = _slots_rem[0] if _slots_rem else 0
         return {
             "state": "bereit",
             "running_zone": None,
@@ -398,6 +405,9 @@ def engine_status_payload_locked() -> dict:
             "hw_fault_reason": getattr(state, "hw_fault_reason", ""),
             "hw_fault_zone": getattr(state, "hw_fault_zone", None),
             "hw_fault_since": getattr(state, "hw_fault_since", ""),
+            "zone_pause_s": int(getattr(state, "zone_pause_s", 0)),
+            "zone_pause_remaining_s": _zp_rem,
+            "zone_pause_slots_remaining_s": _slots_rem,
         }
 
     if state.paused:
@@ -406,6 +416,14 @@ def engine_status_payload_locked() -> dict:
     else:
         remaining = max(0, int(primary_ar.end_time - time.monotonic())) if primary_ar else 0
         valve_state = "läuft"
+
+    _now_s = time.monotonic()
+    _slot_exp = getattr(state, "zone_pause_slot_expires", None) or []
+    _slots_rem = sorted(
+        [max(0, int(t - _now_s)) for t in _slot_exp if t > _now_s],
+        reverse=True,
+    )
+    _zp_rem = _slots_rem[0] if _slots_rem else 0
 
     return {
         "state": valve_state,
@@ -427,6 +445,9 @@ def engine_status_payload_locked() -> dict:
         "hw_fault_reason": getattr(state, "hw_fault_reason", ""),
         "hw_fault_zone": getattr(state, "hw_fault_zone", None),
         "hw_fault_since": getattr(state, "hw_fault_since", ""),
+        "zone_pause_s": int(getattr(state, "zone_pause_s", 0)),
+        "zone_pause_remaining_s": _zp_rem,
+        "zone_pause_slots_remaining_s": _slots_rem,
     }
 
 

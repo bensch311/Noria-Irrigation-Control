@@ -43,6 +43,7 @@ from core.config import (
     SENSOR_ASSIGNMENTS_FILE,
     TZ, MAX_VALVES, MAX_RUNTIME_S, MAX_HISTORY_ITEMS, MAX_CONCURRENT_VALVES, DEFAULT_PARALLEL_ENABLED,
     NAVBAR_TITLE, ACCENT_COLOR, DEFAULT_DURATION, DEFAULT_TIME_UNIT, SLIDER_MAX_MINUTES,
+    DEFAULT_ZONE_PAUSE_S,
     CORRUPT_FILE_MAX_KEEP,
 )
 from core.logging import log_event, logger
@@ -145,6 +146,7 @@ def _default_user_settings_payload() -> dict:
             "DEFAULT_DURATION": int(DEFAULT_DURATION),
             "DEFAULT_TIME_UNIT": DEFAULT_TIME_UNIT,
             "SLIDER_MAX_MINUTES": int(SLIDER_MAX_MINUTES),
+            "ZONE_PAUSE_S": int(DEFAULT_ZONE_PAUSE_S),
         },
     }
 
@@ -370,6 +372,13 @@ def load_user_settings_from_disk():
     except Exception:
         default_duration = DEFAULT_DURATION
 
+    # Pause zwischen zwei Bewässerungsvorgängen (0 = keine Pause).
+    # Gültig: 0..3600 Sekunden (60 Minuten). Ungültige Werte → Default 0.
+    try:
+        zone_pause_s = max(0, min(3600, int(user.get("ZONE_PAUSE_S", DEFAULT_ZONE_PAUSE_S))))
+    except Exception:
+        zone_pause_s = DEFAULT_ZONE_PAUSE_S
+
     with state_lock:
         state.max_history_items  = max_hist
         state.navbar_title       = navbar_title
@@ -377,6 +386,7 @@ def load_user_settings_from_disk():
         state.default_duration   = default_duration
         state.default_time_unit  = default_time_unit
         state.slider_max_minutes = slider_max_minutes
+        state.zone_pause_s       = zone_pause_s
 
 
 def save_user_settings_to_disk():
@@ -387,6 +397,7 @@ def save_user_settings_to_disk():
         default_duration = int(getattr(state, "default_duration", DEFAULT_DURATION))
         default_time_unit = str(getattr(state, "default_time_unit", DEFAULT_TIME_UNIT))
         slider_max_minutes = int(getattr(state, "slider_max_minutes", SLIDER_MAX_MINUTES))
+        zone_pause_s = int(getattr(state, "zone_pause_s", DEFAULT_ZONE_PAUSE_S))
 
     payload = _default_user_settings_payload()
     payload["user"]["MAX_HISTORY_ITEMS"]   = max_hist
@@ -395,6 +406,7 @@ def save_user_settings_to_disk():
     payload["user"]["DEFAULT_DURATION"]    = default_duration
     payload["user"]["DEFAULT_TIME_UNIT"]   = default_time_unit
     payload["user"]["SLIDER_MAX_MINUTES"]  = slider_max_minutes
+    payload["user"]["ZONE_PAUSE_S"]        = zone_pause_s
     payload["saved_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     _atomic_write_json(USER_SETTINGS_FILE, payload)
 

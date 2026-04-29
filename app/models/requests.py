@@ -136,6 +136,9 @@ class SettingsUpdateRequest(BaseModel):
     slider_max_minutes  : Maximaler Anzeigewert der Laufzeit-Slider in Minuten (1–1440).
                           Darf hard_max_runtime_s // 60 nicht übersteigen –
                           wird im Route-Handler dynamisch geprüft.
+    zone_pause_s        : Pause zwischen zwei Bewässerungsvorgängen in Sekunden.
+                          0 = keine Pause. Maximum 3600 s (60 Minuten).
+                          Greift wenn active_runs leer wird und noch Queue-Items warten.
 
     max_history_items ist required (bestehende API-Kompatibilitaet).
     Alle anderen Felder haben Defaults und sind optional.
@@ -151,6 +154,8 @@ class SettingsUpdateRequest(BaseModel):
     # 1440 = 24 h als absoluter Pydantic-Cap; dynamische Prüfung gegen
     # hard_max_runtime_s // 60 erfolgt im Route-Handler.
     slider_max_minutes: int = Field(60, ge=1, le=1440)
+    # 3600 = 60 Minuten als Hard-Cap. 0 = keine Pause (deaktiviert).
+    zone_pause_s: int = Field(0, ge=0, le=3600)
 
     @field_validator("navbar_title")
     @classmethod
