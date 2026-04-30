@@ -231,7 +231,7 @@ echo "─── Relais-Treiber ────────────────�
 echo "  Welches Relais-Board ist an diesem Pi angeschlossen?"
 echo
 echo "  1) GPIO direkt      (z.B. 8-Kanal-Relaisboard über Flachbandkabel)"
-echo "  2) Sequent 8-Relay  HAT (I2C, bis zu  8 Ventile, Adresse 0x38–0x3F)"
+echo "  2) Sequent 8-Relay  HAT (I2C, bis zu  8 Ventile, Adresse 0x20–0x27)"
 echo "  3) Sequent 16-Relay HAT (I2C, bis zu 16 Ventile, Adresse 0x20–0x27)"
 echo
 read -rp "  Auswahl [1/2/3] (Standard: 1): " DRV_CHOICE
