@@ -40,6 +40,7 @@ from services.valve_driver import (
     _REL16_CFG_REG_HI,
     _REL8_OUTPORT_REG,
     _REL8_CFG_REG,
+    _REL8_RELAY_MASK,
 )
 from core.state import state, state_lock
 
@@ -815,7 +816,9 @@ class TestI2cRelayValveDriverOpen:
         assert reg_to_val.get(_REL16_OUTPORT_REG_HI) == 0x01, "High-Byte muss Bit 0 gesetzt haben"
 
     def test_open_8relay_writes_single_register(self):
-        """8-Relay HAT: open() darf nur REG_RELAY (0x01) schreiben."""
+        """8-Relay HAT: open() darf nur REG_RELAY (0x01) schreiben.
+        Zone 1 → _REL8_RELAY_MASK[0] = 0x01 (zufällig identisch mit linearem Bit 0,
+        aber Korrektheit kommt aus der Remap-Tabelle, nicht aus 1<<0)."""
         driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x38, num_zones=4)
         bus_mock.reset_mock()
 
@@ -824,7 +827,7 @@ class TestI2cRelayValveDriverOpen:
         calls = bus_mock.write_byte_data.call_args_list
         written_regs = [c.args[1] for c in calls]
         assert written_regs == [_REL8_OUTPORT_REG]
-        assert calls[0].args[2] == 0x01
+        assert calls[0].args[2] == _REL8_RELAY_MASK[0]  # Zone 1 → 0x01
 
     def test_open_zone_out_of_range_raises(self):
         """open() für eine nicht konfigurierte Zone muss ValveDriverError werfen."""
@@ -892,8 +895,143 @@ class TestI2cRelayValveDriverClose:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# I2cRelayValveDriver – close_all()
+# I2cRelayValveDriver – 8relay Hardware-Remap
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestI2cRelayValveDriver8RelayRemap:
+    """
+    Stellt sicher dass _zone_bitmask() für den 8-Relay HAT korrekte Hardware-Bits
+    liefert. Die PCA9554-Pins sind auf der Platine nicht linear verdrahtet –
+    ohne Remap werden falsche physikalische Relais aktiviert.
+
+    Erwartete Remap-Tabelle (_REL8_RELAY_MASK):
+      Zone 1 → 0x01, Zone 2 → 0x04, Zone 3 → 0x10, Zone 4 → 0x40
+      Zone 5 → 0x80, Zone 6 → 0x20, Zone 7 → 0x08, Zone 8 → 0x02
+    """
+
+    @pytest.mark.parametrize("zone,expected_mask", [
+        (1, 0x01),
+        (2, 0x04),
+        (3, 0x10),
+        (4, 0x40),
+        (5, 0x80),
+        (6, 0x20),
+        (7, 0x08),
+        (8, 0x02),
+    ])
+    def test_zone_bitmask_all_8_zones(self, zone: int, expected_mask: int):
+        """_zone_bitmask() muss für jede Zone den korrekten Hardware-Bit liefern."""
+        driver, _ = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
+        assert driver._zone_bitmask(zone) == expected_mask, (
+            f"Zone {zone}: erwartet 0x{expected_mask:02X}, "
+            f"erhalten 0x{driver._zone_bitmask(zone):02X}"
+        )
+
+    @pytest.mark.parametrize("zone,expected_mask", [
+        (1, 0x01),
+        (2, 0x04),
+        (3, 0x10),
+        (4, 0x40),
+        (5, 0x80),
+        (6, 0x20),
+        (7, 0x08),
+        (8, 0x02),
+    ])
+    def test_open_all_zones_writes_correct_bitmask(self, zone: int, expected_mask: int):
+        """open(zone) muss exakt _REL8_RELAY_MASK[zone-1] in das Ausgangsregister schreiben."""
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
+        bus_mock.reset_mock()
+
+        driver.open(zone)
+
+        calls = bus_mock.write_byte_data.call_args_list
+        assert len(calls) == 1
+        assert calls[0].args[1] == _REL8_OUTPORT_REG
+        assert calls[0].args[2] == expected_mask, (
+            f"Zone {zone}: erwartet 0x{expected_mask:02X}, "
+            f"geschrieben 0x{calls[0].args[2]:02X}"
+        )
+
+    def test_open_multiple_zones_accumulates_remap_bitmask(self):
+        """Mehrere open()-Aufrufe müssen die remappten Bitmasks korrekt akkumulieren.
+
+        Zone 1 (0x01) + Zone 3 (0x10) = 0x11 (nicht 0x05 wie bei linearem Mapping).
+        """
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
+        bus_mock.reset_mock()
+
+        driver.open(1)  # 0x01
+        driver.open(3)  # 0x10
+
+        assert driver._state == 0x11, (
+            f"Zone 1+3 erwartet 0x11, erhalten 0x{driver._state:02X}"
+        )
+
+    def test_close_removes_correct_remap_bit(self):
+        """close() muss den korrekten Remap-Bit löschen ohne andere Bits zu verändern.
+
+        Zone 1 (0x01) + Zone 2 (0x04) → close(1) → nur 0x04 darf bleiben.
+        """
+        driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
+        driver.open(1)  # state = 0x01
+        driver.open(2)  # state = 0x01 | 0x04 = 0x05
+        bus_mock.reset_mock()
+
+        driver.close(1)
+
+        assert driver._state == 0x04, (
+            f"Nach close(1) erwartet 0x04, erhalten 0x{driver._state:02X}"
+        )
+        calls = bus_mock.write_byte_data.call_args_list
+        assert calls[0].args[2] == 0x04
+
+    def test_open_close_all_zones_round_trip(self):
+        """open() aller 8 Zonen gefolgt von close() aller Zonen muss State 0 ergeben."""
+        driver, _ = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
+        for z in range(1, 9):
+            driver.open(z)
+        assert driver._state != 0, "State nach open() aller Zonen darf nicht 0 sein"
+        for z in range(1, 9):
+            driver.close(z)
+        assert driver._state == 0, (
+            f"Nach open+close aller Zonen erwartet 0, erhalten 0x{driver._state:02X}"
+        )
+
+    def test_16relay_zone_bitmask_is_linear(self):
+        """16-Relay HAT darf keinen Remap verwenden – lineare Bitmask muss gelten."""
+        driver, _ = _make_i2c_driver(hat_type="16relay", i2c_address=0x20, num_zones=16)
+        for z in range(1, 17):
+            assert driver._zone_bitmask(z) == (1 << (z - 1)), (
+                f"16relay Zone {z}: lineares Mapping erwartet"
+            )
+
+    def test_relay_mask_constant_covers_all_8_zones(self):
+        """_REL8_RELAY_MASK muss genau 8 Einträge haben – einen pro Relay."""
+        assert len(_REL8_RELAY_MASK) == 8
+
+    def test_relay_mask_all_bits_unique(self):
+        """Jeder Eintrag in _REL8_RELAY_MASK muss ein anderes Bit sein (kein Duplikat)."""
+        assert len(set(_REL8_RELAY_MASK)) == 8, "Doppelter Eintrag in _REL8_RELAY_MASK!"
+
+    def test_relay_mask_all_bits_are_single_bit_values(self):
+        """Jeder Eintrag in _REL8_RELAY_MASK muss eine Zweierpotenz sein (ein Bit)."""
+        for i, mask in enumerate(_REL8_RELAY_MASK):
+            assert mask > 0 and (mask & (mask - 1)) == 0, (
+                f"_REL8_RELAY_MASK[{i}] = 0x{mask:02X} ist keine Zweierpotenz!"
+            )
+
+    def test_relay_mask_covers_all_8_bits(self):
+        """Die Vereinigung aller _REL8_RELAY_MASK-Bits muss 0xFF ergeben."""
+        union = 0
+        for mask in _REL8_RELAY_MASK:
+            union |= mask
+        assert union == 0xFF, (
+            f"Nicht alle 8 Bits abgedeckt: Union = 0x{union:02X}, erwartet 0xFF"
+        )
+
+
+
 
 
 class TestI2cRelayValveDriverCloseAll:

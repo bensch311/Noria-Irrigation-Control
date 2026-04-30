@@ -32,7 +32,11 @@ Bei I2cRelayValveDriver (Sequent Microsystems 8-Relay / 16-Relay HAT):
     Diese Reihenfolge verhindert ein kurzes Einschalten der Relais beim Start
     (Default-Config nach Power-on: 0xFF = alle Inputs, Output-Latch: 0xFF).
   - Relay-Zustand wird als Bitmask in-memory gehalten (kein I2C-Readback).
-  - Bit 0 = Zone 1, Bit N-1 = Zone N. Bit=1: Relais zieht an (Ventil öffnet).
+  - 8relay:  Hardware-Remap erforderlich – PCA9554-Pins sind NICHT linear verdrahtet
+             (_REL8_RELAY_MASK, Quelle: relay8.h, Sequent GitHub). Ohne Remap werden
+             falsche physikalische Relais aktiviert.
+  - 16relay: Lineare Verdrahtung. Bit 0 = Zone 1, Bit N-1 = Zone N.
+  - Bit=1: Relais zieht an (Ventil öffnet). Bit=0: Relais fällt ab.
   - close_all() ist best-effort: schreibt Register einzeln, loggt Fehler, wirft nicht.
   - cleanup() schließt den SMBus-Handle – IMMER nach close_all() aufrufen.
 
@@ -75,6 +79,20 @@ _REL16_CFG_REG_HI     = 0x07   # RELAY16_CFG_REG_ADD+1 → Port 1 Config (0x00 =
 # 8-Relay HAT – PCA9554-kompatibler 8-Bit I/O-Expander
 _REL8_OUTPORT_REG     = 0x01   # RELAY8_OUTPORT_REG_ADD → Port (Relais 1–8)
 _REL8_CFG_REG         = 0x03   # RELAY8_CFG_REG_ADD → Config (0x00 = Ausgang)
+
+# 8-Relay HAT – Hardware-Remap: PCA9554-Pins sind auf der Platine NICHT linear
+# mit den physikalischen Relais verdrahtet. Index 0 = Zone 1, Index 7 = Zone 8.
+# Quelle: relayMaskRemap[] in relay8.h (8relind), Sequent Microsystems GitHub.
+_REL8_RELAY_MASK: tuple[int, ...] = (
+    0x01,  # Zone 1 → Bit 0
+    0x04,  # Zone 2 → Bit 2
+    0x10,  # Zone 3 → Bit 4
+    0x40,  # Zone 4 → Bit 6
+    0x80,  # Zone 5 → Bit 7
+    0x20,  # Zone 6 → Bit 5
+    0x08,  # Zone 7 → Bit 3
+    0x02,  # Zone 8 → Bit 1
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,6 +472,18 @@ class I2cRelayValveDriver(BaseValveDriver):
                 self._addr, _REL16_OUTPORT_REG_HI, (self._state >> 8) & 0xFF
             )
 
+    def _zone_bitmask(self, zone: int) -> int:
+        """Gibt die Hardware-Bitmask für eine Zone zurück.
+
+        8relay:  Die PCA9554-Pins sind auf der Platine nicht linear verdrahtet.
+                 _REL8_RELAY_MASK bildet Zone 1–8 auf die korrekten Hardware-Bits ab.
+                 Ohne diesen Remap würden falsche physikalische Relais aktiviert.
+        16relay: Lineare Verdrahtung – Bit 0 = Zone 1, Bit N-1 = Zone N.
+        """
+        if self._hat_type == "8relay":
+            return _REL8_RELAY_MASK[zone - 1]
+        return 1 << (zone - 1)
+
     def _safe_close_bus(self) -> None:
         """Schließt den SMBus-Handle ohne Exception zu werfen (für Cleanup bei Fehler)."""
         if self._bus is not None:
@@ -469,7 +499,7 @@ class I2cRelayValveDriver(BaseValveDriver):
                 f"Zone {zone} nicht konfiguriert "
                 f"(konfigurierte Zonen: 1–{self._num_zones})"
             )
-        self._state |= (1 << (zone - 1))
+        self._state |= self._zone_bitmask(zone)
         self._write_state()
         log_event("valve_hw_open", source="driver", driver=self.name, zone=int(zone))
 
@@ -479,7 +509,7 @@ class I2cRelayValveDriver(BaseValveDriver):
                 f"Zone {zone} nicht konfiguriert "
                 f"(konfigurierte Zonen: 1–{self._num_zones})"
             )
-        self._state &= ~(1 << (zone - 1))
+        self._state &= ~self._zone_bitmask(zone)
         self._write_state()
         log_event("valve_hw_close", source="driver", driver=self.name, zone=int(zone))
 
