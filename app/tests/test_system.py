@@ -474,70 +474,64 @@ def test_wlan_details_lc_all_c_is_set(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 from api.routes_system import _collect_cpu_temp
+import api.routes_system as _routes_system_mod
 
 
-def _make_vcgencmd_mock(stdout: str, returncode: int = 0):
-    """Hilfsfunktion: erstellt einen subprocess.run-Mock für vcgencmd."""
-    mock = MagicMock()
-    mock.returncode = returncode
-    mock.stdout = stdout
-    return mock
+def test_collect_cpu_temp_parses_millicelsius(monkeypatch, tmp_path):
+    """Dateiinhalt in Millicelsius wird korrekt in °C umgerechnet."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("47800\n", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
+    assert _collect_cpu_temp() == 47.8
 
 
-def test_collect_cpu_temp_parses_standard_output(monkeypatch):
-    """Normale vcgencmd-Ausgabe wird korrekt geparst."""
-    fake = _make_vcgencmd_mock("temp=47.8'C\n")
-    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
-    result = _collect_cpu_temp()
-    assert result == 47.8
+def test_collect_cpu_temp_rounds_to_one_decimal(monkeypatch, tmp_path):
+    """Millicelsius werden auf 1 Dezimalstelle gerundet."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("52345\n", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
+    assert _collect_cpu_temp() == 52.3
 
 
-def test_collect_cpu_temp_rounds_to_one_decimal(monkeypatch):
-    """Temperaturwert wird auf 1 Dezimalstelle gerundet."""
-    fake = _make_vcgencmd_mock("temp=52.345'C\n")
-    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
-    result = _collect_cpu_temp()
-    assert result == 52.3
-
-
-def test_collect_cpu_temp_returns_float(monkeypatch):
-    """Rückgabewert ist ein float, kein String."""
-    fake = _make_vcgencmd_mock("temp=65.0'C\n")
-    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+def test_collect_cpu_temp_returns_float(monkeypatch, tmp_path):
+    """Rückgabewert ist ein float, kein int oder String."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("65000\n", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
     result = _collect_cpu_temp()
     assert isinstance(result, float)
     assert result == 65.0
 
 
-def test_collect_cpu_temp_nonzero_returncode_returns_none(monkeypatch):
-    """vcgencmd returncode != 0 → None, kein Crash."""
-    fake = _make_vcgencmd_mock("", returncode=1)
-    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+def test_collect_cpu_temp_file_not_found_returns_none(monkeypatch, tmp_path):
+    """Fehlende Thermal-Datei (z.B. Windows-Dev) → None, kein Crash."""
+    missing = tmp_path / "nonexistent"
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", missing)
     assert _collect_cpu_temp() is None
 
 
-def test_collect_cpu_temp_not_found_returns_none(monkeypatch):
-    """vcgencmd nicht installiert (FileNotFoundError) → None, kein Crash."""
-    def raise_fnf(*a, **kw):
-        raise FileNotFoundError("vcgencmd not found")
-    monkeypatch.setattr("api.routes_system.subprocess.run", raise_fnf)
+def test_collect_cpu_temp_empty_file_returns_none(monkeypatch, tmp_path):
+    """Leere Datei (defektes sysfs) → None, kein Crash."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
     assert _collect_cpu_temp() is None
 
 
-def test_collect_cpu_temp_unexpected_output_returns_none(monkeypatch):
-    """Unbekanntes Ausgabeformat (kein Match) → None."""
-    fake = _make_vcgencmd_mock("error=1\n")
-    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+def test_collect_cpu_temp_non_integer_content_returns_none(monkeypatch, tmp_path):
+    """Unerwarteter Dateiinhalt (kein Integer) → None, kein Crash."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("error\n", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
     assert _collect_cpu_temp() is None
 
 
-def test_collect_cpu_temp_timeout_returns_none(monkeypatch):
-    """Timeout beim subprocess.run → None, kein Crash."""
-    import subprocess as _sp
-    def raise_timeout(*a, **kw):
-        raise _sp.TimeoutExpired(cmd="vcgencmd", timeout=3)
-    monkeypatch.setattr("api.routes_system.subprocess.run", raise_timeout)
-    assert _collect_cpu_temp() is None
+def test_collect_cpu_temp_strips_whitespace(monkeypatch, tmp_path):
+    """Führende/nachfolgende Leerzeichen und Zeilenumbrüche werden toleriert."""
+    thermal_file = tmp_path / "temp"
+    thermal_file.write_text("  55600  \n", encoding="utf-8")
+    monkeypatch.setattr(_routes_system_mod, "_THERMAL_ZONE_PATH", thermal_file)
+    assert _collect_cpu_temp() == 55.6
 
 
 # ─────────────────────────────────────────────────────────────────────────────

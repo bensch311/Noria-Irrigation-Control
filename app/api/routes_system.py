@@ -31,7 +31,8 @@ Hintergrund (Log-Download):
 Hintergrund (System-Info):
   GET /system/info liefert OS-Metriken für die Systeminfo-Anzeige im Frontend.
   Datenquellen: psutil (Disk, RAM, Uptime, Netzwerk-Status), nmcli (WLAN-
-  SSID + Signalstärke) und vcgencmd (CPU-Temperatur auf Raspberry Pi OS).
+  SSID + Signalstärke) und das Linux Kernel Thermal Interface
+  (/sys/class/thermal/thermal_zone0/temp) für die CPU-Temperatur.
   Alle OS-Aufrufe sind best-effort: Fehler führen zu null-Werten im Response,
   nicht zu HTTP-Fehler-Codes. Der Endpunkt ist damit auch auf Nicht-Linux-
   Systemen (z.B. Windows-Dev-Umgebung) aufrufbar; cpu_temp_c ist dort null.
@@ -61,6 +62,9 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 
 # Name der aktuellen Log-Datei (identisch mit core/logging.py)
 _LOG_BASENAME = "irrigation.jsonl"
+
+# Linux Kernel Thermal Interface – für alle Benutzer lesbar (keine Gruppe nötig)
+_THERMAL_ZONE_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
 
 # Rate-Limits
 _DOWNLOAD_LIMIT = "5/minute"   # ZIP-Erstellung ist I/O-intensiv
@@ -179,28 +183,21 @@ def _collect_uptime() -> float | None:
 
 
 def _collect_cpu_temp() -> float | None:
-    """CPU-Temperatur in °C via vcgencmd (Raspberry Pi OS).
+    """CPU-Temperatur in °C via Linux Kernel Thermal Interface.
 
-    vcgencmd ist auf Raspberry Pi OS standardmäßig verfügbar.
-    Auf anderen Plattformen (z.B. Windows-Dev-Umgebung) gibt diese
-    Funktion None zurück – kein Fehler, kein Crash.
+    Liest _THERMAL_ZONE_PATH (/sys/class/thermal/thermal_zone0/temp).
+    Diese Datei ist für alle Benutzer lesbar – keine Gruppenmitgliedschaft
+    (z.B. 'video') erforderlich. Funktioniert auf Pi 4, Pi 5 und jeder
+    Linux-Umgebung. Auf Windows-Dev-Umgebungen gibt die Funktion None
+    zurück (Datei existiert nicht) – kein Fehler, kein Crash.
 
-    vcgencmd-Ausgabe:
-      temp=47.8'C
+    Dateiinhalt: Integer in Millicelsius (z.B. 47800 → 47,8 °C).
 
     Rückgabe: Temperatur als float (auf 1 Dezimalstelle gerundet) oder None.
     """
     try:
-        result = subprocess.run(
-            ["/usr/bin/vcgencmd", "measure_temp"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode != 0:
-            return None
-        match = re.search(r"temp=([\d.]+)'C", result.stdout)
-        if not match:
-            return None
-        return round(float(match.group(1)), 1)
+        raw = _THERMAL_ZONE_PATH.read_text(encoding="utf-8").strip()
+        return round(int(raw) / 1000, 1)
     except Exception:
         return None
 
