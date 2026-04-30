@@ -42,6 +42,7 @@ from app_helpers import (
     fmt_disk,
     fmt_memory,
     fmt_signal,
+    fmt_temperature,
     _json_or_none,
 )
 
@@ -2542,8 +2543,9 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 mem_str    = fmt_memory(
                     mem.get("used_mb"), mem.get("total_mb"), mem.get("used_pct")
                 )
-                uptime_raw = si.get("uptime_s")
-                uptime_str = fmt_uptime(uptime_raw) if uptime_raw is not None else "–"
+                uptime_raw   = si.get("uptime_s")
+                uptime_str   = fmt_uptime(uptime_raw) if uptime_raw is not None else "–"
+                cpu_temp_str = fmt_temperature(si.get("cpu_temp_c"))
 
                 # --- Netzwerk-Zeilen aufbauen --------------------------------
                 net_rows: list[tuple[str, str]] = []
@@ -2577,9 +2579,10 @@ with ui.navset_bar(title=_build_navbar_brand(), id="main_nav", fluid=True):
                 ]
 
                 sys_rows = [
-                    ("Uptime",       uptime_str),
-                    ("RAM",          mem_str),
-                    ("Speicherplatz", disk_str),
+                    ("Uptime",          uptime_str),
+                    ("CPU-Temperatur",  cpu_temp_str),
+                    ("RAM",             mem_str),
+                    ("Speicherplatz",   disk_str),
                     *net_rows,
                 ]
 

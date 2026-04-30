@@ -5,7 +5,7 @@ System-Endpunkte: administrative Aktionen und Monitoring auf Systemebene.
 Endpunkte:
   POST /system/ack-restart     – Neustart-Hinweis quittieren
   GET  /system/logs/download   – Alle Log-Dateien als ZIP herunterladen
-  GET  /system/info            – Betriebssystem-Metriken (Disk, RAM, Uptime, Netzwerk)
+  GET  /system/info            – Betriebssystem-Metriken (Disk, RAM, Uptime, Netzwerk, CPU-Temp)
 
 Alle Endpunkte erfordern API-Key-Authentifizierung (X-API-Key Header).
 
@@ -30,10 +30,11 @@ Hintergrund (Log-Download):
 
 Hintergrund (System-Info):
   GET /system/info liefert OS-Metriken für die Systeminfo-Anzeige im Frontend.
-  Datenquellen: psutil (Disk, RAM, Uptime, Netzwerk-Status) und nmcli (WLAN-
-  SSID + Signalstärke). Alle OS-Aufrufe sind best-effort: Fehler führen zu
-  null-Werten im Response, nicht zu HTTP-Fehler-Codes. Der Endpunkt ist damit
-  auch auf Nicht-Linux-Systemen (z.B. Windows-Dev-Umgebung) aufrufbar.
+  Datenquellen: psutil (Disk, RAM, Uptime, Netzwerk-Status), nmcli (WLAN-
+  SSID + Signalstärke) und vcgencmd (CPU-Temperatur auf Raspberry Pi OS).
+  Alle OS-Aufrufe sind best-effort: Fehler führen zu null-Werten im Response,
+  nicht zu HTTP-Fehler-Codes. Der Endpunkt ist damit auch auf Nicht-Linux-
+  Systemen (z.B. Windows-Dev-Umgebung) aufrufbar; cpu_temp_c ist dort null.
 """
 
 import io
@@ -177,6 +178,33 @@ def _collect_uptime() -> float | None:
         return None
 
 
+def _collect_cpu_temp() -> float | None:
+    """CPU-Temperatur in °C via vcgencmd (Raspberry Pi OS).
+
+    vcgencmd ist auf Raspberry Pi OS standardmäßig verfügbar.
+    Auf anderen Plattformen (z.B. Windows-Dev-Umgebung) gibt diese
+    Funktion None zurück – kein Fehler, kein Crash.
+
+    vcgencmd-Ausgabe:
+      temp=47.8'C
+
+    Rückgabe: Temperatur als float (auf 1 Dezimalstelle gerundet) oder None.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/bin/vcgencmd", "measure_temp"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        match = re.search(r"temp=([\d.]+)'C", result.stdout)
+        if not match:
+            return None
+        return round(float(match.group(1)), 1)
+    except Exception:
+        return None
+
+
 def _collect_wlan_details(iface_name: str) -> dict:
     """SSID und Signalstärke für ein WLAN-Interface via nmcli.
 
@@ -287,6 +315,7 @@ def system_info(request: Request):
       memory.used_mb   – Genutzter RAM in MB
       memory.used_pct  – RAM-Nutzung in Prozent
       uptime_s         – Sekunden seit letztem Boot
+      cpu_temp_c       – CPU-Temperatur in °C (float) oder null (kein vcgencmd)
       network[]        – Liste der aktiven Netzwerk-Interfaces (LAN/WLAN)
         .name          – Interface-Name (z.B. "eth0", "wlan0")
         .type          – "LAN" oder "WLAN"
@@ -296,8 +325,9 @@ def system_info(request: Request):
         .signal_pct    – (nur WLAN) Signalstärke 0–100 % oder null
     """
     return {
-        "disk":     _collect_disk(),
-        "memory":   _collect_memory(),
-        "uptime_s": _collect_uptime(),
-        "network":  _collect_network(),
+        "disk":       _collect_disk(),
+        "memory":     _collect_memory(),
+        "uptime_s":   _collect_uptime(),
+        "cpu_temp_c": _collect_cpu_temp(),
+        "network":    _collect_network(),
     }

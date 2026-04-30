@@ -9,7 +9,8 @@ Enthält:
   - Konfiguration laden (_load_frontend_config, _read_max_valves_from_device_config,
                           _read_sensors_enabled_from_device_config)
   - Formatierungsfunktionen (fmt_mmss, fmt_duration, fmt_weekdays,
-                              fmt_uptime, fmt_disk, fmt_signal)
+                              fmt_uptime, fmt_disk, fmt_memory,
+                              fmt_signal, fmt_temperature)
   - HTTP-Hilfsfunktion (_json_or_none)
   - Konstanten (WEEKDAY_CHOICES)
 
@@ -226,6 +227,21 @@ def fmt_signal(signal_pct: int | None) -> str:
     else:
         label = "Schwach"
     return f"{label} ({signal_pct} %)"
+
+
+def fmt_temperature(temp_c: float | None) -> str:
+    """Formatiert CPU-Temperatur als lesbaren deutschen String.
+
+    Dezimaltrennzeichen ist ein Komma (deutsche Lokalisierung).
+
+    Beispiele:
+      fmt_temperature(47.8)  → "47,8 °C"
+      fmt_temperature(65.0)  → "65,0 °C"
+      fmt_temperature(None)  → "–"
+    """
+    if temp_c is None:
+        return "–"
+    return f"{temp_c:.1f} °C".replace(".", ",")
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ Getestet werden:
   POST /system/ack-restart   – Neustart-Quittierung, Auth, Idempotenz
   GET  /system/logs/download – ZIP-Download, Inhalt, Auth
   GET  /system/info          – OS-Metriken, Struktur, Fehlertoleranz, Auth
+                               inkl. cpu_temp_c (vcgencmd) und _collect_cpu_temp Unit-Tests
 """
 
 import pytest
@@ -252,10 +253,11 @@ def test_system_info_response_structure(client):
     """Response enthält alle erwarteten Top-Level-Schlüssel."""
     resp = client.get("/system/info")
     data = resp.json()
-    assert "disk"     in data
-    assert "memory"   in data
-    assert "uptime_s" in data
-    assert "network"  in data
+    assert "disk"       in data
+    assert "memory"     in data
+    assert "uptime_s"   in data
+    assert "cpu_temp_c" in data
+    assert "network"    in data
 
 
 def test_system_info_disk_structure(client):
@@ -465,3 +467,116 @@ def test_wlan_details_lc_all_c_is_set(monkeypatch):
     _collect_wlan_details("wlan0")
     assert captured_env.get("LC_ALL") == "C"
     assert captured_env.get("LANG") == "C"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _collect_cpu_temp – Unit-Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+from api.routes_system import _collect_cpu_temp
+
+
+def _make_vcgencmd_mock(stdout: str, returncode: int = 0):
+    """Hilfsfunktion: erstellt einen subprocess.run-Mock für vcgencmd."""
+    mock = MagicMock()
+    mock.returncode = returncode
+    mock.stdout = stdout
+    return mock
+
+
+def test_collect_cpu_temp_parses_standard_output(monkeypatch):
+    """Normale vcgencmd-Ausgabe wird korrekt geparst."""
+    fake = _make_vcgencmd_mock("temp=47.8'C\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_cpu_temp()
+    assert result == 47.8
+
+
+def test_collect_cpu_temp_rounds_to_one_decimal(monkeypatch):
+    """Temperaturwert wird auf 1 Dezimalstelle gerundet."""
+    fake = _make_vcgencmd_mock("temp=52.345'C\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_cpu_temp()
+    assert result == 52.3
+
+
+def test_collect_cpu_temp_returns_float(monkeypatch):
+    """Rückgabewert ist ein float, kein String."""
+    fake = _make_vcgencmd_mock("temp=65.0'C\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    result = _collect_cpu_temp()
+    assert isinstance(result, float)
+    assert result == 65.0
+
+
+def test_collect_cpu_temp_nonzero_returncode_returns_none(monkeypatch):
+    """vcgencmd returncode != 0 → None, kein Crash."""
+    fake = _make_vcgencmd_mock("", returncode=1)
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    assert _collect_cpu_temp() is None
+
+
+def test_collect_cpu_temp_not_found_returns_none(monkeypatch):
+    """vcgencmd nicht installiert (FileNotFoundError) → None, kein Crash."""
+    def raise_fnf(*a, **kw):
+        raise FileNotFoundError("vcgencmd not found")
+    monkeypatch.setattr("api.routes_system.subprocess.run", raise_fnf)
+    assert _collect_cpu_temp() is None
+
+
+def test_collect_cpu_temp_unexpected_output_returns_none(monkeypatch):
+    """Unbekanntes Ausgabeformat (kein Match) → None."""
+    fake = _make_vcgencmd_mock("error=1\n")
+    monkeypatch.setattr("api.routes_system.subprocess.run", lambda *a, **kw: fake)
+    assert _collect_cpu_temp() is None
+
+
+def test_collect_cpu_temp_timeout_returns_none(monkeypatch):
+    """Timeout beim subprocess.run → None, kein Crash."""
+    import subprocess as _sp
+    def raise_timeout(*a, **kw):
+        raise _sp.TimeoutExpired(cmd="vcgencmd", timeout=3)
+    monkeypatch.setattr("api.routes_system.subprocess.run", raise_timeout)
+    assert _collect_cpu_temp() is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /system/info – cpu_temp_c Integrationstests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_system_info_cpu_temp_c_present(client):
+    """cpu_temp_c ist im Response vorhanden (darf None sein auf Nicht-Pi)."""
+    resp = client.get("/system/info")
+    assert "cpu_temp_c" in resp.json()
+
+
+def test_system_info_cpu_temp_c_is_float_or_none(client):
+    """cpu_temp_c ist ein float oder null – niemals ein String."""
+    val = client.get("/system/info").json()["cpu_temp_c"]
+    assert val is None or isinstance(val, float)
+
+
+def test_system_info_cpu_temp_c_mocked_value(client, monkeypatch):
+    """Wenn vcgencmd eine gültige Temperatur liefert, erscheint sie im Response."""
+    monkeypatch.setattr(
+        "api.routes_system._collect_cpu_temp",
+        lambda: 48.7,
+    )
+    data = client.get("/system/info").json()
+    assert data["cpu_temp_c"] == 48.7
+
+
+def test_system_info_cpu_temp_c_error_returns_null(client):
+    """Bei vcgencmd-Fehler: cpu_temp_c ist null, kein HTTP-Fehler."""
+    with patch("api.routes_system._collect_cpu_temp", return_value=None):
+        resp = client.get("/system/info")
+    assert resp.status_code == 200
+    assert resp.json()["cpu_temp_c"] is None
+
+
+def test_system_info_cpu_temp_c_plausible_range(client, monkeypatch):
+    """Gemockte Temperatur liegt in einem plausiblen Pi-Betriebsbereich."""
+    monkeypatch.setattr("api.routes_system._collect_cpu_temp", lambda: 55.5)
+    val = client.get("/system/info").json()["cpu_temp_c"]
+    # Plausibilitätsprüfung: Raspberry Pi läuft zwischen 20 °C und 85 °C
+    assert 20.0 <= val <= 85.0

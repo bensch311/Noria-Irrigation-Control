@@ -12,6 +12,7 @@ Getestet:
   fmt_disk()                                    – Disk-Nutzung → lesbarer String
   fmt_memory()                                  – RAM-Nutzung → lesbarer String
   fmt_signal()                                  – WLAN-Signal → lesbarer String mit Qualität
+  fmt_temperature()                             – CPU-Temperatur → lesbarer deutscher String
   _json_or_none()                               – sichere JSON-Extraktion aus Response/None
   _load_frontend_config()                       – Config-Laden mit Fallback bei fehlendem File
   _read_max_valves_from_device_config()         – MAX_VALVES aus device_config.json
@@ -641,3 +642,51 @@ class TestReadSensorIds:
             encoding="utf-8",
         )
         assert h._read_sensor_ids_from_device_config() == [1, 2, 3]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fmt_temperature
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtTemperature:
+    """fmt_temperature(temp_c) → lesbarer deutscher Temperatur-String"""
+
+    def test_none_returns_dash(self):
+        """None → '–' (kein Wert verfügbar, z.B. kein vcgencmd)."""
+        assert h.fmt_temperature(None) == "–"
+
+    def test_typical_pi_temperature(self):
+        """Typische Pi-Betriebstemperatur wird korrekt formatiert."""
+        assert h.fmt_temperature(47.8) == "47,8 °C"
+
+    def test_decimal_separator_is_comma(self):
+        """Dezimaltrennzeichen ist Komma (deutsche Lokalisierung)."""
+        result = h.fmt_temperature(52.3)
+        assert "," in result
+        assert "." not in result
+
+    def test_always_one_decimal_place(self):
+        """Immer genau eine Nachkommastelle, auch bei glatten Werten."""
+        assert h.fmt_temperature(65.0) == "65,0 °C"
+
+    def test_unit_suffix_present(self):
+        """Ausgabe enthält '°C' als Einheit."""
+        result = h.fmt_temperature(50.0)
+        assert "°C" in result
+
+    def test_low_temperature(self):
+        """Niedrige Temperatur (z.B. kühle Umgebung nach Boot)."""
+        assert h.fmt_temperature(28.5) == "28,5 °C"
+
+    def test_high_temperature(self):
+        """Hohe Temperatur (nahe Throttling-Schwelle ~80 °C)."""
+        assert h.fmt_temperature(79.9) == "79,9 °C"
+
+    def test_zero_celsius(self):
+        """0,0 °C (theoretischer Grenzwert) – kein Crash."""
+        assert h.fmt_temperature(0.0) == "0,0 °C"
+
+    def test_returns_string(self):
+        """Rückgabewert ist immer ein String."""
+        assert isinstance(h.fmt_temperature(55.2), str)
+        assert isinstance(h.fmt_temperature(None), str)
