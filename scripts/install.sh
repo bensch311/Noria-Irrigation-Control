@@ -566,8 +566,12 @@ if [[ "$VALVE_DRIVER_MODE" == "i2c" ]]; then
     done
 
     if [[ -n "$BOOT_CONFIG_EARLY" ]]; then
-        if grep -q "dtparam=i2c_arm=on" "$BOOT_CONFIG_EARLY" 2>/dev/null; then
-            info "dtparam=i2c_arm=on bereits in $BOOT_CONFIG_EARLY – keine Änderung nötig"
+        if grep -q "^dtparam=i2c_arm=on" "$BOOT_CONFIG_EARLY" 2>/dev/null; then
+            info "dtparam=i2c_arm=on bereits aktiv in $BOOT_CONFIG_EARLY – keine Änderung nötig"
+        elif grep -q "^#.*dtparam=i2c_arm=on" "$BOOT_CONFIG_EARLY" 2>/dev/null; then
+            # Auskommentierte Zeile aktivieren statt neu anhängen
+            sed -i 's/^#[[:space:]]*dtparam=i2c_arm=on/dtparam=i2c_arm=on/' "$BOOT_CONFIG_EARLY"
+            warn "dtparam=i2c_arm=on war auskommentiert – wurde aktiviert (wirksam nach Neustart)"
         else
             echo "dtparam=i2c_arm=on" >> "$BOOT_CONFIG_EARLY"
             info "dtparam=i2c_arm=on zu $BOOT_CONFIG_EARLY hinzugefügt (wirksam nach Neustart)"
