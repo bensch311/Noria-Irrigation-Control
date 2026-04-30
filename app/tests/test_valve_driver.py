@@ -913,10 +913,10 @@ class TestI2cRelayValveDriver8RelayRemap:
     @pytest.mark.parametrize("zone,expected_mask", [
         (1, 0x01),
         (2, 0x04),
-        (3, 0x10),
-        (4, 0x40),
-        (5, 0x80),
-        (6, 0x20),
+        (3, 0x40),
+        (4, 0x10),
+        (5, 0x20),
+        (6, 0x80),
         (7, 0x08),
         (8, 0x02),
     ])
@@ -931,10 +931,10 @@ class TestI2cRelayValveDriver8RelayRemap:
     @pytest.mark.parametrize("zone,expected_mask", [
         (1, 0x01),
         (2, 0x04),
-        (3, 0x10),
-        (4, 0x40),
-        (5, 0x80),
-        (6, 0x20),
+        (3, 0x40),
+        (4, 0x10),
+        (5, 0x20),
+        (6, 0x80),
         (7, 0x08),
         (8, 0x02),
     ])
@@ -956,16 +956,16 @@ class TestI2cRelayValveDriver8RelayRemap:
     def test_open_multiple_zones_accumulates_remap_bitmask(self):
         """Mehrere open()-Aufrufe müssen die remappten Bitmasks korrekt akkumulieren.
 
-        Zone 1 (0x01) + Zone 3 (0x10) = 0x11 (nicht 0x05 wie bei linearem Mapping).
+        Zone 1 (0x01) + Zone 3 (0x40) = 0x41 (nicht 0x05 wie bei linearem Mapping).
         """
         driver, bus_mock = _make_i2c_driver(hat_type="8relay", i2c_address=0x27, num_zones=8)
         bus_mock.reset_mock()
 
         driver.open(1)  # 0x01
-        driver.open(3)  # 0x10
+        driver.open(3)  # 0x40
 
-        assert driver._state == 0x11, (
-            f"Zone 1+3 erwartet 0x11, erhalten 0x{driver._state:02X}"
+        assert driver._state == 0x41, (
+            f"Zone 1+3 erwartet 0x41, erhalten 0x{driver._state:02X}"
         )
 
     def test_close_removes_correct_remap_bit(self):

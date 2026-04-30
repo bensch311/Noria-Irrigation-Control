@@ -86,10 +86,10 @@ _REL8_CFG_REG         = 0x03   # RELAY8_CFG_REG_ADD → Config (0x00 = Ausgang)
 _REL8_RELAY_MASK: tuple[int, ...] = (
     0x01,  # Zone 1 → Bit 0
     0x04,  # Zone 2 → Bit 2
-    0x10,  # Zone 3 → Bit 4
-    0x40,  # Zone 4 → Bit 6
-    0x80,  # Zone 5 → Bit 7
-    0x20,  # Zone 6 → Bit 5
+    0x40,  # Zone 3 → Bit 6
+    0x10,  # Zone 4 → Bit 4
+    0x20,  # Zone 5 → Bit 5
+    0x80,  # Zone 6 → Bit 7
     0x08,  # Zone 7 → Bit 3
     0x02,  # Zone 8 → Bit 1
 )
