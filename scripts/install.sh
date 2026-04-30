@@ -309,14 +309,24 @@ if [[ "$VALVE_DRIVER_MODE" == "i2c" ]]; then
     echo
     echo "─── I2C-Konfiguration ──────────────────────────────────"
     if [[ "$RELAY_HAT_TYPE" == "8relay" ]]; then
-        echo "  Sequent 8-Relay HAT – Primäradresse: 0x38–0x3F"
-        echo "  (Alternativadresse: 0x20–0x27 – nur bei manuell umgelöteten Jumpern)"
-        I2C_ADDR_DEFAULT="0x38"
+        echo "  Sequent 8-Relay HAT – Adresse über DIP-Schalter (ID0/ID1/ID2):"
+        echo "  Alle Schalter OFF (Standard) = 0x27"
+        echo "  Alle Schalter ON             = 0x20"
+        echo "  Adressbereich: 0x20–0x27 (DIP-Schalter) oder 0x38–0x3F (ältere Board-Versionen)"
+        echo "  Tipp: 'i2cdetect -y 1' zeigt die tatsächliche Adresse des HAT."
+        I2C_ADDR_DEFAULT="0x27"
     else
-        echo "  Sequent 16-Relay HAT – Adresse: 0x20–0x27"
-        echo "  (Stack 0 = 0x20, Stack 1 = 0x21, ..., Stack 7 = 0x27)"
-        I2C_ADDR_DEFAULT="0x20"
+        echo "  Sequent 16-Relay HAT – Adresse über DIP-Schalter (ID0/ID1/ID2):"
+        echo "  Alle Schalter OFF (Standard) = 0x27"
+        echo "  Alle Schalter ON             = 0x20"
+        echo "  Adressbereich: 0x20–0x27"
+        echo "  Tipp: 'i2cdetect -y 1' zeigt die tatsächliche Adresse des HAT."
+        I2C_ADDR_DEFAULT="0x27"
     fi
+    echo
+    echo "  I2C-Bus: Auf dem Raspberry Pi ist Bus 1 der Standard-Bus"
+    echo "  (GPIO-Pins 3/SDA und 5/SCL). Bus 0 wird intern verwendet"
+    echo "  und ist im Normalbetrieb nicht zugänglich. Bitte Bus 1 wählen."
     echo
     read -rp "  I2C-Bus (0 oder 1) [1]: " I2C_BUS_IN
     I2C_BUS_IN="${I2C_BUS_IN:-1}"
@@ -351,7 +361,7 @@ if [[ "$VALVE_DRIVER_MODE" == "i2c" ]]; then
                 warn "    Adresse $I2C_ADDR_HEX ungültig für 16-Relay HAT (erlaubt: 0x20–0x27 = 32–39)"
             fi
         else  # 8relay
-            # 0x38–0x3F = 56–63 (Primär) oder 0x20–0x27 = 32–39 (Alternativ)
+            # 0x20–0x27 = 32–39 (DIP-Schalter, Standard) oder 0x38–0x3F = 56–63 (ältere Board-Versionen)
             if [[ ($I2C_ADDR_DEC -ge 56 && $I2C_ADDR_DEC -le 63) || \
                   ($I2C_ADDR_DEC -ge 32 && $I2C_ADDR_DEC -le 39) ]]; then
                 ADDR_VALID=true
