@@ -33,9 +33,10 @@ Bei I2cRelayValveDriver (Sequent Microsystems 8-Relay / 16-Relay HAT):
     (Default-Config nach Power-on: 0xFF = alle Inputs, Output-Latch: 0xFF).
   - Relay-Zustand wird als Bitmask in-memory gehalten (kein I2C-Readback).
   - 8relay:  Hardware-Remap erforderlich – PCA9554-Pins sind NICHT linear verdrahtet
-             (_REL8_RELAY_MASK, Quelle: relay8.h, Sequent GitHub). Ohne Remap werden
-             falsche physikalische Relais aktiviert.
-  - 16relay: Lineare Verdrahtung. Bit 0 = Zone 1, Bit N-1 = Zone N.
+             (_REL8_RELAY_MASK, Quelle: relay8.h, Sequent GitHub + Live-Test).
+  - 16relay: Hardware-Remap erforderlich – Bit-Reihenfolge ist gespiegelt.
+             Bit 0 (LSB) = physikalisch Relay 16, Bit 15 = Relay 1.
+             (_REL16_RELAY_MASK, Quelle: Live-Test auf Sequent 16-Relay HAT).
   - Bit=1: Relais zieht an (Ventil öffnet). Bit=0: Relais fällt ab.
   - close_all() ist best-effort: schreibt Register einzeln, loggt Fehler, wirft nicht.
   - cleanup() schließt den SMBus-Handle – IMMER nach close_all() aufrufen.
@@ -75,6 +76,12 @@ _REL16_OUTPORT_REG_LO = 0x02   # RELAY16_OUTPORT_REG_ADD → Port 0 (Relais 1–
 _REL16_OUTPORT_REG_HI = 0x03   # RELAY16_OUTPORT_REG_ADD+1 → Port 1 (Relais 9–16)
 _REL16_CFG_REG_LO     = 0x06   # RELAY16_CFG_REG_ADD → Port 0 Config (0x00 = Ausgang)
 _REL16_CFG_REG_HI     = 0x07   # RELAY16_CFG_REG_ADD+1 → Port 1 Config (0x00 = Ausgang)
+
+# 16-Relay HAT – Hardware-Remap: Bit-Reihenfolge ist auf der Platine gespiegelt.
+# Bit 0 (LSB) entspricht physikalisch Relay 16, Bit 15 (MSB) entspricht Relay 1.
+# Zone N → Bit (16 - N). Index 0 = Zone 1, Index 15 = Zone 16.
+# Quelle: Live-Test auf Sequent Microsystems 16-Relay HAT.
+_REL16_RELAY_MASK: tuple[int, ...] = tuple(1 << (15 - i) for i in range(16))
 
 # 8-Relay HAT – PCA9554-kompatibler 8-Bit I/O-Expander
 _REL8_OUTPORT_REG     = 0x01   # RELAY8_OUTPORT_REG_ADD → Port (Relais 1–8)
@@ -475,14 +482,14 @@ class I2cRelayValveDriver(BaseValveDriver):
     def _zone_bitmask(self, zone: int) -> int:
         """Gibt die Hardware-Bitmask für eine Zone zurück.
 
-        8relay:  Die PCA9554-Pins sind auf der Platine nicht linear verdrahtet.
-                 _REL8_RELAY_MASK bildet Zone 1–8 auf die korrekten Hardware-Bits ab.
-                 Ohne diesen Remap würden falsche physikalische Relais aktiviert.
-        16relay: Lineare Verdrahtung – Bit 0 = Zone 1, Bit N-1 = Zone N.
+        8relay:  PCA9554-Pins sind nicht linear verdrahtet → _REL8_RELAY_MASK.
+        16relay: Bit-Reihenfolge ist gespiegelt → _REL16_RELAY_MASK.
+                 Bit 0 (LSB) = physikalisch Relay 16, Bit 15 (MSB) = Relay 1.
+        Ohne diese Remaps werden falsche physikalische Relais aktiviert.
         """
         if self._hat_type == "8relay":
             return _REL8_RELAY_MASK[zone - 1]
-        return 1 << (zone - 1)
+        return _REL16_RELAY_MASK[zone - 1]
 
     def _safe_close_bus(self) -> None:
         """Schließt den SMBus-Handle ohne Exception zu werfen (für Cleanup bei Fehler)."""
